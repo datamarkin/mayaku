@@ -178,7 +178,13 @@ def _eval(
 
 @app.command("predict")
 def _predict(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    config: str = typer.Argument(
+        ...,
+        help=(
+            "Path to a YAML config OR a bundled config name like "
+            "`faster_rcnn_R_50_FPN_3x` (see `mayaku download --list` for names)."
+        ),
+    ),
     image: Path = typer.Argument(..., exists=True, dir_okay=False),
     weights: str | None = typer.Option(
         None,
@@ -192,7 +198,17 @@ def _predict(
     device: str | None = typer.Option(None, "--device"),
 ) -> None:
     """Run inference on a single image; print or save the detections."""
-    payload = run_predict(config, image, weights=weights, output=output, device=device)
+    config_path = Path(config)
+    if not config_path.is_file():
+        from mayaku import configs as bundled_configs
+
+        try:
+            config_path = bundled_configs.path(config)
+        except FileNotFoundError as e:
+            raise typer.BadParameter(
+                f"{config!r} is neither a YAML file nor a bundled config name. {e}"
+            ) from e
+    payload = run_predict(config_path, image, weights=weights, output=output, device=device)
     if output is None:
         typer.echo(json.dumps(payload, indent=2))
 

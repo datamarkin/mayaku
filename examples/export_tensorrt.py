@@ -51,8 +51,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Export a Mayaku model to TensorRT.")
     parser.add_argument("--model", default="faster_rcnn_R_50_FPN_3x")
-    parser.add_argument("--config", type=Path,
-                        default=REPO_ROOT / "configs/detection/faster_rcnn_R_50_FPN_3x.yaml")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="YAML config (default: bundled config matching --model)")
     parser.add_argument("--weights", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=Path("examples/outputs/model.engine"))
     parser.add_argument("--fp16", action="store_true",
@@ -64,13 +64,18 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1344)
     args = parser.parse_args()
 
+    if args.config is not None:
+        config_path: Path = args.config
+    else:
+        from mayaku import configs
+        config_path = configs.path(args.model)
     device = "cuda"
-    print(f"Config        : {args.config}")
+    print(f"Config        : {config_path}")
     print(f"Device        : {device} ({torch.cuda.get_device_name(0)})")
     print(f"FP16          : {args.fp16}")
     print(f"Workspace     : {args.workspace_gb:.1f} GiB")
 
-    cfg = load_yaml(args.config)
+    cfg = load_yaml(config_path)
     weights_path = args.weights or resolve_weights(args.model)
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model" in state:

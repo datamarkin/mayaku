@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mayaku"
-version = "1.0.0"
+version = "1.0.1"
 description = "Backend-portable detection / segmentation / keypoint library inspired by Detectron2."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -73,6 +73,14 @@ Homepage = "https://github.com/datamarkin/mayaku"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mayaku"]
+
+# Ship the 12 zoo configs inside the wheel at `mayaku/configs/`. Source
+# tree keeps them at top-level `configs/` for in-tree dev ergonomics;
+# force-include rewrites the destination at build time so installed
+# users don't need to clone the repo just to load a model. Resolver:
+# `mayaku.configs.path('faster_rcnn_R_50_FPN_3x')`.
+[tool.hatch.build.targets.wheel.force-include]
+"configs" = "mayaku/configs"
 
 [tool.ruff]
 line-length = 100

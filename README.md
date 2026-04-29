@@ -56,8 +56,18 @@ These numbers come from loading and **evaluating** D2's converged weights in May
 Pass a model name instead of a path; the CLI fetches it on first use:
 
 ```bash
-mayaku predict configs/detection/faster_rcnn_R_50_FPN_3x.yaml image.jpg \
-    --weights faster_rcnn_R_50_FPN_3x
+mayaku predict faster_rcnn_R_50_FPN_3x image.jpg --weights faster_rcnn_R_50_FPN_3x
+```
+
+The first positional arg is either a bundled config name (the 12 zoo configs ship inside the wheel) or a path to your own `.yaml`. List bundled names with `python -c "from mayaku import configs; print(*configs.list_all(), sep='\n')"`.
+
+For library use, `mayaku.configs` exposes the same set:
+
+```python
+from mayaku import configs
+cfg_path = configs.path("faster_rcnn_R_50_FPN_3x")  # → Path
+cfg_path = configs.faster_rcnn_R_50_FPN_3x          # attribute form, same Path
+cfg      = configs.load("faster_rcnn_R_50_FPN_3x")  # → MayakuConfig
 ```
 
 Or pre-stage with `mayaku download <name>` (all variants) or `mayaku download <name> --target <variant>`. Cached under `~/.cache/mayaku/v1/models/`, SHA256-verified.
@@ -159,8 +169,7 @@ The 12 zoo checkpoints are [already converted and hosted](#pre-converted-models)
 python tools/convert_d2_checkpoint.py your_model_final.pkl -o your_model.pth
 
 # Use the converted .pth like any other Mayaku checkpoint
-mayaku predict configs/detection/faster_rcnn_R_50_FPN_3x.yaml image.jpg \
-    --weights your_model.pth --device mps
+mayaku predict faster_rcnn_R_50_FPN_3x image.jpg --weights your_model.pth --device mps
 ```
 
 Covers Faster / Mask / Keypoint R-CNN with R-50 / R-101 / X-101_32x8d FPN — the same architectures Mayaku ships. Head-specific rename rules are inert when the source `.pkl` doesn't contain them, so a Faster R-CNN checkpoint converts cleanly without flags. See [`tools/README.md`](tools/README.md) for the full rename table and edge cases.

@@ -55,11 +55,17 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="Output directory (default: --images/detections/)")
     parser.add_argument("--model", default="faster_rcnn_R_50_FPN_3x",
                         help="Model name (auto-downloaded) or path to .pth")
-    parser.add_argument("--config", type=Path,
-                        default=REPO_ROOT / "configs/detection/faster_rcnn_R_50_FPN_3x.yaml")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="YAML config (default: bundled config matching --model)")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--device", default="auto", help="cpu | cuda | mps | auto")
     args = parser.parse_args()
+
+    if args.config is not None:
+        config_path: Path = args.config
+    else:
+        from mayaku import configs
+        config_path = configs.path(args.model)
 
     image_paths = sorted(
         p for p in args.images.iterdir()
@@ -74,7 +80,7 @@ def main() -> None:
     device = Device.auto().kind if args.device == "auto" else args.device
     print(f"Found {len(image_paths)} images  |  model={args.model}  |  device={device}")
 
-    cfg = load_yaml(args.config)
+    cfg = load_yaml(config_path)
     weights_path = resolve_weights(args.model)
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model" in state:

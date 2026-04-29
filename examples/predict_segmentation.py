@@ -66,21 +66,26 @@ def main() -> None:
     parser.add_argument("--image", type=Path, help="Path to image (default: COCO sample)")
     parser.add_argument("--model", default="mask_rcnn_R_50_FPN_3x",
                         help="Model name (auto-downloaded) or path to .pth")
-    parser.add_argument("--config", type=Path,
-                        default=REPO_ROOT / "configs/segmentation/mask_rcnn_R_50_FPN_3x.yaml")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="YAML config (default: bundled config matching --model)")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--device", default="auto", help="cpu | cuda | mps | auto")
     parser.add_argument("--output", type=Path, help="Save results JSON here")
     args = parser.parse_args()
 
+    if args.config is not None:
+        config_path: Path = args.config
+    else:
+        from mayaku import configs
+        config_path = configs.path(args.model)
     image_path = args.image or _ensure_sample_image()
     device = Device.auto().kind if args.device == "auto" else args.device
 
-    print(f"Config : {args.config}")
+    print(f"Config : {config_path}")
     print(f"Model  : {args.model}")
     print(f"Device : {device}")
 
-    cfg = load_yaml(args.config)
+    cfg = load_yaml(config_path)
     weights_path = resolve_weights(args.model)
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model" in state:

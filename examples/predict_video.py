@@ -98,8 +98,8 @@ def main() -> None:
     parser.add_argument("--video", type=str, default=None,
                         help="Path or webcam index (e.g. '0'); default: download highway.mp4")
     parser.add_argument("--model", default="faster_rcnn_R_50_FPN_3x")
-    parser.add_argument("--config", type=Path,
-                        default=REPO_ROOT / "configs/detection/faster_rcnn_R_50_FPN_3x.yaml")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="YAML config (default: bundled config matching --model)")
     parser.add_argument("--threshold", type=float, default=0.6)
     parser.add_argument("--device", default="auto", help="cpu | cuda | mps | auto")
     parser.add_argument("--output", type=Path,
@@ -114,15 +114,20 @@ def main() -> None:
     except ImportError as e:
         raise SystemExit("predict_video.py requires OpenCV: pip install opencv-python") from e
 
+    if args.config is not None:
+        config_path: Path = args.config
+    else:
+        from mayaku import configs
+        config_path = configs.path(args.model)
     video_spec = args.video if args.video else str(_ensure_sample_video())
     device = Device.auto().kind if args.device == "auto" else args.device
 
-    print(f"Config : {args.config}")
+    print(f"Config : {config_path}")
     print(f"Model  : {args.model}")
     print(f"Device : {device}")
     print(f"Source : {video_spec}")
 
-    cfg = load_yaml(args.config)
+    cfg = load_yaml(config_path)
     weights_path = resolve_weights(args.model)
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model" in state:

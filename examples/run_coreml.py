@@ -82,8 +82,8 @@ def main() -> None:
                         help="Exported .mlpackage (run examples/export_coreml.py first)")
     parser.add_argument("--image", type=Path, help="Path to image (default: COCO sample)")
     parser.add_argument("--model", default="faster_rcnn_R_50_FPN_3x")
-    parser.add_argument("--config", type=Path,
-                        default=REPO_ROOT / "configs/detection/faster_rcnn_R_50_FPN_3x.yaml")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="YAML config (default: bundled config matching --model)")
     parser.add_argument("--compute-units", default="CPU_AND_GPU",
                         choices=["CPU_ONLY", "CPU_AND_GPU", "CPU_AND_NE", "ALL"])
     parser.add_argument("--input-height", type=int, default=800)
@@ -99,15 +99,20 @@ def main() -> None:
             "Run `python examples/export_coreml.py` first."
         )
 
+    if args.config is not None:
+        config_path: Path = args.config
+    else:
+        from mayaku import configs
+        config_path = configs.path(args.model)
     image_path = args.image or _ensure_sample_image()
     device = Device.auto().kind if args.device == "auto" else args.device
 
-    print(f"Config        : {args.config}")
+    print(f"Config        : {config_path}")
     print(f"mlpackage     : {args.mlpackage}")
     print(f"Compute units : {args.compute_units}")
     print(f"Heads on      : {device}")
 
-    cfg = load_yaml(args.config)
+    cfg = load_yaml(config_path)
     weights_path = resolve_weights(args.model)
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model" in state:
