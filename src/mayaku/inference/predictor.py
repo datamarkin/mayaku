@@ -102,6 +102,66 @@ class Predictor:
             max_size_test=cfg.input.max_size_test,
         )
 
+    @classmethod
+    def from_pretrained(
+        cls,
+        name: str,
+        *,
+        weights: str | Path | None = None,
+        config: str | Path | None = None,
+        device: str = "auto",
+    ) -> Predictor:
+        """Build a fully-loaded :class:`Predictor` from a model name in one call.
+
+        This is the high-level zero-config constructor. ``name`` resolves
+        both the bundled YAML config (via :mod:`mayaku.configs`) and the
+        cached weights (via the model manifest). Override either
+        independently with ``weights=`` / ``config=``.
+
+        Args:
+            name: Bundled model name, e.g. ``"faster_rcnn_R_50_FPN_3x"``.
+            weights: Override the weights — accepts a model name (resolved
+                via the manifest) or a filesystem path to a ``.pth``.
+                Defaults to ``name``.
+            config: Override the config — accepts a bundled config name
+                (short or qualified ``task/name``) or a filesystem path
+                to a ``.yaml``. Defaults to ``name``.
+            device: ``"cpu" | "cuda" | "mps" | "auto"``. Defaults to
+                ``"auto"`` which picks the best available accelerator.
+
+        Example:
+            >>> from mayaku.inference import Predictor
+            >>> predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+            >>> instances = predictor("photo.jpg")
+        """
+        from mayaku import configs
+        from mayaku.backends.device import Device
+        from mayaku.cli._factory import build_detector
+        from mayaku.cli._weights import resolve_weights
+        from mayaku.config import load_yaml
+
+        if device == "auto":
+            device = Device.auto().kind
+
+        config_arg: str | Path = config if config is not None else name
+        if isinstance(config_arg, Path) or Path(str(config_arg)).is_file():
+            config_path = Path(str(config_arg))
+        else:
+            config_path = configs.path(str(config_arg))
+        cfg = load_yaml(config_path)
+
+        weights_path = resolve_weights(weights if weights is not None else name)
+        if weights_path is None:
+            raise ValueError(f"Could not resolve weights for {weights or name!r}")
+        state = torch.load(weights_path, map_location="cpu", weights_only=True)
+        if isinstance(state, dict) and "model" in state:
+            state = state["model"]
+        model = build_detector(cfg).eval()
+        model.load_state_dict(state)
+        model = model.to(torch.device(device))
+
+        return cls.from_config(cfg, model)
+
     # ------------------------------------------------------------------
     # Public call
     # ------------------------------------------------------------------

@@ -61,7 +61,17 @@ mayaku predict faster_rcnn_R_50_FPN_3x image.jpg --weights faster_rcnn_R_50_FPN_
 
 The first positional arg is either a bundled config name (the 12 zoo configs ship inside the wheel) or a path to your own `.yaml`. List bundled names with `python -c "from mayaku import configs; print(*configs.list_all(), sep='\n')"`.
 
-For library use, `mayaku.configs` exposes the same set:
+For library use, `Predictor.from_pretrained` takes you from a model name to detections in one call:
+
+```python
+from mayaku.inference import Predictor
+
+predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")  # auto: config + weights + device
+instances = predictor("photo.jpg")
+print(instances.pred_boxes.tensor, instances.scores, instances.pred_classes)
+```
+
+Override `weights=` / `config=` / `device=` independently if you need to. For lower-level access, `mayaku.configs` exposes the bundled YAMLs directly:
 
 ```python
 from mayaku import configs
@@ -253,24 +263,30 @@ Per-target details (what's *in* the exported graph, what stays Python-side, pari
 ## Quickstart — Python API
 
 ```python
-import torch
-from mayaku.cli._factory import build_detector
-from mayaku.config import load_yaml
 from mayaku.inference import Predictor
 
-cfg = load_yaml("configs/detection/faster_rcnn_R_50_FPN_3x.yaml")
-model = build_detector(cfg).eval()
-model.load_state_dict(
-    torch.load("runs/frcnn_r50/model_final.pth", map_location="cpu",
-               weights_only=True)
-)
-
-pred = Predictor.from_config(cfg, model)
-instances = pred("path/to/image.jpg")
+predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+instances = predictor("path/to/image.jpg")
 # -> mayaku.structures.Instances with .pred_boxes, .scores, .pred_classes
 #    (and .pred_masks / .pred_keypoints when the architecture asks for them),
 #    all in original-image pixel coordinates.
 ```
+
+Use your own checkpoint or override the device:
+
+```python
+predictor = Predictor.from_pretrained(
+    "faster_rcnn_R_50_FPN_3x",
+    weights="runs/frcnn_r50/model_final.pth",
+    device="cpu",
+)
+```
+
+For full manual control (custom config object, hand-built model, swapping the backbone for an exported runtime artifact), `Predictor.from_config(cfg, model)` is still available — that's the lower-level constructor `from_pretrained` wraps.
+
+## Examples
+
+Runnable end-to-end scripts live in [`examples/`](examples/) — minimal copy-paste templates for inference (single image, batch, video), fine-tuning, evaluation, and export to every deployment target. Most scripts take no arguments: `python examples/predict.py` downloads the model, fetches a sample image, prints detections. To adapt, edit the model-name literal in the file.
 
 For a complete fine-tuning script (custom dataset discovery, COCO eval hook, Mac-friendly defaults), see [`examples/finetune.py`](examples/finetune.py). For training your own loop, see [`docs/architecture.md`](docs/architecture.md) §"Engine" — `mayaku.engine.SimpleTrainer` / `AMPTrainer` are usable directly.
 
@@ -325,8 +341,7 @@ For the full honest comparison (including where D2 is still better), see [`docs/
 - **DINOv2 backbones** — ViT ladder (S / B / L / g) for stronger pretrained init, replacing the current ResNet/ResNeXt-only backbone surface. Not yet shipped.
 - **Training-from-scratch parity validation** — current parity numbers come from loading + evaluating D2's converged weights, not training to them.
 - **Opt-in cv2 image pipeline** — closes the recipe-level AP gap for users who want bit-tighter D2 parity.
-- **CI** — `ruff + mypy + pytest` matrix across CPU / MPS / CUDA on every push. Currently testing is manual.
-- **Expanded `examples/`** — minimal scripts for inference, fine-tuning, and per-target export.
+- **CI on accelerators** — Linux/CPU matrix runs on every push today (see the [CI badge](https://github.com/datamarkin/mayaku/actions/workflows/ci.yml) above); MPS and CUDA self-hosted runners are still manual.
 
 ## Documentation
 
@@ -345,7 +360,7 @@ mypy
 MAYAKU_DEVICE=cpu pytest          # also: mps, cuda
 ```
 
-`MAYAKU_DEVICE` selects which backend the test suite runs on. Tests marked `cuda` / `mps` / `multi_gpu` / `tensorrt` auto-skip when the active backend or the optional dependency isn't available. There is no CI yet — testing is manual, cross-machine.
+`MAYAKU_DEVICE` selects which backend the test suite runs on. Tests marked `cuda` / `mps` / `multi_gpu` / `tensorrt` auto-skip when the active backend or the optional dependency isn't available. CI runs the CPU subset on every push (`.github/workflows/ci.yml`); MPS and CUDA stay manual until self-hosted runners are wired up.
 
 ## License
 

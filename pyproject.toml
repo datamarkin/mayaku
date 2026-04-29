@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mayaku"
-version = "1.0.1"
+version = "1.1.0"
 description = "Backend-portable detection / segmentation / keypoint library inspired by Detectron2."
 readme = "README.md"
 requires-python = ">=3.10"
