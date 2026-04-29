@@ -1,0 +1,27 @@
+# Mayaku eval config matching Detectron2's faster_rcnn_R_50_FPN_1x.
+# Mirrors d2_configs/coco/detection/faster_rcnn_R_50_FPN_1x.yaml.
+# 1x and 3x configs are inference-identical; the schedule difference
+# only affects training.
+model:
+  meta_architecture: faster_rcnn
+  backbone:
+    name: resnet50
+    norm: FrozenBN
+    freeze_at: 2
+    # D2's MSRA-pretrained R-50 puts stride-2 in the 1x1 conv of
+    # res3/res4/res5; torchvision's default puts it on the 3x3.
+    # Loading D2 weights with the wrong placement produces silently
+    # wrong activations (same kernels, different downsampling step).
+    stride_in_1x1: true
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  # D2's caffe2-trained model-zoo .pkls don't divide by std; D2's
+  # Base-RCNN-FPN.yaml leaves PIXEL_STD at [1, 1, 1] for these configs.
+  pixel_std: [1.0, 1.0, 1.0]
+input:
+  min_size_test: 800
+  max_size_test: 1333

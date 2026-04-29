@@ -1,0 +1,19 @@
+# Manifest for tools/convert_all_d2.sh.
+# Tab-separated. Lines starting with `#` and blank lines are ignored.
+# Columns: config_name, family, mayaku_cfg, pkl_url, gt_json, exp_box_ap, exp_mask_ap, exp_kpt_ap
+# AP values are from https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md
+# Use `-` for AP fields that don't apply to the family.
+#
+# config_name	family	mayaku_cfg	pkl_url	gt_json	exp_box_ap	exp_mask_ap	exp_kpt_ap
+faster_rcnn_R_50_FPN_1x	faster_rcnn	configs/coco/detection/faster_rcnn_R_50_FPN_1x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Detection/faster_rcnn_R_50_FPN_1x/137257794/model_final_b275ba.pkl	instances_val2017.json	37.9	-	-
+faster_rcnn_R_50_FPN_3x	faster_rcnn	configs/coco/detection/faster_rcnn_R_50_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Detection/faster_rcnn_R_50_FPN_3x/137849458/model_final_280758.pkl	instances_val2017.json	40.2	-	-
+faster_rcnn_R_101_FPN_3x	faster_rcnn	configs/coco/detection/faster_rcnn_R_101_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Detection/faster_rcnn_R_101_FPN_3x/137851257/model_final_f6e8b1.pkl	instances_val2017.json	42.0	-	-
+faster_rcnn_X_101_32x8d_FPN_3x	faster_rcnn	configs/coco/detection/faster_rcnn_X_101_32x8d_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Detection/faster_rcnn_X_101_32x8d_FPN_3x/139173657/model_final_68b088.pkl	instances_val2017.json	43.0	-	-
+mask_rcnn_R_50_FPN_1x	mask_rcnn	configs/coco/segmentation/mask_rcnn_R_50_FPN_1x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_1x/137260431/model_final_a54504.pkl	instances_val2017.json	38.6	35.2	-
+mask_rcnn_R_50_FPN_3x	mask_rcnn	configs/coco/segmentation/mask_rcnn_R_50_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl	instances_val2017.json	41.0	37.2	-
+mask_rcnn_R_101_FPN_3x	mask_rcnn	configs/coco/segmentation/mask_rcnn_R_101_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x/138205316/model_final_a3ec72.pkl	instances_val2017.json	42.9	38.6	-
+mask_rcnn_X_101_32x8d_FPN_3x	mask_rcnn	configs/coco/segmentation/mask_rcnn_X_101_32x8d_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-InstanceSegmentation/mask_rcnn_X_101_32x8d_FPN_3x/139653917/model_final_2d9806.pkl	instances_val2017.json	44.3	39.5	-
+keypoint_rcnn_R_50_FPN_1x	keypoint_rcnn	configs/coco/keypoints/keypoint_rcnn_R_50_FPN_1x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Keypoints/keypoint_rcnn_R_50_FPN_1x/137261548/model_final_04e291.pkl	person_keypoints_val2017.json	53.6	-	64.0
+keypoint_rcnn_R_50_FPN_3x	keypoint_rcnn	configs/coco/keypoints/keypoint_rcnn_R_50_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x/137849621/model_final_a6e10b.pkl	person_keypoints_val2017.json	55.4	-	65.5
+keypoint_rcnn_R_101_FPN_3x	keypoint_rcnn	configs/coco/keypoints/keypoint_rcnn_R_101_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Keypoints/keypoint_rcnn_R_101_FPN_3x/138363331/model_final_997cc7.pkl	person_keypoints_val2017.json	56.4	-	66.1
+keypoint_rcnn_X_101_32x8d_FPN_3x	keypoint_rcnn	configs/coco/keypoints/keypoint_rcnn_X_101_32x8d_FPN_3x.yaml	https://dl.fbaipublicfiles.com/detectron2/COCO-Keypoints/keypoint_rcnn_X_101_32x8d_FPN_3x/139686956/model_final_5ad38f.pkl	person_keypoints_val2017.json	57.3	-	66.0

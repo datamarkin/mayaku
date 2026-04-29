@@ -1,0 +1,23 @@
+# Mayaku eval config matching Detectron2's faster_rcnn_X_101_32x8d_FPN_3x.
+# X-101 in D2 is a caffe2 model: stride-2 stays on the 3x3 (the
+# torchvision-style placement) and PIXEL_STD is the standard ImageNet
+# std (BGR in D2, RGB-flipped here for Mayaku's RGB-native pipeline).
+model:
+  meta_architecture: faster_rcnn
+  backbone:
+    name: resnext101_32x8d
+    norm: FrozenBN
+    freeze_at: 2
+    stride_in_1x1: false
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  # D2 X-101 PIXEL_STD = [57.375, 57.120, 58.395] in BGR; RGB-flipped
+  # for Mayaku.
+  pixel_std: [58.395, 57.120, 57.375]
+input:
+  min_size_test: 800
+  max_size_test: 1333

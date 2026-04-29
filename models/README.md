@@ -1,0 +1,1 @@
+# Mayaku models directory

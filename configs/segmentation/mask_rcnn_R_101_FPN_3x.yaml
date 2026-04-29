@@ -1,0 +1,20 @@
+# Mayaku eval config matching Detectron2's mask_rcnn_R_101_FPN_3x.
+model:
+  meta_architecture: mask_rcnn
+  mask_on: true
+  backbone:
+    name: resnet101
+    norm: FrozenBN
+    freeze_at: 2
+    stride_in_1x1: true
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  roi_mask_head: {}
+  pixel_std: [1.0, 1.0, 1.0]
+input:
+  min_size_test: 800
+  max_size_test: 1333

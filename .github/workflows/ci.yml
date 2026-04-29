@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel previous runs on the same branch / PR when a new one starts.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+
+  typecheck:
+    name: Type-check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # mypy needs the optional extras' types in scope (onnx, openvino).
+      # coreml + tensorrt are intentionally excluded — coremltools is
+      # macOS-only and tensorrt requires CUDA. Both are listed in
+      # `[[tool.mypy.overrides]]` with `ignore_missing_imports = true`.
+      - run: pip install -e '.[dev,onnx,openvino]'
+      - run: mypy
+
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e '.[dev,onnx,openvino]'
+      # onnxruntime is intentionally not in `[onnx]` (CPU vs GPU wheels
+      # differ); install the CPU build explicitly so the `onnx`-marked
+      # tests can actually run.
+      - run: pip install onnxruntime
+      # Skip markers that need hardware or platform we don't have here:
+      #   cuda / multi_gpu / tensorrt — no NVIDIA GPU
+      #   mps                       — no Apple Silicon
+      #   coreml                    — macOS-only
+      #   slow                      — keep PR feedback fast
+      - run: >
+          pytest
+          -m "not cuda and not mps and not multi_gpu and not coreml and not tensorrt and not slow"
+          --cov=mayaku
+          --cov-report=term-missing
