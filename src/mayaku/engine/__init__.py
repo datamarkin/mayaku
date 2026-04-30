@@ -7,6 +7,7 @@ from mayaku.engine.callbacks import (
     HookBase,
     IterationTimer,
     LRScheduler,
+    MemoryTrim,
     MetricsPrinter,
     PeriodicCheckpointer,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "HookBase",
     "IterationTimer",
     "LRScheduler",
+    "MemoryTrim",
     "MetricsPrinter",
     "ModelEMA",
     "PeriodicCheckpointer",

@@ -194,6 +194,11 @@ def run_train(
         mask_format=cfg.input.mask_format,
         keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn",
         metadata=metadata if cfg.model.meta_architecture == "keypoint_rcnn" else None,
+        # SerializedList returns a fresh dict on every __getitem__, so
+        # the mapper's defensive deepcopy is redundant — and skipping it
+        # removes the dominant per-iter source of small-Python-object
+        # churn that drives glibc malloc fragmentation.
+        deepcopy_input=False,
     )
 
     # Build the active multi-sample augmentation list. When any prob is

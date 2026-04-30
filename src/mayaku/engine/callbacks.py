@@ -36,6 +36,7 @@ __all__ = [
     "HookBase",
     "IterationTimer",
     "LRScheduler",
+    "MemoryTrim",
     "MetricsPrinter",
     "PeriodicCheckpointer",
 ]
@@ -119,6 +120,65 @@ class LRScheduler(_BaseHook):
 
     def after_step(self) -> None:
         self.scheduler.step()
+
+
+# ---------------------------------------------------------------------------
+# MemoryTrim
+# ---------------------------------------------------------------------------
+
+
+class MemoryTrim(_BaseHook):
+    """Periodically force the Python GC and return free heap to the OS.
+
+    Long training runs accumulate two kinds of host-RAM pressure that
+    don't show up on the GPU:
+
+    1. **Python GC cycles.** Reference cycles (e.g. mutual references
+       inside augmentation pipelines) sit in the cyclic GC's young
+       generation and are reclaimed only when CPython's heuristic
+       triggers. A periodic explicit ``gc.collect()`` keeps the cycle
+       backlog bounded.
+
+    2. **glibc malloc fragmentation.** glibc's default allocator rarely
+       returns small freed regions to the OS — the resident-set drifts
+       upward over a long run even when the live working-set stays
+       bounded. ``malloc_trim(0)`` forces a release. No-op on
+       non-glibc platforms (the ctypes load fails silently).
+
+    Args:
+        period: Trim every Nth iteration (matched on ``trainer.iter``).
+            Iteration 0 is skipped. Default 1000 — cheap relative to a
+            ~0.3 s/iter training step but frequent enough to keep the
+            heap from drifting tens of GB.
+
+    Has no effect on GPU memory; that's PyTorch's caching allocator and
+    has its own knobs.
+    """
+
+    def __init__(self, *, period: int = 1000) -> None:
+        if period <= 0:
+            raise ValueError(f"period must be > 0; got {period}")
+        self.period = period
+        self._libc: Any = None
+        try:
+            import ctypes
+
+            self._libc = ctypes.CDLL("libc.so.6")
+        except OSError:
+            # Non-glibc platform (macOS / Windows / musl) — gc.collect
+            # alone still helps with Python-side cycles.
+            self._libc = None
+
+    def after_step(self) -> None:
+        assert self.trainer is not None, "trainer reference not bound"
+        it = self.trainer.iter + 1  # 1-indexed for the modulo check
+        if it % self.period != 0:
+            return
+        import gc as _gc
+
+        _gc.collect()
+        if self._libc is not None:
+            self._libc.malloc_trim(0)
 
 
 # ---------------------------------------------------------------------------

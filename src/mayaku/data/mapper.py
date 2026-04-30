@@ -89,11 +89,13 @@ class DatasetMapper:
         mask_format: MaskFormat = "polygon",
         keypoint_on: bool = False,
         metadata: Metadata | None = None,
+        deepcopy_input: bool = True,
     ) -> None:
         self.is_train = is_train
         self.mask_format: MaskFormat = mask_format
         self.keypoint_on = keypoint_on
         self.metadata = metadata
+        self.deepcopy_input = deepcopy_input
         flip_indices: tuple[int, ...] | None = None
         if keypoint_on:
             if metadata is None or metadata.keypoint_flip_indices is None:
@@ -106,8 +108,13 @@ class DatasetMapper:
 
     def __call__(self, dataset_dict: dict[str, Any]) -> dict[str, Any]:
         # Detectron2 deepcopies the dict so downstream mutation doesn't
-        # bleed back into the dataset cache; same here.
-        dd = copy.deepcopy(dataset_dict)
+        # bleed back into the dataset cache. When the input came from a
+        # :class:`mayaku.data.SerializedList` (the train CLI's default)
+        # every dict is already a fresh ``pickle.loads`` allocation, so
+        # the deepcopy is wasted — and on a 90k-iter run it's the single
+        # biggest source of small-object churn that drives glibc malloc
+        # fragmentation. ``deepcopy_input=False`` skips it.
+        dd = copy.deepcopy(dataset_dict) if self.deepcopy_input else dataset_dict
         # Multi-sample augmentations (Mosaic / MixUp / CopyPaste) supply a
         # pre-composed image directly via ``__image`` — they've already
         # combined N source files in their own coordinate space and there
