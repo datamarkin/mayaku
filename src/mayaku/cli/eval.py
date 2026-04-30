@@ -10,11 +10,12 @@ metrics dict.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from mayaku.backends.mps import apply_mps_environment
 from mayaku.cli._factory import build_detector
@@ -24,6 +25,7 @@ from mayaku.data import (
     DatasetMapper,
     InferenceSampler,
     ResizeShortestEdge,
+    SerializedList,
     build_coco_metadata,
     load_coco_json,
     trivial_batch_collator,
@@ -31,6 +33,28 @@ from mayaku.data import (
 from mayaku.engine import COCOEvaluator, inference_on_dataset
 
 __all__ = ["run_eval"]
+
+
+class _LazyMappedDataset(Dataset[dict[str, Any]]):
+    """Map-style dataset that runs the mapper on demand.
+
+    Avoids the ~50 GB RAM blow-up from eagerly materialising every
+    val image as a float32 tensor before iteration starts. The
+    DataLoader requests one index at a time and the mapper only ever
+    has one decoded image in flight.
+    """
+
+    def __init__(
+        self, dicts: Sequence[dict[str, Any]], mapper: DatasetMapper
+    ) -> None:
+        self._dicts = dicts
+        self._mapper = mapper
+
+    def __len__(self) -> int:
+        return len(self._dicts)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        return self._mapper(self._dicts[idx])
 
 
 def run_eval(
@@ -136,11 +160,16 @@ def run_eval(
         is_train=False,
         keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn",
         metadata=metadata if cfg.model.meta_architecture == "keypoint_rcnn" else None,
+        deepcopy_input=False,
     )
-    mapped: list[dict[str, Any]] = [mapper(dd) for dd in dataset_dicts]
+    # Lazy mapping — eagerly applying the mapper materialises every
+    # decoded image as a float32 tensor (~10 MB each on COCO val2017).
+    # For 5k images that's ~50 GB pinned in RAM. The DataLoader pulls
+    # one at a time on demand instead.
+    mapped = _LazyMappedDataset(SerializedList(dataset_dicts), mapper)
     sampler = InferenceSampler(len(mapped))
     loader: DataLoader[Any] = DataLoader(
-        mapped,  # type: ignore[arg-type]
+        mapped,
         batch_size=1,
         sampler=sampler,
         num_workers=0,

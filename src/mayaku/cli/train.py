@@ -362,11 +362,16 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
         is_train=False,
         keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn",
         metadata=metadata if cfg.model.meta_architecture == "keypoint_rcnn" else None,
+        deepcopy_input=False,
     )
-    mapped: list[dict[str, Any]] = [mapper(dd) for dd in dataset_dicts]
+    # Lazy mapping — running ``mapper`` over every val dict eagerly
+    # would hold ~50 GB of float32 image tensors in RAM for the whole
+    # training run (5k images × ~10 MB each on COCO val2017). The
+    # DataLoader fetches one at a time on demand instead.
+    mapped: Any = _MappedList(SerializedList(dataset_dicts), mapper)
     sampler = InferenceSampler(len(mapped))
     return DataLoader(
-        mapped,  # type: ignore[arg-type]
+        mapped,
         batch_size=1,
         sampler=sampler,
         num_workers=0,
