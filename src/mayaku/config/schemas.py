@@ -389,6 +389,12 @@ class SolverConfig(_BaseModel):
     """
 
     ims_per_batch: Annotated[int, Field(gt=0)] = 16
+    # Gradient accumulation: divide effective batch into ``grad_accum_steps``
+    # micro-batches of ``ims_per_batch``. Memory scales with the micro-batch
+    # only, so this is the standard knob for fitting a large effective batch
+    # into a small GPU. Effective batch = ``ims_per_batch * grad_accum_steps``.
+    # ``base_lr`` should be tuned against the effective batch, not the micro.
+    grad_accum_steps: Annotated[int, Field(ge=1)] = 1
     base_lr: Annotated[float, Field(gt=0.0)] = 0.02
     lr_scheduler_name: Literal["WarmupMultiStepLR", "WarmupCosineLR"] = "WarmupMultiStepLR"
     steps: tuple[int, ...] = (210_000, 250_000)

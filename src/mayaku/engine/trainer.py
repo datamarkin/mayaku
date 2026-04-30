@@ -127,15 +127,19 @@ class SimpleTrainer(TrainerBase):
         *,
         grad_clip_norm: float | None = None,
         grad_clip_type: GradClipType = "norm",
+        grad_accum_steps: int = 1,
     ) -> None:
         super().__init__()
         if grad_clip_type not in ("value", "norm"):
             raise ValueError(f"grad_clip_type must be 'value' or 'norm'; got {grad_clip_type!r}")
+        if grad_accum_steps < 1:
+            raise ValueError(f"grad_accum_steps must be >= 1; got {grad_accum_steps}")
         self.model = model
         self.data_loader = data_loader
         self.optimizer = optimizer
         self.grad_clip_norm = grad_clip_norm
         self.grad_clip_type: GradClipType = grad_clip_type
+        self.grad_accum_steps = int(grad_accum_steps)
         self._data_iter: Any = None
 
     def _next_batch(self) -> Sequence[Mapping[str, Any]]:
@@ -178,16 +182,33 @@ class SimpleTrainer(TrainerBase):
                     torch.nn.utils.clip_grad_norm_(p, max_norm=self.grad_clip_norm)
 
     def run_step(self) -> None:
-        batch = self._next_batch()
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        loss_dict = self.model(batch)
-        total = _sum_loss(loss_dict)
-        total.backward()  # type: ignore[no-untyped-call]
+        # Gradient accumulation: forward+backward over ``grad_accum_steps``
+        # micro-batches, scaling each loss by 1/N so the SUMMED gradients
+        # equal the gradient of the mean loss across the full effective
+        # batch. ``optimizer.step()`` and grad clipping fire once per
+        # ``run_step`` (i.e. once per effective iteration).
+        accum_total = 0.0
+        accum_dict: dict[str, float] = {}
+        for _ in range(self.grad_accum_steps):
+            batch = self._next_batch()
+            loss_dict = self.model(batch)
+            micro_total = _sum_loss(loss_dict) / self.grad_accum_steps
+            micro_total.backward()  # type: ignore[no-untyped-call]
+            # Track raw (un-scaled) loss values for the metrics record.
+            accum_total += float(micro_total.detach().item()) * self.grad_accum_steps
+            for k, v in loss_dict.items():
+                accum_dict[k] = accum_dict.get(k, 0.0) + float(v.detach().item())
         if self.grad_clip_norm is not None:
             self._clip_grads()
         self.optimizer.step()
-        self._record(loss_dict, total)
+        # Mean across micro-batches for the metrics record.
+        n = self.grad_accum_steps
+        self._record_floats(
+            {k: v / n for k, v in accum_dict.items()},
+            accum_total / n,
+        )
 
     def _record(self, loss_dict: Mapping[str, Tensor], total: Tensor) -> None:
         self.last_loss = float(total.detach().item())
@@ -195,6 +216,15 @@ class SimpleTrainer(TrainerBase):
             "total_loss": self.last_loss,
             **{k: float(v.detach().item()) for k, v in loss_dict.items()},
         }
+
+    def _record_floats(self, loss_dict: Mapping[str, float], total: float) -> None:
+        """Same shape as :meth:`_record` but with already-evaluated floats.
+
+        Used by gradient-accumulation paths that have already reduced the
+        per-micro-batch tensors to scalars across the accumulation loop.
+        """
+        self.last_loss = total
+        self.storage = {"total_loss": total, **dict(loss_dict)}
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +254,7 @@ class AMPTrainer(SimpleTrainer):
         amp_dtype: str = "fp16",
         grad_clip_norm: float | None = None,
         grad_clip_type: GradClipType = "norm",
+        grad_accum_steps: int = 1,
     ) -> None:
         super().__init__(
             model,
@@ -231,6 +262,7 @@ class AMPTrainer(SimpleTrainer):
             optimizer,
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
+            grad_accum_steps=grad_accum_steps,
         )
         if amp_dtype not in ("fp16", "bf16"):
             raise ValueError(f"amp_dtype must be 'fp16' or 'bf16'; got {amp_dtype!r}")
@@ -249,21 +281,35 @@ class AMPTrainer(SimpleTrainer):
             self.scaler = NullGradScaler()
 
     def run_step(self) -> None:
-        batch = self._next_batch()
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        with autocast(self.device, dtype=_torch_dtype(self.amp_dtype)):
-            loss_dict = self.model(batch)
-            total = _sum_loss(loss_dict)
-        self.scaler.scale(total).backward()  # type: ignore[no-untyped-call]
+        # Same accumulation pattern as :meth:`SimpleTrainer.run_step`,
+        # with ``scaler.scale(...).backward()`` per micro-batch but
+        # ``scaler.unscale_`` / ``scaler.step`` / ``scaler.update``
+        # only once per effective iteration. Unscale fires before grad
+        # clip so the clip threshold is in real-gradient units regardless
+        # of the scaler's loss scale.
+        accum_total = 0.0
+        accum_dict: dict[str, float] = {}
+        for _ in range(self.grad_accum_steps):
+            batch = self._next_batch()
+            with autocast(self.device, dtype=_torch_dtype(self.amp_dtype)):
+                loss_dict = self.model(batch)
+                micro_total = _sum_loss(loss_dict) / self.grad_accum_steps
+            self.scaler.scale(micro_total).backward()  # type: ignore[no-untyped-call]
+            accum_total += float(micro_total.detach().item()) * self.grad_accum_steps
+            for k, v in loss_dict.items():
+                accum_dict[k] = accum_dict.get(k, 0.0) + float(v.detach().item())
         if self.grad_clip_norm is not None:
-            # Unscale before clipping so the clip threshold is in
-            # real-gradient units regardless of the scaler's loss scale.
             self.scaler.unscale_(self.optimizer)
             self._clip_grads()
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        self._record(loss_dict, total)
+        n = self.grad_accum_steps
+        self._record_floats(
+            {k: v / n for k, v in accum_dict.items()},
+            accum_total / n,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -195,6 +195,7 @@ def run_train(
             amp_dtype=cfg.solver.amp_dtype,
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
+            grad_accum_steps=cfg.solver.grad_accum_steps,
         )
     else:
         trainer = SimpleTrainer(
@@ -203,6 +204,7 @@ def run_train(
             optimizer,
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
+            grad_accum_steps=cfg.solver.grad_accum_steps,
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
