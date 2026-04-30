@@ -25,15 +25,27 @@ from mayaku.data.transforms.augmentation import (
 )
 from mayaku.data.transforms.base import Transform, TransformList
 from mayaku.data.transforms.geometry import HFlipTransform, ResizeTransform
+from mayaku.data.transforms.photometric import (
+    BrightnessTransform,
+    ContrastTransform,
+    HueShiftTransform,
+    RandomColorJitter,
+    SaturationTransform,
+)
 
 __all__ = [
     "AugInput",
     "Augmentation",
     "AugmentationList",
+    "BrightnessTransform",
+    "ContrastTransform",
     "HFlipTransform",
+    "HueShiftTransform",
+    "RandomColorJitter",
     "RandomFlip",
     "ResizeShortestEdge",
     "ResizeTransform",
+    "SaturationTransform",
     "Transform",
     "TransformList",
 ]

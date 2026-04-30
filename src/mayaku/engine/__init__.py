@@ -20,6 +20,7 @@ from mayaku.engine.distributed import (
     launch,
     synchronize,
 )
+from mayaku.engine.ema import EMAHook, ModelEMA
 from mayaku.engine.evaluator import (
     COCOEvaluator,
     DatasetEvaluator,
@@ -33,11 +34,13 @@ __all__ = [
     "AMPTrainer",
     "COCOEvaluator",
     "DatasetEvaluator",
+    "EMAHook",
     "EvalHook",
     "HookBase",
     "IterationTimer",
     "LRScheduler",
     "MetricsPrinter",
+    "ModelEMA",
     "PeriodicCheckpointer",
     "SimpleTrainer",
     "TrainerBase",

@@ -23,8 +23,10 @@ from mayaku.cli._factory import build_detector
 from mayaku.config import MayakuConfig, dump_yaml, load_yaml
 from mayaku.data import (
     AspectRatioGroupedDataset,
+    Augmentation,
     DatasetMapper,
     InferenceSampler,
+    RandomColorJitter,
     RandomFlip,
     ResizeShortestEdge,
     TrainingSampler,
@@ -35,10 +37,12 @@ from mayaku.data import (
 from mayaku.engine import (
     AMPTrainer,
     COCOEvaluator,
+    EMAHook,
     EvalHook,
     IterationTimer,
     LRScheduler,
     MetricsPrinter,
+    ModelEMA,
     PeriodicCheckpointer,
     SimpleTrainer,
     build_lr_scheduler,
@@ -135,15 +139,30 @@ def run_train(
 
     metadata = build_coco_metadata(name="cli_train", json_path=coco_gt_json)
     dataset_dicts = load_coco_json(coco_gt_json, image_root, metadata)
+    augmentations: list[Augmentation] = [
+        ResizeShortestEdge(
+            cfg.input.min_size_train,
+            max_size=cfg.input.max_size_train,
+            sample_style=cfg.input.min_size_train_sampling,
+        ),
+        RandomFlip(prob=0.5 if cfg.input.random_flip == "horizontal" else 0.0),
+    ]
+    if cfg.input.color_jitter_enabled:
+        # Photometric jitter must run AFTER geometric ops (resize / flip):
+        # the colour-space ops are channel-wise so they don't care about
+        # spatial layout, but applying them on the smaller resized image
+        # is ~3-4× cheaper per step than applying on the original.
+        augmentations.append(
+            RandomColorJitter(
+                brightness=cfg.input.color_jitter_brightness,
+                contrast=cfg.input.color_jitter_contrast,
+                saturation=cfg.input.color_jitter_saturation,
+                hue=cfg.input.color_jitter_hue,
+                prob=cfg.input.color_jitter_prob,
+            )
+        )
     mapper = DatasetMapper(
-        [
-            ResizeShortestEdge(
-                cfg.input.min_size_train,
-                max_size=cfg.input.max_size_train,
-                sample_style=cfg.input.min_size_train_sampling,
-            ),
-            RandomFlip(prob=0.5 if cfg.input.random_flip == "horizontal" else 0.0),
-        ],
+        augmentations,
         is_train=True,
         mask_format=cfg.input.mask_format,
         keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn",
@@ -199,6 +218,21 @@ def run_train(
         MetricsPrinter(optimizer=optimizer, period=log_period, timer=timer),
         PeriodicCheckpointer(model, output_dir, cfg.solver.checkpoint_period, optimizer=optimizer),
     ]
+
+    # EMA — register AFTER the live-model checkpointer so the EMA update
+    # step doesn't fight the live save. The EMA shadow is checkpointed to
+    # `output_dir/ema/` so the user can pick whichever variant they want
+    # to ship; the EMA weights typically score 0.3-0.5 AP higher.
+    if cfg.solver.ema_enabled:
+        ema = ModelEMA(model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
+        hooks.append(EMAHook(ema, model))
+        hooks.append(
+            PeriodicCheckpointer(
+                ema.shadow,
+                output_dir / "ema",
+                cfg.solver.checkpoint_period,
+            )
+        )
     if cfg.test.eval_period > 0:
         assert val_json is not None and val_image_root is not None  # validated above
         val_loader = _build_val_loader(cfg, val_json, val_image_root)

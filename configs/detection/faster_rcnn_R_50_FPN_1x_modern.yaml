@@ -1,0 +1,60 @@
+# Modernized 1x training recipe — same architecture as faster_rcnn_R_50_FPN_1x.yaml,
+# Phase 1 modernization recipe applied. Used for fast iteration during recipe
+# development; 1x converges in 30% of 3x compute, and a recipe that beats the
+# baseline at 1x almost certainly beats it at 3x.
+#
+# Differences vs faster_rcnn_R_50_FPN_1x.yaml:
+#   - Explicit 1x schedule (90k iters; default schema is 3x = 270k)
+#   - Cosine LR decay instead of WarmupMultiStepLR
+#   - Photometric color jitter enabled
+#   - EMA weight averaging enabled
+#
+# Expected AP delta vs the 37.9 baseline at 1x: +1 to +2 AP (target ≥ 39 AP).
+# If the gain is < +1 AP, the augmentation pipeline has a bug — debug before
+# scaling to 3x.
+model:
+  meta_architecture: faster_rcnn
+  backbone:
+    name: resnet50
+    norm: FrozenBN
+    freeze_at: 2
+    stride_in_1x1: true
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  pixel_std: [1.0, 1.0, 1.0]
+
+input:
+  min_size_test: 800
+  max_size_test: 1333
+  # Modernization: colour jitter applied after the
+  # geometric augs. Doesn't touch bboxes / masks / keypoints — pure pixel-
+  # value modification, no annotation update needed.
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  ims_per_batch: 16
+  base_lr: 0.02
+  # 1x schedule: 90k iters with LR decay milestones kept for schema
+  # validation, but they're inert under WarmupCosineLR (which uses a
+  # smooth half-cosine decay over [warmup_iters, max_iter) instead).
+  max_iter: 90_000
+  steps: [60_000, 80_000]
+  warmup_iters: 1_000
+  warmup_factor: 0.001
+  warmup_method: linear
+  lr_scheduler_name: WarmupCosineLR
+  # Modernization: EMA shadow tracks live weights with warmup ramp.
+  # Final-checkpoint EMA weights typically score 0.3-0.5 AP higher than
+  # the live weights. Saved separately under output_dir/ema/.
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2_000.0

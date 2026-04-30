@@ -364,6 +364,19 @@ class InputConfig(_BaseModel):
     mask_format: Literal["polygon", "bitmask"] = "polygon"
     random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 
+    # Photometric augmentation (Phase 1 modernization). Each delta is the
+    # max deviation from no-op; a delta of 0 disables that component. The
+    # defaults below match HSV-V/S/H knobs translated
+    # into mayaku's (brightness, contrast, saturation, hue) parameterisation.
+    # Disabled by default to preserve D2-replication; enable in modernized
+    # configs.
+    color_jitter_enabled: bool = False
+    color_jitter_brightness: Annotated[float, Field(ge=0.0, le=1.0)] = 0.4
+    color_jitter_contrast: Annotated[float, Field(ge=0.0, le=1.0)] = 0.4
+    color_jitter_saturation: Annotated[float, Field(ge=0.0, le=1.0)] = 0.7
+    color_jitter_hue: Annotated[float, Field(ge=0.0, le=0.5)] = 0.015
+    color_jitter_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.5
+
 
 class SolverConfig(_BaseModel):
     """Optimizer and LR schedule.
@@ -398,6 +411,15 @@ class SolverConfig(_BaseModel):
     clip_gradients_enabled: bool = False
     clip_gradients_value: Annotated[float, Field(gt=0.0)] = 1.0
     clip_gradients_type: Literal["value", "norm"] = "value"
+
+    # Exponential moving average of model weights (Phase 1 modernization).
+    # When enabled, an EMA shadow tracks the live weights at every step
+    # and a parallel EMA checkpoint is saved alongside the live one.
+    # Default off so D2-replication training runs are bit-identical to
+    # the existing 40.2-AP baseline.
+    ema_enabled: bool = False
+    ema_decay: Annotated[float, Field(ge=0.0, le=1.0)] = 0.9999
+    ema_tau: Annotated[float, Field(gt=0.0)] = 2000.0
 
     @model_validator(mode="after")
     def _check_schedule(self) -> SolverConfig:
