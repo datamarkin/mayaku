@@ -41,10 +41,16 @@ input:
   color_jitter_prob: 0.5
 
 solver:
-  # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
-  # GPU keep ims_per_batch=16, grad_accum_steps=1 (the D2 1x baseline).
-  # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
-  # gradients are mathematically identical, AP target unchanged.
+  # ``ims_per_batch`` is the PER-RANK batch size. The effective batch
+  # ``base_lr`` is tuned against (linear scaling rule) is:
+  #     effective = ims_per_batch * world_size * grad_accum_steps
+  # Three recipes that all hit effective=16 (the D2 1x baseline):
+  #   * single 24 GB GPU      → world=1, ims=16, accum=1   (~25h on A100)
+  #   * single 12 GB GPU      → world=1, ims=8,  accum=2   (~25h, slow GPU dominates)
+  #   * dual 24 GB+12 GB DDP  → world=2, ims=8,  accum=1   (~12-15h, recommended)
+  # DDP scales nearly linearly because each rank does only 1/world of the
+  # per-iter compute. Heterogeneous GPUs both run ``ims_per_batch`` that
+  # fits the SMALLER GPU's memory; the bigger one runs with spare capacity.
   ims_per_batch: 16
   grad_accum_steps: 1
   base_lr: 0.02
