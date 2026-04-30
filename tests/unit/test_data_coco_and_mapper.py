@@ -165,6 +165,28 @@ def test_load_coco_json_rejects_unknown_category(
         load_coco_json(json_path, images_dir, md)
 
 
+def test_load_coco_json_skips_segmentation_when_disabled(
+    toy_coco: tuple[Path, Path, Metadata],
+) -> None:
+    """``keep_segmentation=False`` drops polygon lists from every record."""
+    json_path, images_dir, md = toy_coco
+    dicts = load_coco_json(json_path, images_dir, md, keep_segmentation=False)
+    for dd in dicts:
+        for ann in dd["annotations"]:
+            assert "segmentation" not in ann
+
+
+def test_load_coco_json_skips_keypoints_when_disabled(
+    toy_coco: tuple[Path, Path, Metadata],
+) -> None:
+    """``keep_keypoints=False`` drops keypoint arrays from every record."""
+    json_path, images_dir, md = toy_coco
+    dicts = load_coco_json(json_path, images_dir, md, keep_keypoints=False)
+    for dd in dicts:
+        for ann in dd["annotations"]:
+            assert "keypoints" not in ann
+
+
 def test_build_coco_metadata_infers_classes(toy_coco: tuple[Path, Path, Metadata]) -> None:
     json_path, _images_dir, _md = toy_coco
     md = build_coco_metadata("toy_inferred", json_path)
