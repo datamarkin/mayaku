@@ -7,6 +7,8 @@
 #   - Cosine LR decay instead of WarmupMultiStepLR
 #   - Photometric color jitter enabled
 #   - EMA weight averaging enabled
+#   - Mosaic + MixUp + CopyPaste multi-image augmentation
+#     (CopyPaste requires mask_format='bitmask' — set below)
 #
 # Expected AP delta vs the D2 3x baseline: +2 to +4 AP both bbox and segm.
 # Train this only after the 1x recipe shows ≥ +1 AP — running 3x is 3× the
@@ -31,12 +33,18 @@ model:
 input:
   min_size_test: 800
   max_size_test: 1333
+  mask_format: bitmask
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
   color_jitter_contrast: 0.4
   color_jitter_saturation: 0.7
   color_jitter_hue: 0.015
   color_jitter_prob: 0.5
+  mosaic_prob: 0.5
+  mosaic_canvas_size: [1024, 1024]
+  mixup_prob: 0.1
+  mixup_alpha: 8.0
+  copy_paste_prob: 0.5
 
 solver:
   # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
