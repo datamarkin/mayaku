@@ -1,17 +1,12 @@
 """Full COCO 2017 training validator — Mayaku from-scratch on a CUDA host.
 
-The expensive one. ~24-48 GPU-hours on a single A100/H100, ~12-15h on a
-2-GPU DDP setup. Pinned to ``faster_rcnn_R_50_FPN_1x`` (cheapest D2
-schedule) and compared against D2's published 37.9 box AP.
+The expensive one. ~24-48 GPU-hours on a single A100/H100. Pinned to
+``faster_rcnn_R_50_FPN_1x`` (cheapest D2 schedule) and compared against
+D2's published 37.9 box AP for the same config.
 
 **Configure by editing the constants below**, then run:
 
     python benchmarks/training_validation/tier3.py
-
-For multi-GPU (DDP) the same script does the spawn — no torchrun needed.
-Just set WORLD_SIZE=2 (or higher) and the launcher splits work across
-``WORLD_SIZE`` ranks. Effective batch = ``IMS_PER_BATCH * WORLD_SIZE *
-GRAD_ACCUM_STEPS``.
 
 Pass criterion: final box AP in [0.374, 0.384] (= 37.4-38.4 in
 0-100 percent units; D2 published 37.9 ± 0.5).
@@ -24,15 +19,12 @@ import platform
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import torch
 
-from mayaku.backends.device import Device
 from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train
 from mayaku.config import load_yaml, merge_overrides
-from mayaku.engine import launch
 
 # ---------------------------------------------------------------------------
 # Run configuration — edit these constants to retarget.
@@ -47,23 +39,13 @@ COCO_VAL_IMAGES = Path("/data/coco/val2017")
 
 OUTPUT_DIR = Path("./tv_tier3")
 
-# Multi-GPU: number of ranks. Set to 1 for single-GPU; 2+ for DDP. Each
-# rank runs an independent process pinned to one CUDA device, with
-# gradient all-reduce per iteration. Heterogeneous GPUs (e.g. 24 GB +
-# 12 GB) work — both ranks use IMS_PER_BATCH that fits the SMALLER GPU,
-# so the bigger one runs with spare capacity.
-WORLD_SIZE = 1
-
-# Per-rank batch size. EFFECTIVE batch (what base_lr is tuned to via the
-# linear-scaling rule) = IMS_PER_BATCH * WORLD_SIZE * GRAD_ACCUM_STEPS.
-# Examples:
-#   - Single 24 GB GPU: WORLD_SIZE=1, IMS_PER_BATCH=16, GRAD_ACCUM=1 → eff 16
-#   - Single 12 GB GPU: WORLD_SIZE=1, IMS_PER_BATCH=8,  GRAD_ACCUM=2 → eff 16 (slow)
-#   - Dual 24 GB+12 GB: WORLD_SIZE=2, IMS_PER_BATCH=8,  GRAD_ACCUM=1 → eff 16 (~2× faster)
+# 1x schedule defaults (90k iters @ batch 16). Increase EMS_PER_BATCH /
+# decrease GRAD_ACCUM_STEPS for a larger GPU; do the inverse for smaller.
+# Effective batch size = IMS_PER_BATCH * GRAD_ACCUM_STEPS.
 MAX_ITER = 90_000
 BASE_LR = 0.02
 IMS_PER_BATCH = 16
-GRAD_ACCUM_STEPS = 1
+GRAD_ACCUM_STEPS = 1  # set to 2 for 12 GB GPU at IMS_PER_BATCH=8 → effective batch=16
 
 # Mid-training eval cadence. Costs ~5-10 min per firing on val2017; in
 # exchange you get an early warning if the run silently collapses to AP=0.
@@ -92,13 +74,17 @@ def _gpu_info() -> dict[str, str | int | bool | None]:
     }
 
 
-def _build_cfg() -> tuple[Any, int]:
-    """Construct the resolved config + effective batch size.
+def main() -> int:
+    if not torch.cuda.is_available():
+        print(
+            "[tier3] FAIL — CUDA not available. tier3 is CUDA-only in practice; "
+            "edit the script if you want to force CPU.",
+            file=sys.stderr,
+        )
+        return 2
 
-    Effective batch = ``IMS_PER_BATCH * WORLD_SIZE * GRAD_ACCUM_STEPS`` —
-    this is the number ``base_lr`` is tuned against under the linear
-    scaling rule. The schema's ``ims_per_batch`` is the PER-RANK batch.
-    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     cfg = load_yaml(CONFIG_PATH)
     cfg = merge_overrides(
         cfg,
@@ -122,55 +108,11 @@ def _build_cfg() -> tuple[Any, int]:
             "test": {"eval_period": EVAL_PERIOD},
         },
     )
-    effective_batch = IMS_PER_BATCH * WORLD_SIZE * GRAD_ACCUM_STEPS
-    return cfg, effective_batch
 
-
-def _train_only(cfg: Any) -> None:
-    """The per-rank training body. Wrapped by ``launch()`` when WORLD_SIZE > 1.
-
-    Each rank loads the same config, runs ``run_train`` (which is rank-aware:
-    sampler, model, checkpointer, metrics-printer all gate on the active
-    process group). Side-effects (config dump, checkpoints, stdout) only
-    happen on rank 0.
-    """
-    train_dir = OUTPUT_DIR / "train"
-    run_train(
-        cfg,
-        coco_gt_json=COCO_TRAIN_JSON,
-        image_root=COCO_TRAIN_IMAGES,
-        output_dir=train_dir,
-        pretrained_backbone=True,
-        device="cuda",
-        val_json=COCO_VAL_JSON if EVAL_PERIOD > 0 else None,
-        val_image_root=COCO_VAL_IMAGES if EVAL_PERIOD > 0 else None,
-    )
-
-
-def main() -> int:
-    if not torch.cuda.is_available():
-        print(
-            "[tier3] FAIL — CUDA not available. tier3 is CUDA-only in practice; "
-            "edit the script if you want to force CPU.",
-            file=sys.stderr,
-        )
-        return 2
-    if WORLD_SIZE > 1 and torch.cuda.device_count() < WORLD_SIZE:
-        print(
-            f"[tier3] FAIL — WORLD_SIZE={WORLD_SIZE} requested but only "
-            f"{torch.cuda.device_count()} CUDA device(s) visible.",
-            file=sys.stderr,
-        )
-        return 2
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    cfg, effective_batch = _build_cfg()
-
+    effective_batch = IMS_PER_BATCH * GRAD_ACCUM_STEPS
     print(
         f"[tier3] from-scratch COCO 2017 — {MAX_ITER} iters at base_lr={BASE_LR}, "
-        f"world_size={WORLD_SIZE} × ims_per_batch={IMS_PER_BATCH} × "
-        f"grad_accum={GRAD_ACCUM_STEPS} = effective batch={effective_batch}"
+        f"ims_per_batch={IMS_PER_BATCH} × grad_accum={GRAD_ACCUM_STEPS} = effective batch={effective_batch}"
     )
     print(f"[tier3] config: {CONFIG_PATH}")
     print(
@@ -188,15 +130,16 @@ def main() -> int:
 
     train_dir = OUTPUT_DIR / "train"
     t_train_start = time.time()
-    if WORLD_SIZE == 1:
-        _train_only(cfg)
-    else:
-        # ``launch()`` spawns ``WORLD_SIZE`` worker processes, each pinned
-        # to one CUDA device, then runs ``_train_only`` inside each. The
-        # NCCL process group is initialised before ``_train_only`` fires
-        # so all the rank-aware machinery in ``run_train`` (sampler,
-        # DDP wrap, checkpoint gating) sees the right world size.
-        launch(_train_only, world_size=WORLD_SIZE, device=Device("cuda", 0), args=(cfg,))
+    run_train(
+        cfg,
+        coco_gt_json=COCO_TRAIN_JSON,
+        image_root=COCO_TRAIN_IMAGES,
+        output_dir=train_dir,
+        pretrained_backbone=True,
+        device="cuda",
+        val_json=COCO_VAL_JSON if EVAL_PERIOD > 0 else None,
+        val_image_root=COCO_VAL_IMAGES if EVAL_PERIOD > 0 else None,
+    )
     train_secs = time.time() - t_train_start
     print(f"[tier3] train wall-clock = {train_secs:.0f}s ({train_secs / 3600:.2f}h)")
 

@@ -39,13 +39,10 @@ input:
   color_jitter_prob: 0.5
 
 solver:
-  # ``ims_per_batch`` is the PER-RANK batch size. The effective batch
-  # ``base_lr`` is tuned against (linear scaling rule) is:
-  #     effective = ims_per_batch * world_size * grad_accum_steps
-  # Three recipes that all hit effective=16 (the D2 3x baseline):
-  #   * single 24 GB GPU      → world=1, ims=16, accum=1
-  #   * single 12 GB GPU      → world=1, ims=8,  accum=2
-  #   * dual 24 GB+12 GB DDP  → world=2, ims=8,  accum=1   (recommended)
+  # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
+  # GPU keep ims_per_batch=16, grad_accum_steps=1 (the D2 3x baseline).
+  # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
+  # gradients are mathematically identical, AP target unchanged.
   ims_per_batch: 16
   grad_accum_steps: 1
   base_lr: 0.02

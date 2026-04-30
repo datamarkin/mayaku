@@ -47,10 +47,6 @@ from mayaku.engine import (
     SimpleTrainer,
     build_lr_scheduler,
     build_optimizer,
-    create_ddp_model,
-    get_rank,
-    get_world_size,
-    is_main_process,
 )
 
 __all__ = ["run_train"]
@@ -128,15 +124,6 @@ def run_train(
     dev = Device(kind=device) if device else Device.auto()  # type: ignore[arg-type]
     if dev.kind == "mps":
         apply_mps_environment()
-
-    # Distributed-training context. ``world_size`` and ``rank`` come from
-    # ``mayaku.engine.distributed`` — when the CLI is invoked outside of
-    # ``launch()`` they return 1/0, so the single-GPU code path below stays
-    # bit-identical to before. Inside ``launch()`` they reflect the active
-    # process group.
-    world_size = get_world_size()
-    rank = get_rank()
-
     model = build_detector(
         cfg,
         backbone_weights="DEFAULT" if pretrained_backbone else None,
@@ -147,12 +134,8 @@ def run_train(
             state = state["model"]
         _load_for_finetune(model, state)
 
-    # build_optimizer needs the unwrapped model so its parameter-group
-    # iteration finds the actual modules; DDP wrap happens *after*.
     optimizer = build_optimizer(model, cfg.solver)
     scheduler = build_lr_scheduler(optimizer, cfg.solver)
-    if world_size > 1:
-        model = create_ddp_model(model, dev)
 
     metadata = build_coco_metadata(name="cli_train", json_path=coco_gt_json)
     dataset_dicts = load_coco_json(coco_gt_json, image_root, metadata)
@@ -187,22 +170,15 @@ def run_train(
     )
 
     mapped = _MappedList(dataset_dicts, mapper)
-    # TrainingSampler is rank-aware: each rank reads a strided slice of
-    # the shuffled index stream so no two ranks see the same image in the
-    # same batch. ``num_replicas`` and ``rank`` default to 1/0 outside DDP.
-    sampler = TrainingSampler(
-        size=len(mapped),
-        shuffle=True,
-        seed=0,
-        num_replicas=world_size,
-        rank=rank,
-    )
+    sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
     sampled_iter: Iterator[int] = iter(sampler)
     indexed = _SamplerView(mapped, sampled_iter)
-    # AspectRatioGroupedDataset yields batches of size ``ims_per_batch``
-    # PER RANK. With DDP, the effective (cross-rank) batch is
-    # ``ims_per_batch * world_size``. ``base_lr`` should be tuned against
-    # the effective batch (linear scaling rule).
+    # AspectRatioGroupedDataset is itself an iterable yielding batches
+    # (`list[dict]`), which is the contract SimpleTrainer expects from
+    # its `data_loader`. Skipping a DataLoader here keeps the CLI
+    # single-process; the multi-worker / DDP loader builder is a
+    # natural Step 14+ follow-up once we have a real distributed
+    # training story to wire it into.
     loader: Any = AspectRatioGroupedDataset(indexed, batch_size=cfg.solver.ims_per_batch)
 
     grad_clip_norm: float | None = (
@@ -232,67 +208,33 @@ def run_train(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Under DDP, ``model`` is wrapped in DistributedDataParallel and its
-    # ``state_dict`` carries ``module.`` prefixes that don't match the
-    # unwrapped layout used everywhere else (eval, predict, export). Save
-    # the underlying module's state_dict instead so checkpoints stay
-    # interchangeable between single-GPU and DDP runs. We *only* unwrap
-    # when DDP was applied (``world_size > 1`` above) — otherwise the
-    # raw detector might happen to expose a submodule named "module"
-    # and a generic getattr would silently grab that instead.
-    unwrapped_model: torch.nn.Module
-    if world_size > 1:
-        inner = model.module
-        assert isinstance(inner, torch.nn.Module)
-        unwrapped_model = inner
-    else:
-        unwrapped_model = model
-
     # Dump the resolved config alongside the run so a checkpoint always
     # has its provenance recorded next to it. Mirrors Detectron2's
-    # `cfg.dump()` convention. Rank-0 only (avoid N writers racing on
-    # the same path under DDP).
-    if is_main_process():
-        dump_yaml(cfg, output_dir / "config.yaml")
+    # `cfg.dump()` convention. Overwriting on each run is intentional —
+    # the *resolved* config is a function of the call args, not history.
+    dump_yaml(cfg, output_dir / "config.yaml")
     timer = IterationTimer()
     hooks: list[Any] = [
         timer,
         LRScheduler(scheduler),
+        MetricsPrinter(optimizer=optimizer, period=log_period, timer=timer),
+        PeriodicCheckpointer(model, output_dir, cfg.solver.checkpoint_period, optimizer=optimizer),
     ]
-    # Side-effect hooks (stdout / disk writes) live on rank 0 only to
-    # avoid log spam and file races. Logic-only hooks (LR scheduler,
-    # iteration timer, EMA update) fire on every rank — they need to
-    # to keep state in sync across ranks.
-    if is_main_process():
-        hooks.append(MetricsPrinter(optimizer=optimizer, period=log_period, timer=timer))
-        hooks.append(
-            PeriodicCheckpointer(
-                unwrapped_model,
-                output_dir,
-                cfg.solver.checkpoint_period,
-                optimizer=optimizer,
-            )
-        )
 
     # EMA — register AFTER the live-model checkpointer so the EMA update
     # step doesn't fight the live save. The EMA shadow is checkpointed to
     # `output_dir/ema/` so the user can pick whichever variant they want
     # to ship; the EMA weights typically score 0.3-0.5 AP higher.
     if cfg.solver.ema_enabled:
-        # ModelEMA deep-copies the underlying model state. Deep-copying a
-        # DDP wrapper would mirror the wrapper's process-group references,
-        # which isn't what we want — pass the unwrapped module so the
-        # shadow is a clean replica of the actual parameters.
-        ema = ModelEMA(unwrapped_model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
-        hooks.append(EMAHook(ema, unwrapped_model))
-        if is_main_process():
-            hooks.append(
-                PeriodicCheckpointer(
-                    ema.shadow,
-                    output_dir / "ema",
-                    cfg.solver.checkpoint_period,
-                )
+        ema = ModelEMA(model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
+        hooks.append(EMAHook(ema, model))
+        hooks.append(
+            PeriodicCheckpointer(
+                ema.shadow,
+                output_dir / "ema",
+                cfg.solver.checkpoint_period,
             )
+        )
     if cfg.test.eval_period > 0:
         assert val_json is not None and val_image_root is not None  # validated above
         val_loader = _build_val_loader(cfg, val_json, val_image_root)

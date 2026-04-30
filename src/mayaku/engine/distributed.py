@@ -238,19 +238,7 @@ def _worker_entry(
     args: tuple[Any, ...],
     timeout: dt.timedelta,
 ) -> None:
-    # *** Order matters for NCCL. ***
-    # ``torch.cuda.set_device`` MUST run before ``init_process_group`` —
-    # NCCL reads the current device at init time and registers this rank
-    # against it. If both ranks still see the default device (cuda:0)
-    # when ``init_process_group`` fires, NCCL tries to register two
-    # workers against the same GPU and hangs in the bootstrap collective.
-    # Symptom: one GPU pinned at 100% util with no VRAM allocated.
     backend = "nccl" if device_kind == "cuda" else "gloo"
-    if device_kind == "cuda":
-        # Pin this rank to a single GPU before any NCCL bootstrap so the
-        # backend's per-rank device registration is unambiguous.
-        torch.cuda.set_device(rank)
-    os.environ.setdefault("LOCAL_RANK", str(rank))
     dist.init_process_group(
         backend=backend,
         init_method=dist_url,
@@ -258,6 +246,11 @@ def _worker_entry(
         rank=rank,
         timeout=timeout,
     )
+    if device_kind == "cuda":
+        # Pin this rank to a single GPU. Equivalent to setting
+        # CUDA_VISIBLE_DEVICES per-rank but more explicit.
+        torch.cuda.set_device(rank)
+    os.environ.setdefault("LOCAL_RANK", str(rank))
     try:
         synchronize()
         main_func(*args)
