@@ -9,8 +9,9 @@ hand off to :class:`SimpleTrainer` (or :class:`AMPTrainer` when
 
 from __future__ import annotations
 
+import gc
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from mayaku.data import (
     RandomColorJitter,
     RandomFlip,
     ResizeShortestEdge,
+    SerializedList,
     TrainingSampler,
     build_coco_metadata,
     load_coco_json,
@@ -143,7 +145,27 @@ def run_train(
     scheduler = build_lr_scheduler(optimizer, cfg.solver)
 
     metadata = build_coco_metadata(name="cli_train", json_path=coco_gt_json)
-    dataset_dicts = load_coco_json(coco_gt_json, image_root, metadata)
+    # Drop annotation fields the meta-architecture won't read. For
+    # COCO 2017 train this saves ~3-4 GB of polygon Python objects on
+    # the detection / keypoint paths and lets pycocotools' parsed JSON
+    # GC fully (the parser's internal tables are otherwise pinned by
+    # the polygon-list references kept in dataset_dicts).
+    keep_seg = cfg.model.meta_architecture == "mask_rcnn"
+    keep_kp = cfg.model.meta_architecture == "keypoint_rcnn"
+    dataset_dicts_raw = load_coco_json(
+        coco_gt_json,
+        image_root,
+        metadata,
+        keep_segmentation=keep_seg,
+        keep_keypoints=keep_kp,
+    )
+    # Pickle the dicts into one bytes buffer. Drops resident-memory
+    # footprint ~10× (one allocation vs millions of small Python
+    # objects) and removes the per-iter malloc-fragmentation source
+    # that otherwise drifts RAM into the tens of GB on long runs.
+    dataset_dicts = SerializedList(dataset_dicts_raw)
+    del dataset_dicts_raw
+    gc.collect()
     augmentations: list[Augmentation] = [
         ResizeShortestEdge(
             cfg.input.min_size_train,
@@ -321,7 +343,15 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
     separate console-script entry points).
     """
     metadata = build_coco_metadata(name="cli_train_eval", json_path=val_json)
-    dataset_dicts = load_coco_json(val_json, val_image_root, metadata)
+    # Eval mapper drops annotations entirely (is_train=False), so
+    # neither polygons nor keypoints are needed in the loaded dicts.
+    dataset_dicts = load_coco_json(
+        val_json,
+        val_image_root,
+        metadata,
+        keep_segmentation=False,
+        keep_keypoints=False,
+    )
     mapper = DatasetMapper(
         [ResizeShortestEdge((cfg.input.min_size_test,), max_size=cfg.input.max_size_test)],
         is_train=False,
@@ -352,7 +382,12 @@ class _MappedList:
     ``num_workers=0`` (memory).
     """
 
-    def __init__(self, dataset_dicts: list[dict[str, Any]], mapper: DatasetMapper) -> None:
+    def __init__(
+        self, dataset_dicts: Sequence[dict[str, Any]], mapper: DatasetMapper
+    ) -> None:
+        # Accepts either a plain ``list[dict]`` or a
+        # :class:`mayaku.data.SerializedList` — both quack the same way
+        # for ``__len__`` / ``__getitem__``.
         self._dataset_dicts = dataset_dicts
         self._mapper = mapper
 

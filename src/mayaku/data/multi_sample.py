@@ -115,11 +115,15 @@ class MultiSampleMappedDataset:
 
     def __init__(
         self,
-        dataset_dicts: list[dict[str, Any]],
+        dataset_dicts: Sequence[dict[str, Any]],
         mapper: DatasetMapper,
         multi_sample_augs: Sequence[MultiSampleAugmentation],
         rng: np.random.Generator | None = None,
     ) -> None:
+        # Accepts either a plain ``list[dict]`` or a
+        # :class:`mayaku.data.SerializedList` — both quack the same way
+        # for ``__len__`` / ``__getitem__``. Using a Sequence type keeps
+        # the wrapper independent of which storage the caller picks.
         self._dataset_dicts = dataset_dicts
         self._mapper = mapper
         self._augs: list[MultiSampleAugmentation] = list(multi_sample_augs)

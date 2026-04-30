@@ -40,6 +40,8 @@ def load_coco_json(
     metadata: Metadata,
     *,
     extra_annotation_keys: Iterable[str] | None = None,
+    keep_segmentation: bool = True,
+    keep_keypoints: bool = True,
 ) -> list[dict[str, Any]]:
     """Parse a COCO-format JSON into standard dataset dicts.
 
@@ -55,7 +57,15 @@ def load_coco_json(
             keys to copy through into the dataset dict (e.g. dataset-
             specific attributes). The standard set
             ``{bbox, bbox_mode, category_id, iscrowd, segmentation, keypoints}``
-            is always carried.
+            is always carried (subject to the ``keep_*`` knobs below).
+        keep_segmentation: When ``False``, ``ann["segmentation"]`` is
+            dropped from every record. Set this for detection-only
+            training (no mask head): COCO 2017's polygon segmentations
+            are ~3-4 GB of small Python objects that the loader would
+            otherwise hold for the lifetime of the run, even though the
+            mapper never reads them.
+        keep_keypoints: When ``False``, ``ann["keypoints"]`` is dropped.
+            Set this when ``meta_architecture != "keypoint_rcnn"``.
 
     Returns:
         A list of dicts (one per image) in the format documented in
@@ -106,9 +116,9 @@ def load_coco_json(
                 "bbox_mode": BoxMode.XYWH_ABS,
                 "category_id": remap[cat_id],
             }
-            if ann.get("segmentation"):
+            if keep_segmentation and ann.get("segmentation"):
                 obj["segmentation"] = ann["segmentation"]
-            if "keypoints" in ann:
+            if keep_keypoints and "keypoints" in ann:
                 kp = list(ann["keypoints"])
                 # Spec §5.4: COCO uses pixel-corner indexing for keypoints;
                 # add 0.5 to convert to the pixel-center convention used

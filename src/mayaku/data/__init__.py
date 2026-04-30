@@ -18,6 +18,7 @@ from mayaku.data.samplers import (
     InferenceSampler,
     TrainingSampler,
 )
+from mayaku.data.serialize import SerializedList
 from mayaku.data.transforms import (
     AugInput,
     Augmentation,
@@ -50,6 +51,7 @@ __all__ = [
     "RandomFlip",
     "ResizeShortestEdge",
     "ResizeTransform",
+    "SerializedList",
     "TrainingSampler",
     "Transform",
     "TransformList",

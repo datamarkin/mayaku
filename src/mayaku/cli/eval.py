@@ -120,7 +120,16 @@ def run_eval(
         )
 
     metadata = build_coco_metadata(name="cli_eval", json_path=coco_gt_json)
-    dataset_dicts = load_coco_json(coco_gt_json, image_root, metadata)
+    # Inference mapper drops annotations (is_train=False). The COCO
+    # ground-truth itself is loaded separately by COCOEvaluator, so
+    # there's no consumer of polygons/keypoints in the eval path.
+    dataset_dicts = load_coco_json(
+        coco_gt_json,
+        image_root,
+        metadata,
+        keep_segmentation=False,
+        keep_keypoints=False,
+    )
 
     mapper = DatasetMapper(
         [ResizeShortestEdge((cfg.input.min_size_test,), max_size=cfg.input.max_size_test)],
