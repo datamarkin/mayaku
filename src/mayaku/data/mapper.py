@@ -108,7 +108,14 @@ class DatasetMapper:
         # Detectron2 deepcopies the dict so downstream mutation doesn't
         # bleed back into the dataset cache; same here.
         dd = copy.deepcopy(dataset_dict)
-        image = read_image(dd["file_name"])
+        # Multi-sample augmentations (Mosaic / MixUp / CopyPaste) supply a
+        # pre-composed image directly via ``__image`` — they've already
+        # combined N source files in their own coordinate space and there
+        # is no on-disk file to read for the synthetic combination. The
+        # dunder name avoids collisions with any user-supplied COCO keys.
+        # The explicit if/else form (over a ternary) keeps the contract
+        # readable for the multi-sample integration point.
+        image = dd.pop("__image") if "__image" in dd else read_image(dd["file_name"])
         _check_image_size(dd, image)
 
         aug_input = AugInput(image=image)

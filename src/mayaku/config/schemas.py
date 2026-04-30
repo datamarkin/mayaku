@@ -377,6 +377,26 @@ class InputConfig(_BaseModel):
     color_jitter_hue: Annotated[float, Field(ge=0.0, le=0.5)] = 0.015
     color_jitter_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.5
 
+    # Multi-sample augmentation (Phase 1b modernization). Each
+    # ``*_prob`` is the chance the augmentation fires for any given
+    # training sample; default 0.0 disables. ``copy_paste_prob > 0``
+    # additionally requires ``mask_format='bitmask'`` (validator below).
+    mosaic_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+    mosaic_canvas_size: tuple[int, int] = (1024, 1024)
+    mixup_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+    mixup_alpha: Annotated[float, Field(gt=0.0)] = 8.0
+    copy_paste_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+
+    @model_validator(mode="after")
+    def _check_copy_paste_needs_bitmask(self) -> InputConfig:
+        if self.copy_paste_prob > 0.0 and self.mask_format != "bitmask":
+            raise ValueError(
+                "copy_paste_prob > 0 requires mask_format='bitmask' "
+                "(polygon-mask paste requires a lossy raster→polygon round-trip; "
+                "switch the format or disable CopyPaste)."
+            )
+        return self
+
 
 class SolverConfig(_BaseModel):
     """Optimizer and LR schedule.

@@ -24,8 +24,13 @@ from mayaku.config import MayakuConfig, dump_yaml, load_yaml
 from mayaku.data import (
     AspectRatioGroupedDataset,
     Augmentation,
+    CopyPaste,
     DatasetMapper,
     InferenceSampler,
+    MixUp,
+    Mosaic,
+    MultiSampleAugmentation,
+    MultiSampleMappedDataset,
     RandomColorJitter,
     RandomFlip,
     ResizeShortestEdge,
@@ -169,7 +174,28 @@ def run_train(
         metadata=metadata if cfg.model.meta_architecture == "keypoint_rcnn" else None,
     )
 
-    mapped = _MappedList(dataset_dicts, mapper)
+    # Build the active multi-sample augmentation list. When any prob is
+    # > 0 the wrapper interposes; otherwise we use the plain `_MappedList`
+    # so the single-sample path stays bit-identical to before. Same
+    # interface (``__len__`` + ``__getitem__``) so downstream sampler /
+    # AspectRatioGroupedDataset don't care which one they get.
+    multi_sample_augs: list[MultiSampleAugmentation] = []
+    if cfg.input.mosaic_prob > 0.0:
+        multi_sample_augs.append(
+            Mosaic(prob=cfg.input.mosaic_prob, canvas_size=cfg.input.mosaic_canvas_size)
+        )
+    if cfg.input.mixup_prob > 0.0:
+        multi_sample_augs.append(MixUp(prob=cfg.input.mixup_prob, alpha=cfg.input.mixup_alpha))
+    if cfg.input.copy_paste_prob > 0.0:
+        # mask_format='bitmask' is enforced upstream by InputConfig's
+        # validator — no need to re-check here.
+        multi_sample_augs.append(CopyPaste(prob=cfg.input.copy_paste_prob))
+
+    mapped: Any
+    if multi_sample_augs:
+        mapped = MultiSampleMappedDataset(dataset_dicts, mapper, multi_sample_augs)
+    else:
+        mapped = _MappedList(dataset_dicts, mapper)
     sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
     sampled_iter: Iterator[int] = iter(sampler)
     indexed = _SamplerView(mapped, sampled_iter)
@@ -342,10 +368,16 @@ class _SamplerView:
 
     Glue between :class:`TrainingSampler` (an infinite index stream) and
     :class:`AspectRatioGroupedDataset` (which expects an iterable of
-    sample dicts).
+    sample dicts). ``mapped`` is either :class:`_MappedList` (single-sample
+    path) or :class:`MultiSampleMappedDataset` (Phase 1b multi-sample
+    path). Both quack the same way: ``mapped[i]`` returns a mapped dict.
     """
 
-    def __init__(self, mapped: _MappedList, sampler_iter: Iterator[int]) -> None:
+    def __init__(
+        self,
+        mapped: _MappedList | MultiSampleMappedDataset,
+        sampler_iter: Iterator[int],
+    ) -> None:
         self._mapped = mapped
         self._iter = sampler_iter
 
