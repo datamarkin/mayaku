@@ -20,14 +20,26 @@ model:
     name: resnet50
     norm: FrozenBN
     freeze_at: 2
-    stride_in_1x1: true
+    # Torchvision IMAGENET1K_V2 weights (loaded by `pretrained_backbone=True`)
+    # put stride-2 in the 3x3 conv of res3/res4/res5; D2's MSRA pretraining
+    # puts it in the 1x1. The two layouts are not weight-compatible — using
+    # `stride_in_1x1=true` here with torchvision weights miscalibrates every
+    # downstream activation by ~58×, training collapses to "predict
+    # background" and box AP stays at 0. This config is for from-scratch
+    # training, so we match torchvision.
+    stride_in_1x1: false
   roi_heads:
     num_classes: 80
   roi_box_head:
     num_conv: 0
     num_fc: 2
     fc_dim: 1024
-  pixel_std: [1.0, 1.0, 1.0]
+  # Torchvision IMAGENET1K_V2 expects std-normalized inputs. The values
+  # below are 0.229*255 / 0.224*255 / 0.225*255 — the standard ImageNet
+  # std in 0..255 pixel units. D2's [1, 1, 1] is for caffe2-style weights
+  # only; pairing it with torchvision weights inflates input magnitudes by
+  # the same factor and triggers the same divergence as `stride_in_1x1`.
+  pixel_std: [58.395, 57.120, 57.375]
 
 input:
   min_size_test: 800
@@ -55,8 +67,8 @@ solver:
   # GPU keep ims_per_batch=16, grad_accum_steps=1 (the D2 1x baseline).
   # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
   # gradients are mathematically identical, AP target unchanged.
-  ims_per_batch: 16
-  grad_accum_steps: 1
+  ims_per_batch: 8
+  grad_accum_steps: 2
   base_lr: 0.02
   # 1x schedule: 90k iters with LR decay milestones kept for schema
   # validation, but they're inert under WarmupCosineLR (which uses a

@@ -234,20 +234,29 @@ class StandardROIHeads(nn.Module):
             n_proposals = proposal_boxes.shape[0]
 
             if gt_boxes.numel() == 0:
-                # No GT in this image — every proposal is background, no
-                # foreground to subsample.
+                # No GT in this image — every proposal is background.
+                # Sample bg up to batch_size_per_image so the classifier
+                # still trains on these as negatives. Box-reg sees no
+                # foreground and contributes zero (handled by
+                # FastRCNNOutputLayers.losses' fg_mask check).
                 gt_classes = torch.full(
                     (n_proposals,),
                     self.num_classes,
                     dtype=torch.int64,
                     device=proposal_boxes.device,
                 )
-                # Drop everything to a deterministic empty batch — there's
-                # nothing useful to learn from background-only images here.
-                sampled_idx = torch.zeros(0, dtype=torch.long, device=proposal_boxes.device)
+                pos_idx, neg_idx = subsample_labels(
+                    gt_classes,
+                    num_samples=self.batch_size_per_image,
+                    positive_fraction=self.positive_fraction,
+                    bg_label=self.num_classes,
+                )
+                sampled_idx = torch.cat([pos_idx, neg_idx], dim=0)
                 proposals_sampled = proposals_per_image[sampled_idx]
                 proposals_sampled.gt_classes = gt_classes[sampled_idx]
-                proposals_sampled.gt_boxes = torch.zeros(0, 4, device=proposal_boxes.device)
+                proposals_sampled.gt_boxes = torch.zeros(
+                    (sampled_idx.numel(), 4), device=proposal_boxes.device
+                )
                 out.append(proposals_sampled)
                 continue
 

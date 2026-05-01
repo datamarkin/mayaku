@@ -293,24 +293,27 @@ class _TwoParamModel(nn.Module):
         return {"loss": (self.a * a_coef).sum() + (self.b * b_coef).sum()}
 
 
-def test_simple_trainer_grad_clip_norm_is_per_parameter() -> None:
-    """`grad_clip_type='norm'` must clip each parameter tensor's gradient
-    norm independently (matches detectron2/solver/build.py:36-37). A
-    *global* clip would touch every parameter once the concatenated
-    norm exceeds the threshold; a per-param clip leaves below-threshold
-    tensors alone.
+def test_simple_trainer_grad_clip_norm_is_global() -> None:
+    """`grad_clip_type='norm'` clips the *concatenated* gradient norm
+    across all trainable parameters — the standard ``clip_grad_norm_``
+    idiom and what Detectron2's ``OptimizerWithGradientClip`` does.
+
+    A previous version of this method clipped *per-parameter* at
+    ``norm=1.0``, which is several orders of magnitude more aggressive
+    than typical and starved the RPN/FPN gradients on Faster R-CNN to
+    the point of stalling training. This test locks out that regression.
 
     Setup: two parameter vectors with gradient norms 1.06 and 0.5.
-    Concatenated norm is sqrt(1.06^2 + 0.5^2) ≈ 1.17 > 1.0.
+    Concatenated norm is sqrt(1.06² + 0.5²) ≈ 1.17 > 1.0.
 
-    Per-param semantics (what we want):
-      - `a` (norm 1.06 > 1.0): scaled to norm 1.0
-      - `b` (norm 0.5  < 1.0): untouched
+    Global semantics (what we want):
+      - Both scaled by 1.0 / 1.17 ≈ 0.853.
+      - `a` post-norm ≈ 0.904, `b` post-norm ≈ 0.426.
+      - Joint norm after clip = exactly 1.0.
 
-    Global semantics (the bug we're locking out):
-      - Both scaled by 1.0 / 1.17 ≈ 0.853 → `a` norm ~0.905, `b` norm ~0.427.
-      - That's wrong — `b` would have been touched even though its own
-        norm was already below 1.0.
+    Per-param semantics (the bug we're locking out):
+      - `a` (norm 1.06 > 1.0) clipped to 1.0; `b` (norm 0.5 < 1.0) untouched.
+      - Joint norm after clip ≈ sqrt(1 + 0.25) ≈ 1.118, NOT 1.0.
     """
     torch.manual_seed(0)
     model = _TwoParamModel()
@@ -326,11 +329,14 @@ def test_simple_trainer_grad_clip_norm_is_per_parameter() -> None:
     assert model.a.grad is not None and model.b.grad is not None
     a_norm = float(model.a.grad.norm().item())
     b_norm = float(model.b.grad.norm().item())
-    # `a` clipped to exactly 1.0 (per-param).
-    assert abs(a_norm - 1.0) < 1e-5, f"expected a-norm 1.0, got {a_norm}"
-    # `b` untouched at 0.5 (per-param). Global clip would have driven this
-    # to ~0.427.
-    assert abs(b_norm - 0.5) < 1e-5, f"expected b-norm 0.5, got {b_norm}"
+    pre_total = (1.06**2 + 0.5**2) ** 0.5
+    scale = 1.0 / pre_total
+    # Both tensors scaled by the same factor under global clipping.
+    assert abs(a_norm - 1.06 * scale) < 1e-4, f"expected a-norm {1.06 * scale:.4f}, got {a_norm}"
+    assert abs(b_norm - 0.5 * scale) < 1e-4, f"expected b-norm {0.5 * scale:.4f}, got {b_norm}"
+    # Joint norm post-clip must equal the clip threshold exactly.
+    joint = (a_norm**2 + b_norm**2) ** 0.5
+    assert abs(joint - 1.0) < 1e-5, f"joint norm should be clipped to 1.0, got {joint}"
 
 
 def test_simple_trainer_rejects_invalid_grad_clip_type() -> None:

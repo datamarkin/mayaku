@@ -19,6 +19,8 @@ import platform
 import sys
 import time
 from pathlib import Path
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 
@@ -30,27 +32,27 @@ from mayaku.config import load_yaml, merge_overrides
 # Run configuration — edit these constants to retarget.
 # ---------------------------------------------------------------------------
 
-CONFIG_PATH = Path("configs/detection/faster_rcnn_R_50_FPN_1x.yaml")
+CONFIG_PATH = Path("configs/detection/faster_rcnn_R_50_FPN_1x_modern.yaml")
 
-COCO_TRAIN_JSON = Path("/data/coco/annotations/instances_train2017.json")
-COCO_TRAIN_IMAGES = Path("/data/coco/train2017")
-COCO_VAL_JSON = Path("/data/coco/annotations/instances_val2017.json")
-COCO_VAL_IMAGES = Path("/data/coco/val2017")
+COCO_TRAIN_JSON = Path("/home/dataserver/Downloads/coco/annotations/instances_train2017.json")
+COCO_TRAIN_IMAGES = Path("/home/dataserver/Downloads/coco/train2017")
+COCO_VAL_JSON = Path("/home/dataserver/Downloads/coco/annotations/instances_val2017.json")
+COCO_VAL_IMAGES = Path("/home/dataserver/Downloads/coco/val2017")
 
-OUTPUT_DIR = Path("./tv_tier3")
+OUTPUT_DIR = Path("./tv_tier3_1b")
 
 # 1x schedule defaults (90k iters @ batch 16). Increase EMS_PER_BATCH /
 # decrease GRAD_ACCUM_STEPS for a larger GPU; do the inverse for smaller.
 # Effective batch size = IMS_PER_BATCH * GRAD_ACCUM_STEPS.
 MAX_ITER = 90_000
 BASE_LR = 0.02
-IMS_PER_BATCH = 16
-GRAD_ACCUM_STEPS = 1  # set to 2 for 12 GB GPU at IMS_PER_BATCH=8 → effective batch=16
+IMS_PER_BATCH = 8
+GRAD_ACCUM_STEPS = 2  # set to 2 for 12 GB GPU at IMS_PER_BATCH=8 → effective batch=16
 
 # Mid-training eval cadence. Costs ~5-10 min per firing on val2017; in
 # exchange you get an early warning if the run silently collapses to AP=0.
 # Set to 0 to skip mid-training eval and only run final eval.
-EVAL_PERIOD = 10_000
+EVAL_PERIOD = 5000
 
 # ---------------------------------------------------------------------------
 # Pass band — D2 published 37.9 box AP at 1x; 0.5 AP either side is the
@@ -101,8 +103,17 @@ def main() -> int:
                 ),
                 "warmup_iters": min(1000, MAX_ITER // 90),
                 "checkpoint_period": max(MAX_ITER // 10, 1),
+                # Safety net for gradient spikes — global L2 norm across
+                # all parameters (the standard idiom). Threshold 5.0
+                # catches genuine blow-ups (a single bad batch whose
+                # combined gradient norm exceeds 5.0) without throttling
+                # normal training (a healthy step is in the 0.5–2.0 range).
+                # D2's COCO 1x has clipping off entirely; mayaku has
+                # shown enough spike-driven divergence in early training
+                # that we ship a wide safety net rather than discover it
+                # by NaN-ing out at iter 100.
                 "clip_gradients_enabled": True,
-                "clip_gradients_value": 1.0,
+                "clip_gradients_value": 5.0,
                 "clip_gradients_type": "norm",
             },
             "test": {"eval_period": EVAL_PERIOD},

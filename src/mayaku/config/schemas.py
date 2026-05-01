@@ -435,8 +435,14 @@ class SolverConfig(_BaseModel):
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
     checkpoint_period: Annotated[int, Field(gt=0)] = 5000
     clip_gradients_enabled: bool = False
-    clip_gradients_value: Annotated[float, Field(gt=0.0)] = 1.0
-    clip_gradients_type: Literal["value", "norm"] = "value"
+    # When clipping is enabled, the defaults below give the standard
+    # global-L2-norm safety net at 5.0 — wide enough to catch genuine
+    # gradient blow-ups without throttling normal training, narrow enough
+    # to keep an accidental NaN from poisoning the rest of the run.
+    # ``"value"`` element-wise clamping is also supported but rarely
+    # what people want.
+    clip_gradients_value: Annotated[float, Field(gt=0.0)] = 5.0
+    clip_gradients_type: Literal["value", "norm"] = "norm"
 
     # Exponential moving average of model weights (Phase 1 modernization).
     # When enabled, an EMA shadow tracks the live weights at every step

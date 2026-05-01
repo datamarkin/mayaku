@@ -12,7 +12,7 @@ model:
     # res3/res4/res5; torchvision's default puts it on the 3x3.
     # Loading D2 weights with the wrong placement produces silently
     # wrong activations (same kernels, different downsampling step).
-    stride_in_1x1: true
+    stride_in_1x1: false
   roi_heads:
     num_classes: 80
   roi_box_head:
@@ -21,7 +21,15 @@ model:
     fc_dim: 1024
   # D2's caffe2-trained model-zoo .pkls don't divide by std; D2's
   # Base-RCNN-FPN.yaml leaves PIXEL_STD at [1, 1, 1] for these configs.
-  pixel_std: [1.0, 1.0, 1.0]
+  pixel_std: [58.395, 57.120, 57.375]
 input:
   min_size_test: 800
   max_size_test: 1333
+
+solver:
+  # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
+  # GPU keep ims_per_batch=16, grad_accum_steps=1 (the D2 1x baseline).
+  # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
+  # gradients are mathematically identical, AP target unchanged.
+  ims_per_batch: 8
+  grad_accum_steps: 2

@@ -21,7 +21,9 @@ model:
     name: resnet50
     norm: FrozenBN
     freeze_at: 2
-    stride_in_1x1: true
+    # See faster_rcnn_R_50_FPN_1x_modern.yaml for why these match torchvision
+    # IMAGENET1K_V2 instead of D2's caffe2 layout.
+    stride_in_1x1: false
   roi_heads:
     num_classes: 80
   roi_box_head:
@@ -29,7 +31,7 @@ model:
     num_fc: 2
     fc_dim: 1024
   roi_mask_head: {}
-  pixel_std: [1.0, 1.0, 1.0]
+  pixel_std: [58.395, 57.120, 57.375]
 
 input:
   min_size_test: 800

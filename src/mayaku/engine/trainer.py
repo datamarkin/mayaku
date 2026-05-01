@@ -159,17 +159,16 @@ class SimpleTrainer(TrainerBase):
         :attr:`grad_clip_type`. Caller is responsible for unscaling
         gradients first when AMP is in use.
 
-        For ``grad_clip_type="norm"`` we clip *per-parameter*, not
-        globally. PyTorch's ``clip_grad_norm_(parameters, max_norm)``
-        flattens every parameter's gradient into one vector and rescales
-        all of them uniformly if the concatenated norm exceeds
-        ``max_norm`` — for a 50M-parameter detector at ``max_norm=1.0``
-        that's roughly 10–100× more aggressive than the per-parameter
-        check most parameters would individually pass. Detectron2's
-        ``solver/build.py`` `OptimizerWithGradientClip.step` calls
-        ``clip_grad_norm_`` once per parameter; we mirror that here so
-        the configured ``base_lr`` translates to the same effective
-        gradient magnitude.
+        ``grad_clip_type="norm"`` is global-norm clipping: PyTorch's
+        ``clip_grad_norm_(parameters, max_norm)`` flattens every
+        parameter's gradient into one vector and rescales them
+        uniformly if the concatenated norm exceeds ``max_norm``.
+        Detectron2's ``solver/build.py`` ``OptimizerWithGradientClip``
+        does the same. An earlier version of this method clipped
+        *per-parameter* at ``norm=1.0``, which is ~2–3 orders of
+        magnitude more aggressive than typical "aggressive" clipping
+        and starved RPN/FPN gradients enough that training stalled
+        on Faster R-CNN — see commit history for the post-mortem.
         """
         params = [p for p in self.model.parameters() if p.requires_grad]
         assert self.grad_clip_norm is not None
@@ -177,9 +176,7 @@ class SimpleTrainer(TrainerBase):
             # clip_grad_value_ is element-wise — list vs single is equivalent.
             torch.nn.utils.clip_grad_value_(params, clip_value=self.grad_clip_norm)
         else:
-            for p in params:
-                if p.grad is not None:
-                    torch.nn.utils.clip_grad_norm_(p, max_norm=self.grad_clip_norm)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=self.grad_clip_norm)
 
     def run_step(self) -> None:
         self.model.train()

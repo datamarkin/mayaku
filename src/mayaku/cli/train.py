@@ -128,6 +128,41 @@ def run_train(
             stacklevel=2,
         )
 
+    # Reject the silent caffe2-vs-torchvision mismatch that drives box AP
+    # to zero. ``pretrained_backbone=True`` loads torchvision IMAGENET1K_V2
+    # weights, which were trained with stride-2 in the 3x3 conv of
+    # res3/res4/res5 and with std-normalised inputs. The D2 model-zoo
+    # configs (``faster_rcnn_R_50_FPN_1x.yaml`` and friends) ship
+    # ``stride_in_1x1=true`` and ``pixel_std=[1, 1, 1]`` so they match
+    # caffe2's MSRA-pretrained R-50.pkl — using either of those settings
+    # with torchvision weights miscalibrates every downstream activation
+    # (~58× input-scale error or wrong feature stride), training collapses
+    # to "predict background everywhere," and eval returns AP=0. The
+    # ``*_modern.yaml`` configs already match torchvision; if you want to
+    # train from scratch with a D2-mirror config, either load D2's
+    # converted .pth via ``--weights`` or override these two fields.
+    if pretrained_backbone:
+        if cfg.model.backbone.stride_in_1x1:
+            raise ValueError(
+                "pretrained_backbone=True loads torchvision IMAGENET1K_V2 weights, "
+                "but the config has model.backbone.stride_in_1x1=true (caffe2/D2 "
+                "layout). The two are not weight-compatible and training will "
+                "silently collapse to AP=0. Either set stride_in_1x1=false in the "
+                "config (matches torchvision; what the *_modern.yaml configs do), "
+                "or drop --pretrained-backbone and load D2's R-50.pkl-converted "
+                "checkpoint via --weights instead."
+            )
+        if tuple(cfg.model.pixel_std) == (1.0, 1.0, 1.0):
+            raise ValueError(
+                "pretrained_backbone=True loads torchvision IMAGENET1K_V2 weights, "
+                "but the config has model.pixel_std=[1, 1, 1] (caffe2-style mean-"
+                "only normalisation). Torchvision weights expect std-normalised "
+                "inputs; pairing them with std=1 inflates input magnitudes ~58× "
+                "and triggers the same silent collapse as a stride-layout "
+                "mismatch. Set pixel_std=[58.395, 57.120, 57.375] (the *_modern."
+                "yaml convention) when training with --pretrained-backbone."
+            )
+
     dev = Device(kind=device) if device else Device.auto()  # type: ignore[arg-type]
     if dev.kind == "mps":
         apply_mps_environment()
