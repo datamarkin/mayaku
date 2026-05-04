@@ -54,11 +54,14 @@ class FastRCNNConvFCHead(nn.Module):
             flat_dim = fc_dim
         self._output_dim = flat_dim
 
-        # Init: convs are MSRA / Kaiming, fcs are also MSRA on weights with
-        # small bias. Detectron2 (`box_head.py:75-100`) uses
-        # `c2_msra_fill` for convs and Caffe2-style for fcs; we use
-        # PyTorch's stock kaiming_normal for both, which gives equivalent
-        # variance and is the convention torchvision uses for ResNets too.
+        # Init: convs are MSRA / Kaiming, fcs are Xavier (Glorot) to match
+        # Detectron2 (`box_head.py:75-100`: `c2_msra_fill` for convs,
+        # `c2_xavier_fill` for fcs). Earlier versions of this code used
+        # `kaiming_uniform_(a=1)` on the fcs, which is ~1.4x wider than
+        # Xavier on a 1024->1024 layer (std ≈ 0.061 vs ≈ 0.043) and made
+        # ROI head outputs ~1.4x larger initially — measurably inflating
+        # early-iter gradient norms and triggering the trainer's gradient
+        # clip more aggressively than D2's setup. See compare.md.
         for m in self.convs:
             assert isinstance(m, nn.Conv2d)
             nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
@@ -66,7 +69,7 @@ class FastRCNNConvFCHead(nn.Module):
             nn.init.constant_(m.bias, 0.0)
         for m in self.fcs:
             assert isinstance(m, nn.Linear)
-            nn.init.kaiming_uniform_(m.weight, a=1)  # matches Caffe2 init
+            nn.init.xavier_uniform_(m.weight)  # matches D2's c2_xavier_fill
             nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x: Tensor) -> Tensor:

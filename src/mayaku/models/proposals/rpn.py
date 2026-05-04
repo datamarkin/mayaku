@@ -197,6 +197,7 @@ class RPN(nn.Module):
                 else self.post_nms_topk_test,
                 nms_thresh=self.nms_thresh,
                 min_box_size=self.min_box_size,
+                training=self.training,
             )
         return proposals, losses
 
@@ -318,6 +319,7 @@ def find_top_rpn_proposals(
     post_nms_topk: int,
     nms_thresh: float,
     min_box_size: float = 0.0,
+    training: bool = False,
 ) -> list[Instances]:
     """Per-FPN-level top-k → cross-level NMS → post-NMS top-k.
 
@@ -366,6 +368,15 @@ def find_top_rpn_proposals(
         ids = torch.cat(level_ids[img_idx], dim=0)
 
         finite = torch.isfinite(boxes).all(dim=1) & torch.isfinite(scores)
+        if training and not bool(finite.all()):
+            # Mirror detectron2.modeling.proposal_generator.proposal_utils.
+            # find_top_rpn_proposals: surface divergence loudly during
+            # training rather than silently filtering, which can mask
+            # gradient corruption for many iters before NaN finally
+            # propagates everywhere.
+            raise FloatingPointError(
+                "Predicted boxes or scores contain Inf/NaN. Training has diverged."
+            )
         boxes = boxes[finite]
         scores = scores[finite]
         ids = ids[finite]

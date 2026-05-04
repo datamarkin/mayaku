@@ -176,6 +176,18 @@ class DatasetMapper:
         boxes_out[:, 0::2] = np.clip(boxes_out[:, 0::2], 0, w)
         boxes_out[:, 1::2] = np.clip(boxes_out[:, 1::2], 0, h)
 
+        # Drop GT that became degenerate (width<=1e-5 or height<=1e-5) after
+        # augmentation+clipping. Mirrors detectron2.data.detection_utils.
+        # filter_empty_instances (threshold=1e-5). A zero-width src_box
+        # in Box2BoxTransform.get_deltas produces log(0) = -inf during
+        # anchor matching, which silently NaN-s the entire training run.
+        widths = boxes_out[:, 2] - boxes_out[:, 0]
+        heights = boxes_out[:, 3] - boxes_out[:, 1]
+        keep_mask = (widths > 1e-5) & (heights > 1e-5)
+        if not keep_mask.all():
+            boxes_out = boxes_out[keep_mask]
+            annos = [a for a, k in zip(annos, keep_mask, strict=True) if k]
+
         gt_boxes = torch.from_numpy(boxes_out).to(torch.float32)
         gt_classes = torch.tensor([a["category_id"] for a in annos], dtype=torch.int64)
 

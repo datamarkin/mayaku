@@ -78,6 +78,14 @@ class Box2BoxTransform:
         tgt_cx = target_boxes[:, 0] + 0.5 * tgt_w
         tgt_cy = target_boxes[:, 1] + 0.5 * tgt_h
 
+        # D2 guard: if a degenerate box slips past the DatasetMapper's
+        # filter_empty_instances, log(tgt_w/0) returns -inf and silently
+        # NaN-s training. Fail loud instead.
+        assert (src_w > 0).all().item() and (src_h > 0).all().item(), (
+            "Box2BoxTransform.get_deltas received zero-area src boxes; check "
+            "that filter_empty_instances was applied in the DatasetMapper."
+        )
+
         wx, wy, ww, wh = self.weights
         dx = wx * (tgt_cx - src_cx) / src_w
         dy = wy * (tgt_cy - src_cy) / src_h
