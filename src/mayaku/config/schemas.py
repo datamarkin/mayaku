@@ -143,7 +143,7 @@ class RPNConfig(_BaseModel):
     post_nms_topk_train: Annotated[int, Field(gt=0)] = 1000
     post_nms_topk_test: Annotated[int, Field(gt=0)] = 1000
     nms_thresh: Annotated[float, Field(gt=0.0, le=1.0)] = 0.7
-    min_box_size: Annotated[float, Field(ge=0.0)] = 0.0
+    min_box_size: Annotated[float, Field(ge=0.0)] = 1e-5
     iou_thresholds: tuple[float, float] = (0.3, 0.7)
     iou_labels: tuple[int, int, int] = (0, -1, 1)
     batch_size_per_image: Annotated[int, Field(gt=0)] = 256
