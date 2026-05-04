@@ -291,11 +291,16 @@ class MetricsPrinter(_BaseHook):
         if "total_loss" in storage:
             parts.append(f"total_loss={storage['total_loss']:.4f}")
         # Print individual losses in a stable order so successive lines
-        # are diff-friendly.
+        # are diff-friendly. ``grad_*`` keys (gradient-norm diagnostics)
+        # use scientific notation since their dynamic range is huge —
+        # 1e-3 during stable training, 1e+20 right before divergence.
         for k in sorted(storage):
             if k == "total_loss":
                 continue
-            parts.append(f"{k}={storage[k]:.4f}")
+            if k.startswith("grad_"):
+                parts.append(f"{k}={storage[k]:.3e}")
+            else:
+                parts.append(f"{k}={storage[k]:.4f}")
         if self.optimizer is not None:
             parts.append(f"lr={self.optimizer.param_groups[0]['lr']:.2e}")
         if self.timer is not None and self.timer.last_iter_seconds > 0:

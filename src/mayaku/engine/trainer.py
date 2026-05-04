@@ -128,6 +128,7 @@ class SimpleTrainer(TrainerBase):
         grad_clip_norm: float | None = None,
         grad_clip_type: GradClipType = "norm",
         grad_accum_steps: int = 1,
+        grad_norm_log_enabled: bool = False,
     ) -> None:
         super().__init__()
         if grad_clip_type not in ("value", "norm"):
@@ -140,7 +141,10 @@ class SimpleTrainer(TrainerBase):
         self.grad_clip_norm = grad_clip_norm
         self.grad_clip_type: GradClipType = grad_clip_type
         self.grad_accum_steps = int(grad_accum_steps)
+        self.grad_norm_log_enabled = bool(grad_norm_log_enabled)
         self._data_iter: Any = None
+        # Resolved once on first call; param-name → group-name map.
+        self._grad_norm_group_map: dict[str, str] | None = None
 
     def _next_batch(self) -> Sequence[Mapping[str, Any]]:
         if self._data_iter is None:
@@ -178,6 +182,59 @@ class SimpleTrainer(TrainerBase):
         else:
             torch.nn.utils.clip_grad_norm_(params, max_norm=self.grad_clip_norm)
 
+    # ------------------------------------------------------------------
+    # Gradient norm diagnostics
+    # ------------------------------------------------------------------
+
+    # Order matters: first-match wins, so more-specific prefixes go first.
+    # Keys become metric column names (logged as ``grad_<key>``).
+    _GRAD_NORM_GROUPS: tuple[tuple[str, str], ...] = (
+        ("rpn_cls", "rpn.head.objectness_logits"),
+        ("rpn_loc", "rpn.head.anchor_deltas"),
+        ("rpn_conv", "rpn.head.conv"),
+        ("roi_cls", "roi_heads.box_predictor.cls_score"),
+        ("roi_loc", "roi_heads.box_predictor.bbox_pred"),
+        ("roi_box_head", "roi_heads.box_head"),
+        ("backbone_resnet", "backbone.bottom_up"),
+        ("backbone_fpn", "backbone."),
+    )
+
+    def _build_grad_norm_group_map(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            matched = "other"
+            for grp_key, grp_prefix in self._GRAD_NORM_GROUPS:
+                if name.startswith(grp_prefix):
+                    matched = grp_key
+                    break
+            mapping[name] = matched
+        return mapping
+
+    def _compute_grad_norms(self) -> dict[str, float]:
+        """Per-group L2 grad norms (sqrt of sum-of-squares) plus ``total``.
+
+        Cheap: one ``.pow(2).sum()`` per parameter, summed by group, then
+        ``sqrt``. Numbers match what ``torch.nn.utils.clip_grad_norm_``
+        would report as the pre-clip norm if you concatenated only the
+        listed group's grads.
+        """
+        if self._grad_norm_group_map is None:
+            self._grad_norm_group_map = self._build_grad_norm_group_map()
+        sums: dict[str, float] = {"total": 0.0}
+        for grp_key, _ in self._GRAD_NORM_GROUPS:
+            sums[grp_key] = 0.0
+        sums["other"] = 0.0
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad or p.grad is None:
+                continue
+            sq = float(p.grad.detach().pow(2).sum().item())
+            sums["total"] += sq
+            grp = self._grad_norm_group_map.get(name, "other")
+            sums[grp] = sums.get(grp, 0.0) + sq
+        return {k: v**0.5 for k, v in sums.items() if v > 0.0 or k == "total"}
+
     def run_step(self) -> None:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -197,6 +254,9 @@ class SimpleTrainer(TrainerBase):
             accum_total += float(micro_total.detach().item()) * self.grad_accum_steps
             for k, v in loss_dict.items():
                 accum_dict[k] = accum_dict.get(k, 0.0) + float(v.detach().item())
+        # Diagnostic: capture pre-clip per-group grad norms so a divergent
+        # run can be localised to a specific head (RPN cls vs ROI cls vs ...).
+        grad_norms = self._compute_grad_norms() if self.grad_norm_log_enabled else None
         if self.grad_clip_norm is not None:
             self._clip_grads()
         self.optimizer.step()
@@ -205,6 +265,7 @@ class SimpleTrainer(TrainerBase):
         self._record_floats(
             {k: v / n for k, v in accum_dict.items()},
             accum_total / n,
+            grad_norms=grad_norms,
         )
 
     def _record(self, loss_dict: Mapping[str, Tensor], total: Tensor) -> None:
@@ -214,14 +275,26 @@ class SimpleTrainer(TrainerBase):
             **{k: float(v.detach().item()) for k, v in loss_dict.items()},
         }
 
-    def _record_floats(self, loss_dict: Mapping[str, float], total: float) -> None:
+    def _record_floats(
+        self,
+        loss_dict: Mapping[str, float],
+        total: float,
+        *,
+        grad_norms: Mapping[str, float] | None = None,
+    ) -> None:
         """Same shape as :meth:`_record` but with already-evaluated floats.
 
         Used by gradient-accumulation paths that have already reduced the
         per-micro-batch tensors to scalars across the accumulation loop.
+        ``grad_norms`` (when provided) is recorded under ``grad_<key>``
+        names so :class:`MetricsPrinter` can include them in the line.
         """
         self.last_loss = total
-        self.storage = {"total_loss": total, **dict(loss_dict)}
+        record: dict[str, float] = {"total_loss": total, **dict(loss_dict)}
+        if grad_norms is not None:
+            for k, v in grad_norms.items():
+                record[f"grad_{k}"] = v
+        self.storage = record
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +325,7 @@ class AMPTrainer(SimpleTrainer):
         grad_clip_norm: float | None = None,
         grad_clip_type: GradClipType = "norm",
         grad_accum_steps: int = 1,
+        grad_norm_log_enabled: bool = False,
     ) -> None:
         super().__init__(
             model,
@@ -260,6 +334,7 @@ class AMPTrainer(SimpleTrainer):
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
             grad_accum_steps=grad_accum_steps,
+            grad_norm_log_enabled=grad_norm_log_enabled,
         )
         if amp_dtype not in ("fp16", "bf16"):
             raise ValueError(f"amp_dtype must be 'fp16' or 'bf16'; got {amp_dtype!r}")
@@ -297,8 +372,12 @@ class AMPTrainer(SimpleTrainer):
             accum_total += float(micro_total.detach().item()) * self.grad_accum_steps
             for k, v in loss_dict.items():
                 accum_dict[k] = accum_dict.get(k, 0.0) + float(v.detach().item())
-        if self.grad_clip_norm is not None:
+        # Unscale before computing diagnostic norms so the values are in
+        # real-gradient units (matching what the user would see at FP32).
+        if self.grad_clip_norm is not None or self.grad_norm_log_enabled:
             self.scaler.unscale_(self.optimizer)
+        grad_norms = self._compute_grad_norms() if self.grad_norm_log_enabled else None
+        if self.grad_clip_norm is not None:
             self._clip_grads()
         self.scaler.step(self.optimizer)
         self.scaler.update()
@@ -306,6 +385,7 @@ class AMPTrainer(SimpleTrainer):
         self._record_floats(
             {k: v / n for k, v in accum_dict.items()},
             accum_total / n,
+            grad_norms=grad_norms,
         )
 
 

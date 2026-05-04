@@ -284,6 +284,7 @@ def run_train(
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
             grad_accum_steps=cfg.solver.grad_accum_steps,
+            grad_norm_log_enabled=cfg.solver.grad_norm_log_enabled,
         )
     else:
         trainer = SimpleTrainer(
@@ -293,6 +294,7 @@ def run_train(
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
             grad_accum_steps=cfg.solver.grad_accum_steps,
+            grad_norm_log_enabled=cfg.solver.grad_norm_log_enabled,
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)

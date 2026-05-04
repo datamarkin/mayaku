@@ -444,6 +444,15 @@ class SolverConfig(_BaseModel):
     clip_gradients_value: Annotated[float, Field(gt=0.0)] = 5.0
     clip_gradients_type: Literal["value", "norm"] = "norm"
 
+    # Diagnostic: when true, every training step computes the global L2
+    # gradient norm AND per-module-group sub-norms (RPN cls / RPN loc /
+    # ROI cls / ROI loc / ROI box-head / backbone / FPN) before clipping
+    # and records them on ``trainer.storage`` so MetricsPrinter logs
+    # them. Used to localise gradient blow-ups when training without
+    # clipping. Adds one element-wise op per parameter per step (cheap;
+    # ~ms-level on COCO scale). Default off.
+    grad_norm_log_enabled: bool = False
+
     # Exponential moving average of model weights (Phase 1 modernization).
     # When enabled, an EMA shadow tracks the live weights at every step
     # and a parallel EMA checkpoint is saved alongside the live one.
