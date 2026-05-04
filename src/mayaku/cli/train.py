@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import gc
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -259,15 +259,16 @@ def run_train(
     else:
         mapped = _MappedList(dataset_dicts, mapper)
     sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
-    sampled_iter: Iterator[int] = iter(sampler)
-    indexed = _SamplerView(mapped, sampled_iter)
-    # AspectRatioGroupedDataset is itself an iterable yielding batches
-    # (`list[dict]`), which is the contract SimpleTrainer expects from
-    # its `data_loader`. Skipping a DataLoader here keeps the CLI
-    # single-process; the multi-worker / DDP loader builder is a
-    # natural Step 14+ follow-up once we have a real distributed
-    # training story to wire it into.
-    loader: Any = AspectRatioGroupedDataset(indexed, batch_size=cfg.solver.ims_per_batch)
+    dl = DataLoader(
+        mapped,  # type: ignore[arg-type]
+        sampler=sampler,
+        batch_size=1,
+        num_workers=cfg.dataloader.num_workers,
+        collate_fn=_unwrap_single,
+        pin_memory=dev.supports_pin_memory,
+        persistent_workers=cfg.dataloader.num_workers > 0,
+    )
+    loader: Any = AspectRatioGroupedDataset(dl, batch_size=cfg.solver.ims_per_batch)
 
     grad_clip_norm: float | None = (
         cfg.solver.clip_gradients_value if cfg.solver.clip_gradients_enabled else None
@@ -445,24 +446,6 @@ class _MappedList:
         return self._mapper(self._dataset_dicts[idx])
 
 
-class _SamplerView:
-    """Iterable yielding ``mapped[i]`` for each ``i`` from a sampler.
-
-    Glue between :class:`TrainingSampler` (an infinite index stream) and
-    :class:`AspectRatioGroupedDataset` (which expects an iterable of
-    sample dicts). ``mapped`` is either :class:`_MappedList` (single-sample
-    path) or :class:`MultiSampleMappedDataset` (Phase 1b multi-sample
-    path). Both quack the same way: ``mapped[i]`` returns a mapped dict.
-    """
-
-    def __init__(
-        self,
-        mapped: _MappedList | MultiSampleMappedDataset,
-        sampler_iter: Iterator[int],
-    ) -> None:
-        self._mapped = mapped
-        self._iter = sampler_iter
-
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        for idx in self._iter:
-            yield self._mapped[idx]
+def _unwrap_single(batch: list[Any]) -> Any:
+    """Collate for batch_size=1: return the single item, not a list."""
+    return batch[0]
