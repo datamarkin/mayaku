@@ -316,6 +316,7 @@ def run_train(
     # step doesn't fight the live save. The EMA shadow is checkpointed to
     # `output_dir/ema/` so the user can pick whichever variant they want
     # to ship; the EMA weights typically score 0.3-0.5 AP higher.
+    ema: ModelEMA | None = None
     if cfg.solver.ema_enabled:
         ema = ModelEMA(model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
         hooks.append(EMAHook(ema, model))
@@ -330,7 +331,8 @@ def run_train(
         assert val_json is not None and val_image_root is not None  # validated above
         val_loader = _build_val_loader(cfg, val_json, val_image_root)
         evaluator = COCOEvaluator(val_json, output_dir=output_dir / "eval")
-        hooks.append(EvalHook(cfg.test.eval_period, evaluator, model, val_loader))
+        eval_model = ema.shadow if ema is not None else model
+        hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
     trainer.train(start_iter=0, max_iter=cfg.solver.max_iter)
 
