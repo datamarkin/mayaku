@@ -35,10 +35,6 @@ input:
   color_jitter_saturation: 0.7
   color_jitter_hue: 0.015
   color_jitter_prob: 0.5
-  mosaic_prob: 0.5
-  mosaic_canvas_size: [1024, 1024]
-  mixup_prob: 0.1
-  mixup_alpha: 8.0
 
 solver:
   ims_per_batch: 8

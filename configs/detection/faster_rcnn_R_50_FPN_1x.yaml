@@ -52,10 +52,6 @@ input:
   # (4-image stitch) or MixUp (2-image alpha blend). Independent — both
   # could fire on the same step but only the first to fire wins. Mosaic
   # is the heavier regulariser; MixUp adds a small additional kick.
-  mosaic_prob: 0.5
-  mosaic_canvas_size: [1024, 1024]
-  mixup_prob: 0.1
-  mixup_alpha: 8.0
 
 solver:
   # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
