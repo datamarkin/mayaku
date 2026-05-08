@@ -1,7 +1,13 @@
-# Mayaku eval config matching Detectron2's faster_rcnn_X_101_32x8d_FPN_3x.
-# X-101 in D2 is a caffe2 model: stride-2 stays on the 3x3 (the
-# torchvision-style placement) and PIXEL_STD is the standard ImageNet
-# std (BGR in D2, RGB-flipped here for Mayaku's RGB-native pipeline).
+# X-101-32x8d-FPN Faster R-CNN — 3x schedule (270k iters). Production ceiling.
+# Train after faster_rcnn_X_101_32x8d_FPN_1x.yaml validates ≥ +1 AP vs D2 baseline.
+# H100/A100 80 GB: ims_per_batch=16, grad_accum_steps=1.
+#
+# Recipe: cosine LR, EMA, color jitter, Mosaic + MixUp. Same as R-50 3x.
+# Backbone trained as BN+freeze_at=0 (tools/train_mayaku.py injects this);
+# config ships as FrozenBN+freeze_at=2 for fine-tuning compatibility.
+#
+# D2 3x baseline: d2_baseline/detection/faster_rcnn_X_101_32x8d_FPN_3x.yaml
+# D2 published 3x: 43.0 box AP. Target with this recipe: ≥ 45 AP.
 model:
   meta_architecture: faster_rcnn
   backbone:
@@ -15,9 +21,35 @@ model:
     num_conv: 0
     num_fc: 2
     fc_dim: 1024
-  # D2 X-101 PIXEL_STD = [57.375, 57.120, 58.395] in BGR; RGB-flipped
-  # for Mayaku.
   pixel_std: [58.395, 57.120, 57.375]
+
 input:
   min_size_test: 800
   max_size_test: 1333
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+  mosaic_prob: 0.5
+  mosaic_canvas_size: [1024, 1024]
+  mixup_prob: 0.1
+  mixup_alpha: 8.0
+
+solver:
+  # H100 80 GB: ims_per_batch=16, grad_accum_steps=1.
+  # A100 80 GB: ims_per_batch=16, grad_accum_steps=1.
+  # RTX 3090 12 GB: ims_per_batch=4, grad_accum_steps=4.
+  ims_per_batch: 16
+  grad_accum_steps: 1
+  base_lr: 0.02
+  max_iter: 270_000
+  steps: [210_000, 250_000]
+  warmup_iters: 1_000
+  warmup_factor: 0.001
+  warmup_method: linear
+  lr_scheduler_name: WarmupCosineLR
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2_000.0

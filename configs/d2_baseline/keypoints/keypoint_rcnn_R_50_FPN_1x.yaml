@@ -1,0 +1,21 @@
+# Mayaku eval config matching Detectron2's keypoint_rcnn_R_50_FPN_1x.
+# Keypoint R-CNN: 1 class (person) with 17 keypoints (COCO Person).
+model:
+  meta_architecture: keypoint_rcnn
+  keypoint_on: true
+  backbone:
+    name: resnet50
+    norm: FrozenBN
+    freeze_at: 2
+    stride_in_1x1: true
+  roi_heads:
+    num_classes: 1
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  roi_keypoint_head: {}  # defaults match D2: num_keypoints=17, conv_dims=(512,)*8
+  pixel_std: [1.0, 1.0, 1.0]
+input:
+  min_size_test: 800
+  max_size_test: 1333

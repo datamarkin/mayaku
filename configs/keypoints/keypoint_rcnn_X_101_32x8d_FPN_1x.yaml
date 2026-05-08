@@ -1,23 +1,21 @@
-# R-50-FPN Keypoint R-CNN — 3x schedule (270k iters). Production target.
-# Train after keypoint_rcnn_R_50_FPN_1x.yaml validates ≥ +1 AP over the D2 baseline.
-# num_classes=1 — COCO keypoints are person-only.
+# X-101-32x8d-FPN Keypoint R-CNN — 1x schedule (90k iters).
+# Top of the keypoint model zoo; ~2× compute per iter vs R-101.
+# num_classes=1 — COCO keypoints are person-only. At 12 GB: ims_per_batch=4.
 #
 # Recipe: cosine LR, EMA, color jitter, Mosaic + MixUp.
 # CopyPaste excluded — keypoint annotations don't survive instance pasting cleanly.
 # Backbone trained as BN+freeze_at=0 (tools/train_mayaku.py injects this);
 # config ships as FrozenBN+freeze_at=2 for fine-tuning compatibility.
 #
-# D2 3x baseline: d2_baseline/keypoints/keypoint_rcnn_R_50_FPN_3x.yaml
-# D2 published 3x: 54.5 box AP / 66.1 kp AP. Target with this recipe: ≥ +2 AP both.
+# D2 3x baseline: d2_baseline/keypoints/keypoint_rcnn_X_101_32x8d_FPN_3x.yaml
+# D2 published 3x: 57.5 box AP / 68.2 kp AP. Target with this recipe at 1x: ≥ +1 AP both.
 model:
   meta_architecture: keypoint_rcnn
   keypoint_on: true
   backbone:
-    name: resnet50
+    name: resnext101_32x8d
     norm: FrozenBN
     freeze_at: 2
-    # See faster_rcnn_R_50_FPN_1x_modern.yaml for why these match torchvision
-    # IMAGENET1K_V2 instead of D2's caffe2 layout.
     stride_in_1x1: false
   roi_heads:
     num_classes: 1
@@ -43,15 +41,12 @@ input:
   mixup_alpha: 8.0
 
 solver:
-  # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
-  # GPU keep ims_per_batch=16, grad_accum_steps=1 (the D2 3x baseline).
-  # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
-  # gradients are mathematically identical, AP target unchanged.
-  ims_per_batch: 16
-  grad_accum_steps: 1
+  # X-101 keypoint: at 12 GB use ims_per_batch=4, grad_accum_steps=4.
+  ims_per_batch: 8
+  grad_accum_steps: 2
   base_lr: 0.02
-  max_iter: 270_000
-  steps: [210_000, 250_000]
+  max_iter: 90_000
+  steps: [60_000, 80_000]
   warmup_iters: 1_000
   warmup_factor: 0.001
   warmup_method: linear
