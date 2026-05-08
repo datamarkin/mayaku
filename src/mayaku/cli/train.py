@@ -432,9 +432,7 @@ class _MappedList:
     ``num_workers=0`` (memory).
     """
 
-    def __init__(
-        self, dataset_dicts: Sequence[dict[str, Any]], mapper: DatasetMapper
-    ) -> None:
+    def __init__(self, dataset_dicts: Sequence[dict[str, Any]], mapper: DatasetMapper) -> None:
         # Accepts either a plain ``list[dict]`` or a
         # :class:`mayaku.data.SerializedList` — both quack the same way
         # for ``__len__`` / ``__getitem__``.

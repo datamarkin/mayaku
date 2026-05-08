@@ -59,12 +59,8 @@ class SerializedList(Sequence[T], Generic[T]):
     """
 
     def __init__(self, items: Sequence[T]) -> None:
-        encoded: list[bytes] = [
-            pickle.dumps(x, protocol=pickle.HIGHEST_PROTOCOL) for x in items
-        ]
-        sizes: npt.NDArray[np.int64] = np.asarray(
-            [len(b) for b in encoded], dtype=np.int64
-        )
+        encoded: list[bytes] = [pickle.dumps(x, protocol=pickle.HIGHEST_PROTOCOL) for x in items]
+        sizes: npt.NDArray[np.int64] = np.asarray([len(b) for b in encoded], dtype=np.int64)
         # Offsets table: start byte of item ``i`` in the buffer.
         # ``np.cumsum([0] + sizes[:-1])`` would underflow on the empty
         # case; the concat-then-cumsum form below handles len==0 cleanly.

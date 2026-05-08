@@ -44,9 +44,7 @@ class _LazyMappedDataset(Dataset[dict[str, Any]]):
     has one decoded image in flight.
     """
 
-    def __init__(
-        self, dicts: Sequence[dict[str, Any]], mapper: DatasetMapper
-    ) -> None:
+    def __init__(self, dicts: Sequence[dict[str, Any]], mapper: DatasetMapper) -> None:
         self._dicts = dicts
         self._mapper = mapper
 
