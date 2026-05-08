@@ -1,0 +1,21 @@
+# Mayaku eval config matching Detectron2's keypoint_rcnn_X_101_32x8d_FPN_3x.
+# X-101 caffe2 backbone (stride on 3x3, ImageNet std RGB-flipped).
+model:
+  meta_architecture: keypoint_rcnn
+  keypoint_on: true
+  backbone:
+    name: resnext101_32x8d
+    norm: FrozenBN
+    freeze_at: 2
+    stride_in_1x1: false
+  roi_heads:
+    num_classes: 1
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  roi_keypoint_head: {}
+  pixel_std: [58.395, 57.120, 57.375]
+input:
+  min_size_test: 800
+  max_size_test: 1333
