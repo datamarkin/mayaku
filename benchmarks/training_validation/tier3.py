@@ -114,9 +114,9 @@ def main() -> int:
                 # by NaN-ing out at iter 100.
                 "clip_gradients_enabled": True,
                 "clip_gradients_value": 5.0,
-                "clip_gradients_type": "norm",
+                "clip_gradients_type": "norm"
             },
-            "test": {"eval_period": EVAL_PERIOD},
+            "test": {"eval_period": EVAL_PERIOD}
         },
     )
 
@@ -154,8 +154,13 @@ def main() -> int:
     train_secs = time.time() - t_train_start
     print(f"[tier3] train wall-clock = {train_secs:.0f}s ({train_secs / 3600:.2f}h)")
 
-    final_weights = train_dir / "model_final.pth"
-    if not final_weights.exists():
+    ema_final = train_dir / "ema" / "model_final.pth"
+    live_final = train_dir / "model_final.pth"
+    if ema_final.exists():
+        final_weights = ema_final
+    elif live_final.exists():
+        final_weights = live_final
+    else:
         candidates = sorted(train_dir.glob("model_iter_*.pth"))
         if not candidates:
             print(f"[tier3] FAIL — no checkpoint produced under {train_dir}", file=sys.stderr)
