@@ -40,7 +40,7 @@ from mayaku.data import (
 from mayaku.structures.boxes import BoxMode
 from mayaku.structures.instances import Instances
 from mayaku.structures.keypoints import Keypoints
-from mayaku.structures.masks import PolygonMasks
+from mayaku.structures.masks import BitMasks, PolygonMasks
 
 # ---------------------------------------------------------------------------
 # Toy dataset fixture
@@ -324,3 +324,73 @@ def test_mapper_image_dtype_layout_and_dtype(toy_coco: tuple[Path, Path, Metadat
     assert img.dtype == torch.float32
     # Pixel values sit in [0, 255] (no normalisation here — the model does it).
     assert img.max() >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Bitmask path: rasterisation must happen in the pre-augmentation frame
+# ---------------------------------------------------------------------------
+
+
+def _polygon_dict(image_h: int, image_w: int, box_xyxy: tuple[int, int, int, int]) -> dict:
+    """Synthetic mapper input: solid-grey image + one rectangular polygon.
+
+    Uses ``__image`` to hand the array straight to the mapper without
+    going through ``read_image``; mirrors how the multi-sample augs pass
+    a composed canvas to the mapper.
+    """
+    img = np.full((image_h, image_w, 3), 128, dtype=np.uint8)
+    x0, y0, x1, y1 = box_xyxy
+    polygon = [x0, y0, x1, y0, x1, y1, x0, y1]
+    return {
+        "file_name": "_synthetic_",
+        "image_id": 0,
+        "height": image_h,
+        "width": image_w,
+        "__image": img,
+        "annotations": [
+            {
+                "bbox": [x0, y0, x1 - x0, y1 - y0],
+                "bbox_mode": BoxMode.XYWH_ABS,
+                "category_id": 0,
+                "segmentation": [polygon],
+            }
+        ],
+    }
+
+
+def _bitmask_mapper(short_edge: int) -> DatasetMapper:
+    return DatasetMapper(
+        [ResizeShortestEdge((short_edge,), max_size=1333)],
+        is_train=True,
+        mask_format="bitmask",
+    )
+
+
+def test_mapper_bitmask_polygon_square_canvas_downscale() -> None:
+    """Mosaic-style 1024×1024 canvas → ResizeShortestEdge((672,)) → 672×672.
+
+    Regression for the case where a polygon segmentation in the canvas
+    coordinate frame must be rasterised at canvas size, then resized
+    through the transform list to the post-aug shape.
+    """
+    dd = _polygon_dict(1024, 1024, (100, 100, 300, 300))
+    out = _bitmask_mapper(short_edge=672)(dd)
+    inst = out["instances"]
+    assert isinstance(inst.gt_masks, BitMasks)
+    assert inst.gt_masks.tensor.shape == (1, 672, 672)
+    assert inst.gt_masks.tensor.any()
+
+
+def test_mapper_bitmask_polygon_nonsquare_upscale() -> None:
+    """480×640 source → ResizeShortestEdge((672,)) → 672×896.
+
+    Regression for the plain (no multi-sample aug) path: a real COCO
+    polygon annotation in source-image coords must rasterise at source
+    dims, not at post-aug dims.
+    """
+    dd = _polygon_dict(480, 640, (50, 50, 200, 200))
+    out = _bitmask_mapper(short_edge=672)(dd)
+    inst = out["instances"]
+    assert isinstance(inst.gt_masks, BitMasks)
+    assert inst.gt_masks.tensor.shape == (1, 672, 896)
+    assert inst.gt_masks.tensor.any()
