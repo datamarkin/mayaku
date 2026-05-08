@@ -157,7 +157,7 @@ def run_train(
                 "pretrained_backbone=True loads torchvision IMAGENET1K_V2 weights, "
                 "but the config has model.pixel_std=[1, 1, 1] (caffe2-style mean-"
                 "only normalisation). Torchvision weights expect std-normalised "
-                "inputs; pairing them with std=1 inflates input magnitudes ~58× "
+                "inputs; pairing them with std=1 inflates input magnitudes ~58x "
                 "and triggers the same silent collapse as a stride-layout "
                 "mismatch. Set pixel_std=[58.395, 57.120, 57.375] (the *_modern."
                 "yaml convention) when training with --pretrained-backbone."
@@ -260,7 +260,7 @@ def run_train(
         mapped = _MappedList(dataset_dicts, mapper)
     sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
     dl = DataLoader(
-        mapped,  # type: ignore[arg-type]
+        mapped,
         sampler=sampler,
         batch_size=1,
         num_workers=cfg.dataloader.num_workers,

@@ -64,7 +64,8 @@ class BrightnessTransform(_PhotometricTransform):
         if image.ndim != 3 or image.shape[2] != 3:
             return image
         out = image.astype(np.float32, copy=True) * self.factor
-        return np.clip(out, 0.0, 255.0).astype(image.dtype)
+        result: npt.NDArray[Any] = np.clip(out, 0.0, 255.0).astype(image.dtype)
+        return result
 
 
 class ContrastTransform(_PhotometricTransform):
@@ -84,7 +85,8 @@ class ContrastTransform(_PhotometricTransform):
         # Per-channel mean (one scalar per channel).
         mean = img32.reshape(-1, 3).mean(axis=0)
         out: npt.NDArray[Any] = (img32 - mean) * self.factor + mean
-        return np.clip(out, 0.0, 255.0).astype(image.dtype)
+        result: npt.NDArray[Any] = np.clip(out, 0.0, 255.0).astype(image.dtype)
+        return result
 
 
 class SaturationTransform(_PhotometricTransform):
@@ -110,7 +112,8 @@ class SaturationTransform(_PhotometricTransform):
         grey = img32[..., 0] * r + img32[..., 1] * g + img32[..., 2] * b
         grey3 = np.broadcast_to(grey[..., None], img32.shape)
         out: npt.NDArray[Any] = grey3 + (img32 - grey3) * self.factor
-        return np.clip(out, 0.0, 255.0).astype(image.dtype)
+        result: npt.NDArray[Any] = np.clip(out, 0.0, 255.0).astype(image.dtype)
+        return result
 
 
 class HueShiftTransform(_PhotometricTransform):
@@ -139,7 +142,8 @@ class HueShiftTransform(_PhotometricTransform):
         h = (h + self.shift) % 1.0
         r, g, b = _hsv_to_rgb(h, s, v)
         out = np.stack([r, g, b], axis=-1) * 255.0
-        return np.clip(out, 0.0, 255.0).astype(image.dtype)
+        result: npt.NDArray[Any] = np.clip(out, 0.0, 255.0).astype(image.dtype)
+        return result
 
 
 # ---------------------------------------------------------------------------
