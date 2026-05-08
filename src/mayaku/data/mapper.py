@@ -124,6 +124,11 @@ class DatasetMapper:
         # readable for the multi-sample integration point.
         image = dd.pop("__image") if "__image" in dd else read_image(dd["file_name"])
         _check_image_size(dd, image)
+        # Capture pre-augmentation dims: this is the coordinate frame the
+        # source polygon / RLE segmentations live in, and the input frame
+        # the transform list is calibrated for. Bitmask rasterisation has
+        # to happen at this size, not at post-aug size — see _build_masks.
+        pre_h, pre_w = image.shape[:2]
 
         aug_input = AugInput(image=image)
         transforms = self._aug_list(aug_input)
@@ -139,7 +144,9 @@ class DatasetMapper:
         # Detectron2 also drops iscrowd annotations from training
         # (`dataset_mapper.py:165`); they participate only in evaluation.
         annos = [a for a in annos if not a.get("iscrowd", 0)]
-        instances = self._annotations_to_instances(annos, transforms, image_size=(h, w))
+        instances = self._annotations_to_instances(
+            annos, transforms, image_size=(h, w), pre_image_size=(pre_h, pre_w)
+        )
         dd["instances"] = instances
         return dd
 
@@ -150,6 +157,7 @@ class DatasetMapper:
         annos: list[dict[str, Any]],
         transforms: TransformList,
         image_size: tuple[int, int],
+        pre_image_size: tuple[int, int],
     ) -> Instances:
         h, w = image_size
 
@@ -194,7 +202,9 @@ class DatasetMapper:
         # --- masks (optional)
         gt_masks: PolygonMasks | BitMasks | None = None
         if any("segmentation" in a for a in annos):
-            gt_masks = self._build_masks(annos, transforms, image_size=(h, w))
+            gt_masks = self._build_masks(
+                annos, transforms, image_size=(h, w), pre_image_size=pre_image_size
+            )
 
         # --- keypoints (optional)
         gt_keypoints: Keypoints | None = None
@@ -215,8 +225,10 @@ class DatasetMapper:
         annos: list[dict[str, Any]],
         transforms: TransformList,
         image_size: tuple[int, int],
+        pre_image_size: tuple[int, int],
     ) -> PolygonMasks | BitMasks:
         h, w = image_size
+        pre_h, pre_w = pre_image_size
         if self.mask_format == "polygon":
             polygons_per_instance: list[list[npt.NDArray[np.float32]]] = []
             for a in annos:
@@ -234,7 +246,15 @@ class DatasetMapper:
                 polys = [np.asarray(p, dtype=np.float32) for p in seg]
                 polygons_per_instance.append(transforms.apply_polygons(polys))
             return PolygonMasks(polygons_per_instance)
-        # bitmask: rasterise here (slow but correct for RLE-only datasets)
+        # bitmask: rasterise here (slow but correct for RLE-only datasets).
+        # Polygons / RLEs are in the *pre-augmentation* coordinate frame
+        # (source-image dims for plain samples, canvas dims for Mosaic-style
+        # synthetic samples — both equal `pre_image_size`). Rasterising at
+        # post-aug `(h, w)` would clip / scale polygon coords incorrectly
+        # AND hand the transform list a wrong-shape mask, since the
+        # ResizeTransform was calibrated to consume `(pre_h, pre_w)` input.
+        # Output `bit[i]` is post-aug because `apply_segmentation` performs
+        # the pre→post resize that the rest of the transform pipeline expects.
         from pycocotools import mask as coco_mask
 
         bit = np.zeros((len(annos), h, w), dtype=np.bool_)
@@ -242,7 +262,7 @@ class DatasetMapper:
             seg = a.get("segmentation")
             if not seg:
                 continue
-            rasterised = _segmentation_to_bitmask(seg, h, w, coco_mask)
+            rasterised = _segmentation_to_bitmask(seg, pre_h, pre_w, coco_mask)
             bit[i] = transforms.apply_segmentation(rasterised.astype(np.uint8)).astype(bool)
         return BitMasks(torch.from_numpy(bit))
 
