@@ -347,9 +347,7 @@ def _swap_backbone(
             from mayaku.inference.export import TensorRTBackbone, TensorRTExporter
             from mayaku.utils.download import engine_cache_path
 
-            engine_path = engine_cache_path(
-                name, pinned_h=pinned[0], pinned_w=pinned[1], fp16=fp16
-            )
+            engine_path = engine_cache_path(name, pinned_h=pinned[0], pinned_w=pinned[1], fp16=fp16)
             if not engine_path.exists():
                 engine_path.parent.mkdir(parents=True, exist_ok=True)
                 sample = torch.zeros(

@@ -140,9 +140,7 @@ class TensorRTBackbone(nn.Module):
 
     def _allocate(self, device: torch.device) -> Tensor:
         target_h, target_w = self.pinned
-        padded = torch.zeros(
-            (1, 3, target_h, target_w), dtype=torch.float32, device=device
-        )
+        padded = torch.zeros((1, 3, target_h, target_w), dtype=torch.float32, device=device)
         self._context.set_tensor_address("image", int(padded.data_ptr()))
         for name in self.output_names:
             shape = tuple(self._context.get_tensor_shape(name))
