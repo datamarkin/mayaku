@@ -31,7 +31,19 @@ __all__ = [
     "AugmentationList",
     "RandomFlip",
     "ResizeShortestEdge",
+    "compute_resized_hw",
 ]
+
+
+def compute_resized_hw(h: int, w: int, short_edge: int, max_size: int) -> tuple[int, int]:
+    """Shortest-edge resize math, factored out so non-PIL paths (e.g. the
+    GPU preprocessing branch in :class:`mayaku.inference.Predictor`) can
+    reuse the exact same target dimensions as :class:`ResizeShortestEdge`.
+    """
+    scale = short_edge / min(h, w)
+    if max(h, w) * scale > max_size:
+        scale = max_size / max(h, w)
+    return round(h * scale), round(w * scale)
 
 
 @dataclass
@@ -87,11 +99,7 @@ class ResizeShortestEdge(Augmentation):
         else:
             lo, hi = self.short_edge_lengths
             target = int(self.rng.integers(lo, hi + 1))
-        scale = target / min(h, w)
-        if max(h, w) * scale > self.max_size:
-            scale = self.max_size / max(h, w)
-        new_h = round(h * scale)
-        new_w = round(w * scale)
+        new_h, new_w = compute_resized_hw(h, w, target, self.max_size)
         return ResizeTransform(h, w, new_h, new_w, self.interp)
 
 

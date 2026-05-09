@@ -38,6 +38,7 @@ __all__ = [
     "DownloadError",
     "ManifestEntry",
     "download_model",
+    "engine_cache_path",
     "list_models",
 ]
 
@@ -66,6 +67,33 @@ def _cache_root(version: str = "v1") -> Path:
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
     return base / "mayaku" / version / "models"
+
+
+def engine_cache_path(
+    name: str,
+    *,
+    pinned_h: int,
+    pinned_w: int,
+    fp16: bool,
+    cache_dir: Path | None = None,
+) -> Path:
+    """Local cache path for a TensorRT engine built for ``name``.
+
+    Engines are GPU-architecture-specific (a build for ``sm89`` won't run
+    on ``sm86``), so the SM string is part of the path. Engines are not
+    served from the manifest — they're built locally on first use by
+    :class:`mayaku.inference.export.TensorRTExporter`. This helper is the
+    single source of truth for *where* to write / look for them.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("engine_cache_path requires a CUDA-capable GPU")
+    cap = torch.cuda.get_device_capability()
+    sm = f"sm{cap[0]}{cap[1]}"
+    precision = "fp16" if fp16 else "fp32"
+    base = cache_dir or _cache_root()
+    return base / "engines" / sm / f"{name}_{int(pinned_h)}x{int(pinned_w)}_{precision}.engine"
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -36,6 +37,7 @@ from torch import nn
 
 from mayaku.config.schemas import MayakuConfig
 from mayaku.data.transforms import ResizeShortestEdge
+from mayaku.data.transforms.augmentation import compute_resized_hw
 from mayaku.inference.postprocess import detector_postprocess
 from mayaku.structures.instances import Instances
 from mayaku.utils.image import read_image
@@ -43,6 +45,7 @@ from mayaku.utils.image import read_image
 __all__ = ["Predictor"]
 
 ImageInput = npt.NDArray[np.uint8] | str | Path
+Target = Literal["pytorch", "onnx", "tensorrt"]
 
 
 class Predictor:
@@ -68,20 +71,30 @@ class Predictor:
         min_size_test: int = 800,
         max_size_test: int = 1333,
         device: torch.device | None = None,
+        gpu_preprocess: bool = False,
+        pinned_memory: bool = False,
     ) -> None:
         if min_size_test <= 0 or max_size_test <= 0:
             raise ValueError(
                 f"min_size_test / max_size_test must be > 0; got ({min_size_test}, {max_size_test})"
             )
+        if pinned_memory and not gpu_preprocess:
+            raise ValueError(
+                "pinned_memory=True requires gpu_preprocess=True; the staging "
+                "buffer is shaped for the uint8 RGB upload path."
+            )
         self.model = model.eval()
         self.min_size_test = min_size_test
         self.max_size_test = max_size_test
         self.device = device or _resolve_device(model)
+        self.gpu_preprocess = gpu_preprocess
+        self.pinned_memory = pinned_memory
         self._resize = ResizeShortestEdge(
             short_edge_lengths=(min_size_test,),
             max_size=max_size_test,
             sample_style="choice",
         )
+        self._pinned_buf: torch.Tensor | None = None
 
     # ------------------------------------------------------------------
     # Construction from a config
@@ -110,6 +123,11 @@ class Predictor:
         weights: str | Path | None = None,
         config: str | Path | None = None,
         device: str = "auto",
+        target: Target = "pytorch",
+        fp16: bool = True,
+        pinned: tuple[int, int] = (1344, 1344),
+        gpu_preprocess: bool = False,
+        pinned_memory: bool = False,
     ) -> Predictor:
         """Build a fully-loaded :class:`Predictor` from a model name in one call.
 
@@ -128,11 +146,35 @@ class Predictor:
                 to a ``.yaml``. Defaults to ``name``.
             device: ``"cpu" | "cuda" | "mps" | "auto"``. Defaults to
                 ``"auto"`` which picks the best available accelerator.
+            target: Backbone runtime. ``"pytorch"`` (default) keeps the
+                eager backbone. ``"onnx"`` downloads the manifest's
+                ONNX backbone and wraps it in
+                :class:`mayaku.inference.export.ONNXBackbone`.
+                ``"tensorrt"`` builds (or loads from cache) a TRT engine
+                via :class:`mayaku.inference.export.TensorRTExporter`
+                and wraps it in
+                :class:`mayaku.inference.export.TensorRTBackbone`.
+            fp16: Used only by ``target="tensorrt"`` — build the engine
+                with FP16 on for ~2x throughput.
+            pinned: Used only by ``target in {"onnx", "tensorrt"}`` — the
+                fixed input shape the exported backbone is built for.
+                Defaults to ``(1344, 1344)`` to safely cover any
+                ``(min_size_test, max_size_test) = (800, 1333)`` input.
+            gpu_preprocess: Forward to :class:`Predictor` constructor.
+            pinned_memory: Forward to :class:`Predictor` constructor.
 
         Example:
             >>> from mayaku.inference import Predictor
             >>> predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
             >>> instances = predictor("photo.jpg")
+
+        Fast-path example:
+            >>> p = Predictor.from_pretrained(
+            ...     "faster_rcnn_R_50_FPN_3x",
+            ...     target="tensorrt",
+            ...     gpu_preprocess=True,
+            ...     pinned_memory=True,
+            ... )
         """
         from mayaku import configs
         from mayaku.backends.device import Device
@@ -160,7 +202,15 @@ class Predictor:
         model.load_state_dict(state)
         model = model.to(torch.device(device))
 
-        return cls.from_config(cfg, model)
+        _swap_backbone(model, name=name, target=target, fp16=fp16, pinned=pinned)
+
+        return cls(
+            model,
+            min_size_test=cfg.input.min_size_test,
+            max_size_test=cfg.input.max_size_test,
+            gpu_preprocess=gpu_preprocess,
+            pinned_memory=pinned_memory,
+        )
 
     # ------------------------------------------------------------------
     # Public call
@@ -176,10 +226,12 @@ class Predictor:
         """
         arr = _to_uint8_rgb(image)
         h, w = int(arr.shape[0]), int(arr.shape[1])
-        resized = self._resize.get_transform(arr).apply_image(arr)
-        # CHW float32 on the model's device.
-        chw = np.ascontiguousarray(resized.transpose(2, 0, 1))
-        img_tensor = torch.from_numpy(chw).to(dtype=torch.float32, device=self.device)
+        if self.gpu_preprocess:
+            img_tensor = self._gpu_preprocess(arr, h, w)
+        else:
+            resized = self._resize.get_transform(arr).apply_image(arr)
+            chw = np.ascontiguousarray(resized.transpose(2, 0, 1))
+            img_tensor = torch.from_numpy(chw).to(dtype=torch.float32, device=self.device)
         inputs = [{"image": img_tensor, "height": h, "width": w}]
         with torch.no_grad():
             outputs = self.model(inputs)
@@ -194,6 +246,38 @@ class Predictor:
         if instances.image_size != (h, w):
             instances = detector_postprocess(instances, h, w)
         return instances
+
+    def _gpu_preprocess(self, arr: npt.NDArray[np.uint8], h: int, w: int) -> torch.Tensor:
+        """GPU-side equivalent of the CPU resize path.
+
+        Uploads the uint8 RGB array (optionally via a pinned-memory
+        staging buffer for an async H2D copy), then resizes on-device
+        with bilinear ``F.interpolate``. Returns a ``(3, new_h, new_w)``
+        float32 tensor on ``self.device``.
+
+        Trade-off: bilinear interpolation on CUDA does not byte-match
+        Pillow's bilinear, so detection boxes will drift sub-pixel vs.
+        the CPU path. This is opt-in via ``gpu_preprocess=True``.
+        """
+        new_h, new_w = compute_resized_hw(h, w, self.min_size_test, self.max_size_test)
+        src = torch.from_numpy(arr)
+        if self.pinned_memory:
+            buf = self._pinned_buf
+            if buf is None or buf.shape[0] < h or buf.shape[1] < w:
+                buf_h = max(buf.shape[0] if buf is not None else 0, h)
+                buf_w = max(buf.shape[1] if buf is not None else 0, w)
+                buf = torch.empty((buf_h, buf_w, 3), dtype=torch.uint8, pin_memory=True)
+                self._pinned_buf = buf
+            buf[:h, :w, :].copy_(src)
+            gpu_uint8 = buf[:h, :w, :].to(self.device, non_blocking=True)
+        else:
+            gpu_uint8 = src.to(self.device)
+        chw = gpu_uint8.permute(2, 0, 1).unsqueeze(0).float()
+        if (new_h, new_w) != (h, w):
+            chw = torch.nn.functional.interpolate(
+                chw, size=(new_h, new_w), mode="bilinear", align_corners=False
+            )
+        return chw[0]
 
     def batch(self, images: Sequence[ImageInput]) -> list[Instances]:
         """Run :meth:`__call__` over a sequence of images.
@@ -222,6 +306,65 @@ def _resolve_device(model: nn.Module) -> torch.device:
         for buf in model.buffers():
             return buf.device
         return torch.device("cpu")
+
+
+def _swap_backbone(
+    model: nn.Module,
+    *,
+    name: str,
+    target: Target,
+    fp16: bool,
+    pinned: tuple[int, int],
+) -> None:
+    """Swap ``model.backbone`` for an ONNX or TensorRT runtime wrapper.
+
+    No-op for ``target="pytorch"``. Lazy-imports the export module so
+    callers who don't ask for an alternate backbone don't pay the import
+    cost.
+    """
+    prev_div = getattr(model.backbone, "size_divisibility", 32)
+    match target:
+        case "pytorch":
+            return
+        case "onnx":
+            from mayaku.inference.export import ONNXBackbone
+            from mayaku.utils.download import download_model
+
+            onnx_path = download_model(name, target="onnx")
+            providers = (
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                if torch.cuda.is_available()
+                else ["CPUExecutionProvider"]
+            )
+            model.backbone = ONNXBackbone(
+                onnx_path,
+                input_height=pinned[0],
+                input_width=pinned[1],
+                size_divisibility=prev_div,
+                providers=providers,
+            )
+        case "tensorrt":
+            from mayaku.inference.export import TensorRTBackbone, TensorRTExporter
+            from mayaku.utils.download import engine_cache_path
+
+            engine_path = engine_cache_path(
+                name, pinned_h=pinned[0], pinned_w=pinned[1], fp16=fp16
+            )
+            if not engine_path.exists():
+                engine_path.parent.mkdir(parents=True, exist_ok=True)
+                sample = torch.zeros(
+                    (1, 3, pinned[0], pinned[1]),
+                    dtype=torch.float32,
+                    device=next(model.parameters()).device,
+                )
+                TensorRTExporter(fp16=fp16).export(model, sample, engine_path)
+            model.backbone = TensorRTBackbone(
+                engine_path, pinned=pinned, size_divisibility=prev_div
+            )
+        case _:
+            raise ValueError(
+                f"unknown target {target!r}; expected one of 'pytorch', 'onnx', 'tensorrt'"
+            )
 
 
 def _to_uint8_rgb(image: ImageInput) -> npt.NDArray[np.uint8]:

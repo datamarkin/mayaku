@@ -42,14 +42,155 @@ from torch import Tensor, nn
 from mayaku.inference.export.base import ExportResult, ParityResult
 from mayaku.inference.export.onnx import ONNXExporter
 
-__all__ = ["TensorRTExporter"]
+__all__ = ["TensorRTBackbone", "TensorRTExporter"]
 
 # Standard FPN output names (`Backbone.output_shape()` from Step 8).
 _DEFAULT_OUT_NAMES: tuple[str, ...] = ("p2", "p3", "p4", "p5", "p6")
 
+# Per-level FPN strides — kept in sync with `ONNXBackbone` (`onnx.py`).
+_DEFAULT_STRIDES: dict[str, int] = {"p2": 4, "p3": 8, "p4": 16, "p5": 32, "p6": 64}
+
 # 1 GiB workspace — enough for the ResNet-50 + FPN body without
 # inflating the build memory footprint to multi-GB.
 _DEFAULT_WORKSPACE_BYTES: int = 1 << 30
+
+
+def _trt_install_hint() -> str:
+    if sys.platform == "darwin":
+        return "TensorRT is not supported on macOS."
+    if not torch.cuda.is_available():
+        return "TensorRT requires a CUDA-enabled GPU (Linux or Windows)."
+    return "pip install mayaku[tensorrt]"
+
+
+class TensorRTBackbone(nn.Module):
+    """Runtime drop-in for ``model.backbone`` that delegates to a serialised
+    TensorRT engine.
+
+    Mirrors :class:`mayaku.inference.export.ONNXBackbone` but talks to the
+    TRT runtime directly — no host↔device numpy round-trip, executes on
+    the caller's current CUDA stream so downstream PyTorch ops natively
+    pipeline behind it (no per-call ``synchronize()``).
+
+    Args:
+        engine_path: Path to a ``.engine`` file produced by
+            :class:`TensorRTExporter`. Must have been built for the same
+            GPU architecture (engines are not portable across SMs); use
+            :func:`mayaku.utils.download.engine_cache_path` to locate /
+            stash an engine keyed by ``(name, shape, precision, sm)``.
+        pinned: ``(H, W)`` the engine was built at. Inputs smaller than
+            this are zero-padded into the top-left corner; inputs
+            larger raise.
+        output_names: FPN feature names to bind. Defaults to
+            ``("p2", "p3", "p4", "p5", "p6")``.
+        strides: Per-level downsampling factor; used to crop the padded
+            output back to the valid region. Defaults to the standard
+            FPN strides (4, 8, 16, 32, 64).
+        size_divisibility: Forwarded to detectron2-style preprocessing
+            (the detector reads ``backbone.size_divisibility`` to decide
+            how to pad each batch).
+    """
+
+    def __init__(
+        self,
+        engine_path: Path,
+        *,
+        pinned: tuple[int, int],
+        output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
+        strides: dict[str, int] | None = None,
+        size_divisibility: int = 32,
+    ) -> None:
+        super().__init__()
+        try:
+            import tensorrt as trt
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                f"TensorRTBackbone requires the tensorrt package. {_trt_install_hint()}"
+            ) from e
+
+        self.pinned: tuple[int, int] = (pinned[0], pinned[1])
+        self.output_names: tuple[str, ...] = tuple(output_names)
+        self.strides: dict[str, int] = (
+            dict(strides)
+            if strides is not None
+            else {n: _DEFAULT_STRIDES[n] for n in self.output_names}
+        )
+        self._size_divisibility = size_divisibility
+
+        logger = trt.Logger(trt.Logger.ERROR)
+        self._runtime = trt.Runtime(logger)
+        engine_path = Path(engine_path)
+        with open(engine_path, "rb") as fh:
+            self._engine = self._runtime.deserialize_cuda_engine(fh.read())
+        if self._engine is None:
+            raise RuntimeError(f"failed to deserialise TRT engine at {engine_path}")
+        self._context = self._engine.create_execution_context()
+        self._context.set_input_shape("image", (1, 3, *self.pinned))
+
+        # Lazy-allocated on first forward — we need to know the input
+        # device, and we want a single allocation reused forever rather
+        # than per-call ``torch.empty``.
+        self._padded: Tensor | None = None
+        self._bufs: dict[str, Tensor] = {}
+        self._last_hw: tuple[int, int] | None = None
+
+    @property
+    def size_divisibility(self) -> int:
+        return self._size_divisibility
+
+    def _allocate(self, device: torch.device) -> Tensor:
+        target_h, target_w = self.pinned
+        padded = torch.zeros(
+            (1, 3, target_h, target_w), dtype=torch.float32, device=device
+        )
+        self._context.set_tensor_address("image", int(padded.data_ptr()))
+        for name in self.output_names:
+            shape = tuple(self._context.get_tensor_shape(name))
+            buf = torch.empty(shape, dtype=torch.float32, device=device)
+            self._bufs[name] = buf
+            self._context.set_tensor_address(name, int(buf.data_ptr()))
+        self._padded = padded
+        return padded
+
+    def forward(self, image: Tensor) -> dict[str, Tensor]:
+        if image.dim() != 4 or image.shape[0] != 1:
+            raise ValueError(
+                f"TensorRTBackbone.forward expects (1, 3, H, W); got {tuple(image.shape)}."
+            )
+        target_h, target_w = self.pinned
+        _b, _c, h, w = image.shape
+        if h > target_h or w > target_w:
+            raise ValueError(
+                f"Input shape ({h}, {w}) exceeds the engine's pinned shape "
+                f"({target_h}, {target_w}). Re-build the engine at a larger size "
+                "or constrain the input."
+            )
+
+        padded = self._padded if self._padded is not None else self._allocate(image.device)
+
+        if (h, w) != self._last_hw:
+            # Active region size changed — clear so the padding outside
+            # the new (h, w) slice is zero rather than stale data from a
+            # larger previous call.
+            padded.zero_()
+            self._last_hw = (h, w)
+        padded[:, :, :h, :w].copy_(image)
+
+        stream = torch.cuda.current_stream(device=image.device).cuda_stream
+        if not self._context.execute_async_v3(stream_handle=stream):
+            raise RuntimeError("TRT execute_async_v3 returned False")
+
+        out: dict[str, Tensor] = {}
+        for name in self.output_names:
+            buf = self._bufs[name]
+            stride = self.strides[name]
+            crop_h = (h + stride - 1) // stride
+            crop_w = (w + stride - 1) // stride
+            if crop_h == buf.shape[-2] and crop_w == buf.shape[-1]:
+                out[name] = buf
+            else:
+                out[name] = buf[:, :, :crop_h, :crop_w].contiguous()
+        return out
 
 
 class TensorRTExporter:
@@ -103,13 +244,7 @@ class TensorRTExporter:
         try:
             import tensorrt as trt
         except ModuleNotFoundError as e:
-            if sys.platform == "darwin":
-                _hint = "TensorRT is not supported on macOS."
-            elif not torch.cuda.is_available():
-                _hint = "TensorRT requires a CUDA-enabled GPU (Linux or Windows)."
-            else:
-                _hint = "pip install mayaku[tensorrt]"
-            raise ModuleNotFoundError(_hint) from e
+            raise ModuleNotFoundError(_trt_install_hint()) from e
 
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,13 +343,7 @@ class TensorRTExporter:
         try:
             import tensorrt as trt
         except ModuleNotFoundError as e:
-            if sys.platform == "darwin":
-                _hint = "TensorRT is not supported on macOS."
-            elif not torch.cuda.is_available():
-                _hint = "TensorRT requires a CUDA-enabled GPU (Linux or Windows)."
-            else:
-                _hint = "pip install mayaku[tensorrt]"
-            raise ModuleNotFoundError(_hint) from e
+            raise ModuleNotFoundError(_trt_install_hint()) from e
 
         backbone = _resolve_backbone(model)
         backbone.eval()

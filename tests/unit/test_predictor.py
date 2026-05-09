@@ -113,6 +113,59 @@ def test_predictor_rejects_zero_test_sizes(device: torch.device) -> None:
         Predictor(model, min_size_test=0, max_size_test=128)
 
 
+def test_predictor_rejects_pinned_memory_without_gpu_preprocess(
+    device: torch.device,
+) -> None:
+    cfg = _tiny_cfg()
+    model = build_faster_rcnn(cfg).to(device).eval()
+    with pytest.raises(ValueError, match="pinned_memory=True requires gpu_preprocess"):
+        Predictor(model, min_size_test=64, max_size_test=128, pinned_memory=True)
+
+
+# ---------------------------------------------------------------------------
+# GPU preprocessing path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cuda
+def test_predictor_gpu_preprocess_returns_instances(device: torch.device) -> None:
+    torch.manual_seed(0)
+    cfg = _tiny_cfg()
+    model = build_faster_rcnn(cfg).to(device).eval()
+    predictor = Predictor(
+        model, min_size_test=64, max_size_test=128, device=device, gpu_preprocess=True
+    )
+    image = np.random.default_rng(0).integers(0, 256, size=(96, 96, 3), dtype=np.uint8)
+    out = predictor(image)
+    assert isinstance(out, Instances)
+    assert out.image_size == (96, 96)
+
+
+@pytest.mark.cuda
+def test_predictor_gpu_preprocess_with_pinned_memory(device: torch.device) -> None:
+    torch.manual_seed(0)
+    cfg = _tiny_cfg()
+    model = build_faster_rcnn(cfg).to(device).eval()
+    predictor = Predictor(
+        model,
+        min_size_test=64,
+        max_size_test=128,
+        device=device,
+        gpu_preprocess=True,
+        pinned_memory=True,
+    )
+    rng = np.random.default_rng(1)
+    # Two different sizes to exercise the buffer-grow path.
+    out_small = predictor(rng.integers(0, 256, size=(80, 80, 3), dtype=np.uint8))
+    out_large = predictor(rng.integers(0, 256, size=(120, 96, 3), dtype=np.uint8))
+    assert out_small.image_size == (80, 80)
+    assert out_large.image_size == (120, 96)
+    assert predictor._pinned_buf is not None
+    assert predictor._pinned_buf.shape[0] >= 120
+    assert predictor._pinned_buf.shape[1] >= 96
+    assert predictor._pinned_buf.is_pinned()
+
+
 def test_predictor_coerces_float_input_to_uint8(device: torch.device) -> None:
     predictor = _tiny_predictor(device)
     img_float = np.random.default_rng(2).random((96, 96, 3), dtype=np.float32) * 255.0
