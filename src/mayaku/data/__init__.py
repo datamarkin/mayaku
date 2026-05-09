@@ -16,6 +16,7 @@ from mayaku.data.multi_sample import (
 from mayaku.data.samplers import (
     AspectRatioGroupedDataset,
     InferenceSampler,
+    RepeatFactorTrainingSampler,
     TrainingSampler,
 )
 from mayaku.data.serialize import SerializedList
@@ -24,6 +25,7 @@ from mayaku.data.transforms import (
     Augmentation,
     AugmentationList,
     HFlipTransform,
+    RandAugment,
     RandomColorJitter,
     RandomFlip,
     ResizeShortestEdge,
@@ -47,8 +49,10 @@ __all__ = [
     "Mosaic",
     "MultiSampleAugmentation",
     "MultiSampleMappedDataset",
+    "RandAugment",
     "RandomColorJitter",
     "RandomFlip",
+    "RepeatFactorTrainingSampler",
     "ResizeShortestEdge",
     "ResizeTransform",
     "SerializedList",

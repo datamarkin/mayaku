@@ -377,6 +377,16 @@ class InputConfig(_BaseModel):
     color_jitter_hue: Annotated[float, Field(ge=0.0, le=0.5)] = 0.015
     color_jitter_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.5
 
+    # RandAugment (Cubuk et al. 2019), photometric-only pool. Two knobs:
+    # ``num_ops`` (paper's N, ops applied per image) and ``magnitude``
+    # (paper's M, intensity in [0, 30]). Replaces per-op probability /
+    # range tuning with a single intensity dial — useful for users who
+    # don't want to tune brightness/contrast/etc. separately. Compatible
+    # with ``color_jitter_enabled``; usually you'd pick one or the other.
+    randaugment_enabled: bool = False
+    randaugment_num_ops: Annotated[int, Field(ge=0, le=9)] = 2
+    randaugment_magnitude: Annotated[float, Field(ge=0.0, le=30.0)] = 9.0
+
     # Multi-sample augmentation (Phase 1b modernization). Each
     # ``*_prob`` is the chance the augmentation fires for any given
     # training sample; default 0.0 disables. ``copy_paste_prob > 0``
@@ -491,6 +501,13 @@ class DataLoaderConfig(_BaseModel):
     aspect_ratio_grouping: bool = True
     sampler_train: Literal["TrainingSampler", "RepeatFactorTrainingSampler"] = "TrainingSampler"
     filter_empty_annotations: bool = True
+    # RepeatFactorTrainingSampler threshold ``t`` (Gupta et al. LVIS 2019).
+    # Per-class repeat factor is ``max(1, sqrt(t / f_c))`` where ``f_c`` is
+    # the fraction of training images containing class ``c``. ``t=0.001``
+    # is the LVIS default; raise it (e.g. 0.01) for aggressive balancing
+    # on extremely imbalanced custom datasets, lower it for milder
+    # oversampling. Ignored unless ``sampler_train="RepeatFactorTrainingSampler"``.
+    repeat_threshold: Annotated[float, Field(gt=0.0, le=1.0)] = 0.001
 
 
 # ---------------------------------------------------------------------------

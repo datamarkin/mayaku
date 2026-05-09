@@ -32,8 +32,10 @@ from mayaku.data import (
     Mosaic,
     MultiSampleAugmentation,
     MultiSampleMappedDataset,
+    RandAugment,
     RandomColorJitter,
     RandomFlip,
+    RepeatFactorTrainingSampler,
     ResizeShortestEdge,
     SerializedList,
     TrainingSampler,
@@ -194,6 +196,17 @@ def run_train(
         keep_segmentation=keep_seg,
         keep_keypoints=keep_kp,
     )
+
+    # Compute RFS repeat factors on the *raw* list — SerializedList
+    # would unpickle every dict twice (once now, once at training).
+    # The resulting tensor is ~4 bytes per image, dropped after wrap.
+    repeat_factors: torch.Tensor | None = None
+    if cfg.dataloader.sampler_train == "RepeatFactorTrainingSampler":
+        repeat_factors = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
+            dataset_dicts_raw,
+            repeat_thresh=cfg.dataloader.repeat_threshold,
+        )
+
     # Pickle the dicts into one bytes buffer. Drops resident-memory
     # footprint ~10× (one allocation vs millions of small Python
     # objects) and removes the per-iter malloc-fragmentation source
@@ -221,6 +234,16 @@ def run_train(
                 saturation=cfg.input.color_jitter_saturation,
                 hue=cfg.input.color_jitter_hue,
                 prob=cfg.input.color_jitter_prob,
+            )
+        )
+    if cfg.input.randaugment_enabled:
+        # Same placement rationale as color_jitter — run on the resized
+        # image so the per-step cost is dominated by the geometric ops
+        # rather than the photometric LUT/CDF work.
+        augmentations.append(
+            RandAugment(
+                num_ops=cfg.input.randaugment_num_ops,
+                magnitude=cfg.input.randaugment_magnitude,
             )
         )
     mapper = DatasetMapper(
@@ -258,7 +281,11 @@ def run_train(
         mapped = MultiSampleMappedDataset(dataset_dicts, mapper, multi_sample_augs)
     else:
         mapped = _MappedList(dataset_dicts, mapper)
-    sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
+    sampler: TrainingSampler | RepeatFactorTrainingSampler
+    if repeat_factors is not None:
+        sampler = RepeatFactorTrainingSampler(repeat_factors, seed=0)
+    else:
+        sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
     dl = DataLoader(
         mapped,
         sampler=sampler,

@@ -33,11 +33,16 @@ from mayaku.data.transforms.augmentation import Augmentation, _NoOpTransform
 from mayaku.data.transforms.base import Transform
 
 __all__ = [
+    "AutoContrastTransform",
     "BrightnessTransform",
     "ContrastTransform",
+    "EqualizeTransform",
     "HueShiftTransform",
+    "PosterizeTransform",
+    "RandAugment",
     "RandomColorJitter",
     "SaturationTransform",
+    "SolarizeTransform",
 ]
 
 _F32 = npt.NDArray[np.float32]
@@ -146,6 +151,111 @@ class HueShiftTransform(_PhotometricTransform):
         return result
 
 
+class SolarizeTransform(_PhotometricTransform):
+    """Invert pixels at or above ``threshold`` (0-256).
+
+    ``threshold=256`` is a no-op (no pixel reaches it). ``threshold=0``
+    inverts everything.
+    """
+
+    def __init__(self, threshold: int) -> None:
+        if not 0 <= threshold <= 256:
+            raise ValueError(f"threshold must be in [0, 256]; got {threshold}")
+        self.threshold = int(threshold)
+
+    def apply_image(self, image: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        if image.ndim != 3 or image.shape[2] != 3:
+            return image
+        if self.threshold >= 256:
+            return image
+        out = image.copy()
+        mask = out >= self.threshold
+        # 255 - x; preserve dtype.
+        out[mask] = (255 - out[mask].astype(np.int32)).astype(image.dtype)
+        return out
+
+
+class PosterizeTransform(_PhotometricTransform):
+    """Reduce per-channel bit depth to ``bits`` (1-8).
+
+    ``bits=8`` is a no-op. Lower values quantise the channel to fewer
+    distinct levels (``bits=4`` keeps 16 levels per channel).
+    """
+
+    def __init__(self, bits: int) -> None:
+        if not 1 <= bits <= 8:
+            raise ValueError(f"bits must be in [1, 8]; got {bits}")
+        self.bits = int(bits)
+
+    def apply_image(self, image: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        if image.ndim != 3 or image.shape[2] != 3:
+            return image
+        if self.bits == 8 or image.dtype != np.uint8:
+            return image
+        shift = 8 - self.bits
+        # Clear the low ``shift`` bits — quantises to ``2**bits`` levels.
+        result: npt.NDArray[Any] = (image >> shift) << shift
+        return result
+
+
+class AutoContrastTransform(_PhotometricTransform):
+    """Per-channel min-max stretch to ``[0, 255]``.
+
+    Constant-value channels (where ``min == max``) pass through
+    unchanged. Operates per-channel independently — the channels' joint
+    distribution shifts but no channel inversion occurs.
+    """
+
+    def apply_image(self, image: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        if image.ndim != 3 or image.shape[2] != 3:
+            return image
+        out = image.astype(np.float32, copy=True)
+        for c in range(3):
+            ch = out[..., c]
+            lo = float(ch.min())
+            hi = float(ch.max())
+            if hi <= lo:
+                continue
+            out[..., c] = (ch - lo) * (255.0 / (hi - lo))
+        result: npt.NDArray[Any] = np.clip(out, 0.0, 255.0).astype(image.dtype)
+        return result
+
+
+class EqualizeTransform(_PhotometricTransform):
+    """Per-channel histogram equalisation (uint8 only; pass-through otherwise).
+
+    Standard CDF normalisation: build a 256-bin histogram per channel,
+    map each input value through the channel's normalised cumulative
+    distribution. Constant-value channels pass through unchanged.
+    """
+
+    def apply_image(self, image: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+            return image
+        out = np.empty_like(image)
+        n_pixels = image.shape[0] * image.shape[1]
+        for c in range(3):
+            ch = image[..., c]
+            hist = np.bincount(ch.ravel(), minlength=256)
+            cdf = hist.cumsum()
+            # cdf_min: smallest non-zero CDF anchor (skip leading zeros).
+            nz = cdf[cdf > 0]
+            if nz.size == 0:
+                out[..., c] = ch
+                continue
+            cdf_min = int(nz[0])
+            denom = n_pixels - cdf_min
+            if denom <= 0:
+                # Channel is constant — equalisation is identity.
+                out[..., c] = ch
+                continue
+            lut = np.clip(
+                np.round((cdf - cdf_min) * 255.0 / denom), 0, 255
+            ).astype(np.uint8)
+            out[..., c] = lut[ch]
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Augmentation wrappers (random sampling)
 # ---------------------------------------------------------------------------
@@ -227,6 +337,127 @@ class _PhotometricList(_PhotometricTransform):
         for t in self.transforms:
             out = t.apply_image(out)
         return out
+
+
+class RandAugment(Augmentation):
+    """RandAugment (Cubuk et al. 2019), photometric-only pool for detection.
+
+    Per call samples ``num_ops`` ops uniformly without replacement from
+    a fixed pool and applies each at intensity
+    ``magnitude / max_magnitude`` of its op-specific maximum strength.
+    The pool is restricted to ops that don't move pixels (no rotate /
+    shear / translate), so bboxes / masks / keypoints pass through
+    unchanged — no annotation re-warping required.
+
+    Pool: ``identity, auto_contrast, equalize, solarize, posterize,
+    brightness, contrast, saturation, hue``. Hue is included with a
+    deliberately-small max shift (~18°) because larger hue rotations
+    break colour-defined classes (traffic-light colour, jersey colour).
+
+    Two-knob API matches the paper:
+
+    * ``num_ops`` (paper N): ops per image. 1-3 typical; default 2.
+    * ``magnitude`` (paper M): intensity in ``[0, max_magnitude]``.
+      Higher = stronger augmentation. Default 9 with default
+      ``max_magnitude=30`` matches the COCO recipe in the paper.
+
+    For very-small-data fine-tunes (~200-500 images) the defaults are
+    a good starting point. Below ~100 images, drop ``magnitude`` to
+    5-7 to avoid masking the limited signal with augmentation noise.
+    """
+
+    _OPS: tuple[str, ...] = (
+        "identity",
+        "auto_contrast",
+        "equalize",
+        "solarize",
+        "posterize",
+        "brightness",
+        "contrast",
+        "saturation",
+        "hue",
+    )
+
+    def __init__(
+        self,
+        *,
+        num_ops: int = 2,
+        magnitude: float = 9.0,
+        max_magnitude: float = 30.0,
+        rng: np.random.Generator | None = None,
+    ) -> None:
+        if num_ops < 0:
+            raise ValueError(f"num_ops must be >= 0; got {num_ops}")
+        if max_magnitude <= 0.0:
+            raise ValueError(f"max_magnitude must be > 0; got {max_magnitude}")
+        if not 0.0 <= magnitude <= max_magnitude:
+            raise ValueError(
+                f"magnitude must be in [0, {max_magnitude}]; got {magnitude}"
+            )
+        if num_ops > len(self._OPS):
+            raise ValueError(
+                f"num_ops={num_ops} exceeds pool size {len(self._OPS)} "
+                "(without-replacement sampling)"
+            )
+        self.num_ops = int(num_ops)
+        self.magnitude = float(magnitude)
+        self.max_magnitude = float(max_magnitude)
+        self.rng = rng if rng is not None else np.random.default_rng()
+
+    def _sample_op(self, name: str, m_norm: float) -> Transform:
+        # ``sign`` randomises whether the op pushes the image lighter /
+        # darker / more / less saturated etc. Matches the original
+        # RandAugment implementation; halves the effective parameter
+        # range vs. always-positive magnitudes.
+        sign = 1.0 if float(self.rng.random()) < 0.5 else -1.0
+        if name == "identity":
+            return _NoOpTransform()
+        if name == "brightness":
+            return BrightnessTransform(1.0 + sign * 0.9 * m_norm)
+        if name == "contrast":
+            return ContrastTransform(1.0 + sign * 0.9 * m_norm)
+        if name == "saturation":
+            return SaturationTransform(1.0 + sign * 0.9 * m_norm)
+        if name == "hue":
+            # 0.05 turns ≈ 18° at full magnitude. Detection-friendly
+            # ceiling — papers using larger hue ranges (e.g. 0.5)
+            # quietly hurt colour-defined classes.
+            return HueShiftTransform(sign * 0.05 * m_norm)
+        if name == "solarize":
+            # m_norm=0 → threshold=256 (no inversion); m_norm=1 → 0.
+            return SolarizeTransform(threshold=int(round(256 - 256 * m_norm)))
+        if name == "posterize":
+            # m_norm=0 → bits=8 (no quantise); m_norm=1 → bits=4
+            # (16 levels). Don't go below 4 — fewer levels destroy
+            # most object structure.
+            return PosterizeTransform(bits=max(4, int(round(8 - 4 * m_norm))))
+        if name == "auto_contrast":
+            return AutoContrastTransform()
+        if name == "equalize":
+            return EqualizeTransform()
+        raise AssertionError(f"unknown op {name!r}")
+
+    def get_transform(self, image: npt.NDArray[Any]) -> Transform:
+        if self.num_ops == 0:
+            return _NoOpTransform()
+        m_norm = self.magnitude / self.max_magnitude
+        # Sample without replacement so a single image gets distinct ops
+        # — increases per-image diversity vs. uniform-with-replacement.
+        chosen = self.rng.choice(
+            np.array(self._OPS), size=self.num_ops, replace=False
+        )
+        ops: list[_PhotometricTransform] = []
+        for name in chosen:
+            t = self._sample_op(str(name), m_norm)
+            if isinstance(t, _NoOpTransform):
+                continue
+            assert isinstance(t, _PhotometricTransform)  # pool is photometric-only
+            ops.append(t)
+        if not ops:
+            return _NoOpTransform()
+        if len(ops) == 1:
+            return ops[0]
+        return _PhotometricList(ops)
 
 
 # ---------------------------------------------------------------------------
