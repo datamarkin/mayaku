@@ -168,7 +168,7 @@ class SolarizeTransform(_PhotometricTransform):
             return image
         if self.threshold >= 256:
             return image
-        out = image.copy()
+        out: npt.NDArray[Any] = image.copy()
         mask = out >= self.threshold
         # 255 - x; preserve dtype.
         out[mask] = (255 - out[mask].astype(np.int32)).astype(image.dtype)
@@ -425,12 +425,12 @@ class RandAugment(Augmentation):
             return HueShiftTransform(sign * 0.05 * m_norm)
         if name == "solarize":
             # m_norm=0 → threshold=256 (no inversion); m_norm=1 → 0.
-            return SolarizeTransform(threshold=int(round(256 - 256 * m_norm)))
+            return SolarizeTransform(threshold=round(256 - 256 * m_norm))
         if name == "posterize":
             # m_norm=0 → bits=8 (no quantise); m_norm=1 → bits=4
             # (16 levels). Don't go below 4 — fewer levels destroy
             # most object structure.
-            return PosterizeTransform(bits=max(4, int(round(8 - 4 * m_norm))))
+            return PosterizeTransform(bits=max(4, round(8 - 4 * m_norm)))
         if name == "auto_contrast":
             return AutoContrastTransform()
         if name == "equalize":

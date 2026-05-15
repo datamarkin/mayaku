@@ -78,7 +78,7 @@ class SizeBucket:
     copy_paste_prob: float
 
 
-_BUCKETS: Final[tuple[tuple[int, SizeBucket], ...]] = (
+_BUCKETS: Final[tuple[tuple[float, SizeBucket], ...]] = (
     # (upper_exclusive_image_count, bucket). Last entry uses sentinel
     # math.inf so any larger dataset still falls into a bucket.
     (500, SizeBucket("xs", base_lr=5e-4, epochs=25, freeze_at=3,
@@ -90,7 +90,7 @@ _BUCKETS: Final[tuple[tuple[int, SizeBucket], ...]] = (
     (50_000, SizeBucket("l", base_lr=2e-3, epochs=10, freeze_at=2,
                         mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.0)),
     (math.inf, SizeBucket("xl", base_lr=2e-3, epochs=8, freeze_at=2,
-                          mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1)),  # type: ignore[arg-type]
+                          mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1)),
 )
 
 
