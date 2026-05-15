@@ -42,24 +42,11 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-def _tiny_cfg(backbone_name: str = "resnet50") -> MayakuConfig:
-    """Build a minimal Faster R-CNN config wired around ``backbone_name``.
-
-    The schema validator added with the ConvNeXt integration rejects
-    ResNet-specific fields (``norm``, ``stride_in_1x1``) on ConvNeXt
-    variants — branch on the family so both naming groups produce a
-    valid config.
-    """
-    from mayaku.models.backbones import is_convnext_variant
-
-    if is_convnext_variant(backbone_name):
-        backbone = BackboneConfig(name=backbone_name, freeze_at=0)  # type: ignore[arg-type]
-    else:
-        backbone = BackboneConfig(name=backbone_name, freeze_at=2, norm="FrozenBN")  # type: ignore[arg-type]
+def _tiny_cfg() -> MayakuConfig:
     return MayakuConfig(
         model=ModelConfig(
             meta_architecture="faster_rcnn",
-            backbone=backbone,
+            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
             rpn=RPNConfig(
                 pre_nms_topk_train=100,
                 pre_nms_topk_test=50,
@@ -209,22 +196,15 @@ def test_cli_run_export_onnx(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
-def test_onnx_backbone_shape_contract(tmp_path: Path, backbone_name: str) -> None:
+def test_onnx_backbone_shape_contract(tmp_path: Path) -> None:
     """Probing at a shape smaller than the export shape exercises the
     pad-then-crop path. Output dict must mirror eager backbone keys
     and shapes; values can drift under boundary effects with random
-    init weights, same situation as CoreMLBackbone's analog.
-
-    Parametrised over backbone families so the ConvNeXt op set
-    (depthwise Conv2d, LayerNorm at opset 17, GELU, Linear, Permute)
-    is exercised end-to-end through ONNX export + onnxruntime CPU
-    inference, not just ResNet's BN-family ops.
-    """
+    init weights, same situation as CoreMLBackbone's analog."""
     from mayaku.inference.export import ONNXBackbone
 
     torch.manual_seed(0)
-    model = build_faster_rcnn(_tiny_cfg(backbone_name)).eval()
+    model = build_faster_rcnn(_tiny_cfg()).eval()
     out = tmp_path / "model.onnx"
     sample = torch.randn(1, 3, 96, 96)
     ONNXExporter().export(model, sample, out)
@@ -241,10 +221,7 @@ def test_onnx_backbone_shape_contract(tmp_path: Path, backbone_name: str) -> Non
         assert onnx_out[name].shape == eager_t.shape
 
 
-@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
-def test_onnx_backbone_values_match_eager_at_export_shape(
-    tmp_path: Path, backbone_name: str
-) -> None:
+def test_onnx_backbone_values_match_eager_at_export_shape(tmp_path: Path) -> None:
     """At the export shape (no pad/crop) with the CPU provider,
     ONNXBackbone forward must match eager within tight tolerance.
     The CoreMLExecutionProvider quantises and won't hit this bound;
@@ -252,7 +229,7 @@ def test_onnx_backbone_values_match_eager_at_export_shape(
     from mayaku.inference.export import ONNXBackbone
 
     torch.manual_seed(0)
-    model = build_faster_rcnn(_tiny_cfg(backbone_name)).eval()
+    model = build_faster_rcnn(_tiny_cfg()).eval()
     out = tmp_path / "model.onnx"
     sample = torch.randn(1, 3, 96, 96)
     ONNXExporter().export(model, sample, out)

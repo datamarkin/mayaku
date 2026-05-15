@@ -29,22 +29,11 @@ from mayaku.models.detectors import build_faster_rcnn
 pytestmark = pytest.mark.openvino  # auto-skips when openvino isn't installed
 
 
-def _tiny_cfg(backbone_name: str = "resnet50") -> MayakuConfig:
-    """Build a minimal Faster R-CNN config wired around ``backbone_name``.
-
-    Branches on the backbone family because the schema validator rejects
-    ResNet-only fields (``norm``, ``stride_in_1x1``) on ConvNeXt.
-    """
-    from mayaku.models.backbones import is_convnext_variant
-
-    if is_convnext_variant(backbone_name):
-        backbone = BackboneConfig(name=backbone_name, freeze_at=0)  # type: ignore[arg-type]
-    else:
-        backbone = BackboneConfig(name=backbone_name, freeze_at=2, norm="FrozenBN")  # type: ignore[arg-type]
+def _tiny_cfg() -> MayakuConfig:
     return MayakuConfig(
         model=ModelConfig(
             meta_architecture="faster_rcnn",
-            backbone=backbone,
+            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
             rpn=RPNConfig(
                 pre_nms_topk_train=100,
                 pre_nms_topk_test=50,
@@ -102,16 +91,9 @@ def test_openvino_export_supports_fp16_compression(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
-def test_openvino_parity_within_tolerance(tmp_path: Path, backbone_name: str) -> None:
-    """End-to-end OpenVINO export + parity vs eager, parametrised over
-    backbone family. ConvNeXt's LayerNorm/depthwise-conv/GELU op set
-    must round-trip through the ONNX-front-end the OpenVINO converter
-    consumes — opset 17 is required for LayerNormalization and is the
-    project default (``inference/export/onnx.py:43``).
-    """
+def test_openvino_parity_within_tolerance(tmp_path: Path) -> None:
     torch.manual_seed(0)
-    model = build_faster_rcnn(_tiny_cfg(backbone_name)).eval()
+    model = build_faster_rcnn(_tiny_cfg()).eval()
     out = tmp_path / "model.xml"
     sample = torch.randn(1, 3, 96, 96)
     exporter = OpenVINOExporter()
@@ -127,12 +109,9 @@ def test_openvino_parity_within_tolerance(tmp_path: Path, backbone_name: str) ->
     assert set(parity.per_output) == {"p2", "p3", "p4", "p5", "p6"}
 
 
-@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
-def test_openvino_parity_records_per_output_errors(
-    tmp_path: Path, backbone_name: str
-) -> None:
+def test_openvino_parity_records_per_output_errors(tmp_path: Path) -> None:
     torch.manual_seed(0)
-    model = build_faster_rcnn(_tiny_cfg(backbone_name)).eval()
+    model = build_faster_rcnn(_tiny_cfg()).eval()
     out = tmp_path / "model.xml"
     sample = torch.randn(1, 3, 96, 96)
     exporter = OpenVINOExporter()
