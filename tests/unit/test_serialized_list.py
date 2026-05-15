@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
 from mayaku.data.serialize import SerializedList
@@ -71,3 +73,30 @@ def test_handles_nested_polygon_lists() -> None:
     }
     sl = SerializedList([item])
     assert sl[0] == item
+
+
+def test_pickle_roundtrip() -> None:
+    """``SerializedList`` must be picklable so DataLoader workers under
+    ``spawn`` / ``forkserver`` start methods receive it without
+    ``TypeError``. Regression for the 'cannot pickle memoryview'
+    failure that broke 7 ``test_cli`` cases on macOS (and which would
+    bite Linux on Python 3.14+ when the runtime default flips to
+    ``forkserver``)."""
+    src = [
+        {"file_name": f"img_{i}.jpg", "annotations": [{"bbox": [0, 0, 10, 10]}]}
+        for i in range(5)
+    ]
+    sl = SerializedList(src)
+    blob = pickle.dumps(sl)
+    sl2 = pickle.loads(blob)
+    assert len(sl2) == len(sl) == 5
+    for i in range(5):
+        assert sl2[i] == sl[i] == src[i]
+
+
+def test_pickle_roundtrip_empty() -> None:
+    """Empty list edge case — the ``offsets = np.zeros(0)`` branch in
+    ``__init__`` must round-trip cleanly too."""
+    sl = SerializedList([])
+    sl2 = pickle.loads(pickle.dumps(sl))
+    assert len(sl2) == 0
