@@ -174,6 +174,24 @@ Living issues are tracked in
   in v1).
 - `pin_memory` is unconditionally false (`Device.supports_pin_memory`).
 
+## AMD GPUs (ROCm)
+
+Mayaku trains and infers on AMD GPUs (Linux + ROCm) **with no source
+changes** — the project ships zero custom CUDA/HIP kernels, every
+backend-aware call site goes through the `Device` facade, and PyTorch's
+ROCm runtime exposes itself under the `torch.cuda.*` namespace. Use
+`MAYAKU_DEVICE=cuda` on an AMD host; the underlying HIP dispatch is
+transparent.
+
+### GPU support matrix
+
+| GPU family | Examples | Status |
+|---|---|---|
+| **CDNA** (data-center) | MI200, MI250, MI300 | Full official ROCm support. First-class for training. |
+| **RDNA3** (consumer) | RX 7900 XTX / 7900 XT / 7900 GRE (gfx1100) | Official ROCm support since 5.7. 24 GB VRAM on 7900 XTX is enough for ConvNeXt-Base 1x training. |
+| **RDNA2** (consumer) | RX 6800 / 6900 / 6700 (gfx1030–1032) | Best-effort. Small/medium training works; ConvNeXt-Large likely OOMs. |
+| **Older** (Polaris, Vega, RDNA1) | RX 5xx / 5xxx | Not supported by current ROCm. |
+
 ## Cross-machine test protocol
 
 Per-step verification needs the same suite green on each backend:
