@@ -4,6 +4,14 @@
 
 Writes checkpoints, mid-training eval results, and metadata.json to OUTPUT_DIR/train/.
 EMA checkpoint (if enabled) has num_batches_tracked stripped so it loads with strict=True.
+
+Supports ResNet/ResNeXt and ConvNeXt backbones — pick a config from
+configs/detection/ and the script handles the family-specific quirks
+(``norm`` doesn't apply to ConvNeXt; ``weights_path`` in the YAML
+auto-disables the torchvision-ImageNet fallback). For ConvNeXt, the
+YAML's ``weights_path`` field selects the pretrained checkpoint (e.g.,
+the DINOv3 LVD-1689M release, the original Liu et al. release, or a
+user fine-tune).
 """
 
 from __future__ import annotations
@@ -22,36 +30,60 @@ import torch
 from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train
 from mayaku.config import load_yaml, merge_overrides
+from mayaku.models.backbones import is_convnext_variant
 
 # ---------------------------------------------------------------------------
 # Edit these before running.
 # ---------------------------------------------------------------------------
 
-CONFIG = Path("configs/detection/faster_rcnn_R_50_FPN_1x.yaml")
+# Pick a config from configs/detection/. Examples:
+#   ResNet-50     : configs/detection/faster_rcnn_R_50_FPN_1x.yaml
+#   ConvNeXt-Tiny : configs/detection/faster_rcnn_convnext_tiny_FPN_1x.yaml
+#   ConvNeXt-Small: configs/detection/faster_rcnn_convnext_small_FPN_1x.yaml
+#   ConvNeXt-Base : configs/detection/faster_rcnn_convnext_base_FPN_1x.yaml
+#   ConvNeXt-Large: configs/detection/faster_rcnn_convnext_large_FPN_1x.yaml
+# The four `faster_rcnn_convnext_*` configs ship with `weights_path`
+# pre-filled for the DINOv3 LVD-1689M checkpoints in `models/dinov3/`;
+# edit that field in the YAML to use any other compatible checkpoint,
+# or drop the field and pass `pretrained_backbone=True` here for
+# torchvision ImageNet-1k init.
+CONFIG = Path("configs/detection/faster_rcnn_convnext_small_FPN_1x.yaml")
 
 TRAIN_JSON   = Path("/path/coco/annotations/instances_train2017.json")
 TRAIN_IMAGES = Path("/path/coco/train2017")
 VAL_JSON     = Path("/path/coco/annotations/instances_val2017.json")
 VAL_IMAGES   = Path("/path/coco/val2017")
 
-OUTPUT_DIR = Path("./runs/r50_1x")
+OUTPUT_DIR = Path("./runs/convnext_small_1x")
 
 # Gradient batch = IMS_PER_BATCH × GRAD_ACCUM_STEPS (target 16).
-# With NORM=BN: BN statistics are computed on IMS_PER_BATCH images only — grad_accum
-#   does NOT improve BN quality, only gradient quality. Prefer larger IMS_PER_BATCH.
-# With NORM=FrozenBN: BN is frozen, so BN quality is unaffected by batch size and
-#   any IMS_PER_BATCH / GRAD_ACCUM_STEPS split is equivalent.
-IMS_PER_BATCH    = 8
-GRAD_ACCUM_STEPS = 2
+# The YAML already carries variant-tuned defaults (see header in each
+# ConvNeXt config for VRAM guidance). Override here only when your GPU
+# doesn't match the YAML's assumed budget.
+#
+# With NORM=BN (ResNet only): BN statistics are computed on IMS_PER_BATCH
+#   images per step — grad_accum does NOT improve BN quality, only gradient
+#   quality. Prefer larger IMS_PER_BATCH.
+# With NORM=FrozenBN (ResNet) or ConvNeXt (LayerNorm): per-step batch size
+#   does not affect normalisation, so any IMS_PER_BATCH × GRAD_ACCUM_STEPS
+#   split is gradient-equivalent.
+IMS_PER_BATCH    = 4
+GRAD_ACCUM_STEPS = 4
 
 # Mid-training eval cadence. Set to 0 to skip and only run final eval.
 EVAL_PERIOD = 5000
 
-# Backbone norm and frozen-layer policy.
+# Backbone norm + freeze policy. **ResNet/ResNeXt only** — these knobs
+# are silently ignored when CONFIG points at a ConvNeXt variant (the
+# schema validator rejects non-default ``norm``/``stride_in_1x1`` on
+# ConvNeXt, so the script branches and skips that part of the override).
+# ConvNeXt's freeze_at comes from the YAML; edit the YAML directly to
+# change it.
+#
 # BN / freeze_at=0: best AP for from-scratch training — BN stats co-evolve with
-#   weights and EMA averages them. Maximise IMS_PER_BATCH, not just effective batch.
-# FrozenBN / freeze_at=2: BN is fixed, safe to use small IMS_PER_BATCH with large
-#   GRAD_ACCUM_STEPS when VRAM is tight — BN quality is unaffected.
+#   weights and EMA averages them. Maximise IMS_PER_BATCH.
+# FrozenBN / freeze_at=2: BN is fixed, safe to use small IMS_PER_BATCH with
+#   large GRAD_ACCUM_STEPS when VRAM is tight — BN quality is unaffected.
 NORM      = "BN"
 FREEZE_AT = 0
 
@@ -79,19 +111,39 @@ def main() -> int:
         return 2
 
     cfg = load_yaml(CONFIG)
+
+    # Branch the override on backbone family. ConvNeXt's schema validator
+    # rejects ``norm`` / ``stride_in_1x1`` / ``res5_dilation`` overrides
+    # (LayerNorm is intrinsic; there's no bottleneck stride to relocate).
+    is_cnx = is_convnext_variant(cfg.model.backbone.name)
+    backbone_override: dict[str, object] = {"freeze_at": FREEZE_AT}
+    if not is_cnx:
+        backbone_override["norm"] = NORM
     cfg = merge_overrides(cfg, {
-        "model":  {"backbone": {"norm": NORM, "freeze_at": FREEZE_AT}},
+        "model":  {"backbone": backbone_override},
         "solver": {"ims_per_batch": IMS_PER_BATCH, "grad_accum_steps": GRAD_ACCUM_STEPS},
         "test":   {"eval_period": EVAL_PERIOD},
     })
+
+    # If the YAML pins a backbone-local checkpoint via ``weights_path``,
+    # don't also request torchvision ImageNet weights — they would download
+    # and be silently overwritten by the local file, wasting time and disk.
+    use_torchvision_pretrained = cfg.model.backbone.weights_path is None
 
     train_dir = OUTPUT_DIR / "train"
     train_dir.mkdir(parents=True, exist_ok=True)
 
     effective_batch = IMS_PER_BATCH * GRAD_ACCUM_STEPS
+    bb_name = cfg.model.backbone.name
+    bb_freeze = cfg.model.backbone.freeze_at
     print(f"[train_mayaku] config:  {CONFIG}")
-    print(f"[train_mayaku] backbone: {cfg.model.backbone.name}, norm: {NORM}, freeze_at: {FREEZE_AT}")
-    print(f"[train_mayaku] {cfg.solver.max_iter} iters  batch {IMS_PER_BATCH}×{GRAD_ACCUM_STEPS}={effective_batch}")
+    if is_cnx:
+        wp = cfg.model.backbone.weights_path or "(random init / torchvision ImageNet)"
+        print(f"[train_mayaku] backbone: {bb_name}, freeze_at: {bb_freeze}, weights: {wp}")
+    else:
+        src = "torchvision IMAGENET1K_V2" if use_torchvision_pretrained else "from config / --weights"
+        print(f"[train_mayaku] backbone: {bb_name}, norm: {NORM}, freeze_at: {bb_freeze}, init: {src}")
+    print(f"[train_mayaku] {cfg.solver.max_iter} iters  batch {IMS_PER_BATCH}x{GRAD_ACCUM_STEPS}={effective_batch}")
     print(f"[train_mayaku] output:  {train_dir}")
 
     t0 = time.time()
@@ -100,7 +152,7 @@ def main() -> int:
         coco_gt_json=TRAIN_JSON,
         image_root=TRAIN_IMAGES,
         output_dir=train_dir,
-        pretrained_backbone=True,
+        pretrained_backbone=use_torchvision_pretrained,
         device="cuda",
         val_json=VAL_JSON if EVAL_PERIOD > 0 else None,
         val_image_root=VAL_IMAGES if EVAL_PERIOD > 0 else None,

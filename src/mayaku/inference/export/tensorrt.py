@@ -31,7 +31,7 @@ fp32 cuBLAS / cuDNN — that's the deal you take for the
 
 from __future__ import annotations
 
-import sys
+import platform
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -56,7 +56,11 @@ _DEFAULT_WORKSPACE_BYTES: int = 1 << 30
 
 
 def _trt_install_hint() -> str:
-    if sys.platform == "darwin":
+    # ``platform.system()`` returns plain ``str`` so mypy doesn't narrow
+    # it the way it does for ``sys.platform`` (Literal). Using the typed
+    # equivalent of ``sys.platform == "darwin"`` would mark the rest of
+    # this function unreachable on a darwin host under ``--strict``.
+    if platform.system() == "Darwin":
         return "TensorRT is not supported on macOS."
     if not torch.cuda.is_available():
         return "TensorRT requires a CUDA-enabled GPU (Linux or Windows)."

@@ -62,39 +62,18 @@ BackboneName = Literal[
     "resnet50",
     "resnet101",
     "resnext101_32x8d",
-    # ConvNeXt variants (Tiny / Small / Base / Large). The architecture
-    # is standard ConvNeXt (torchvision's reference). Two naming
-    # families ship:
-    #
-    # * ``convnext_*`` — semantically neutral; pair with random init or
-    #   torchvision's ImageNet-1k weights via ``--pretrained-backbone``.
-    # * ``dinov3_convnext_*`` — same architecture, but signals intent to
-    #   load DINOv3 LVD-1689M distillation weights via
-    #   :attr:`BackboneConfig.weights_path`. Weights are license-gated;
-    #   Mayaku ships no URLs.
-    #
-    # Both families resolve to the same :class:`ConvNeXtBackbone` class.
+    # ConvNeXt variants (Tiny / Small / Base / Large). Standard ConvNeXt
+    # architecture (torchvision's reference). Weight provenance is
+    # carried by :attr:`BackboneConfig.weights_path`, not the name —
+    # the same `convnext_small` works with random init, torchvision
+    # ImageNet-1k (via ``--pretrained-backbone``), or any local
+    # checkpoint supplied as a path (the original Liu et al. release,
+    # the DINOv3 LVD-1689M distillation, user fine-tunes, …).
     "convnext_tiny",
     "convnext_small",
     "convnext_base",
     "convnext_large",
-    "dinov3_convnext_tiny",
-    "dinov3_convnext_small",
-    "dinov3_convnext_base",
-    "dinov3_convnext_large",
 ]
-_CONVNEXT_VARIANTS: frozenset[str] = frozenset(
-    {
-        "convnext_tiny",
-        "convnext_small",
-        "convnext_base",
-        "convnext_large",
-        "dinov3_convnext_tiny",
-        "dinov3_convnext_small",
-        "dinov3_convnext_base",
-        "dinov3_convnext_large",
-    }
-)
 MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn"]
 DeviceSetting = Literal["cpu", "mps", "cuda", "auto"]
 
@@ -124,7 +103,7 @@ class BackboneConfig(_BaseModel):
     than carried as separate fields — Step 7 will translate this into
     the actual module construction.
 
-    The same config covers ResNet/ResNeXt and DINOv3 ConvNeXt variants;
+    The same config covers ResNet/ResNeXt and ConvNeXt variants;
     a model-validator rejects field combinations that don't apply to
     the chosen architecture (e.g. ``stride_in_1x1`` only makes sense
     for ResNets, ``weights_path`` only for ConvNeXts).
@@ -143,18 +122,29 @@ class BackboneConfig(_BaseModel):
     # downsampling step). Flip this to True when loading D2 model-zoo weights.
     stride_in_1x1: bool = False
 
-    # Local path to a DINOv3 ConvNeXt checkpoint (``.pth`` from Meta's
-    # release or ``.safetensors`` from HuggingFace). DINOv3 weights are
-    # license-gated; Mayaku ships no URLs and no auto-download. Users
-    # accept the DINOv3 License on HuggingFace
-    # (``facebook/dinov3-convnext-{tiny,small,base,large}-pretrain-lvd1689m``)
-    # and point this field at the downloaded file. Only valid when
-    # ``name`` is a ``dinov3_convnext_*`` variant.
+    # Local path to a pretrained ConvNeXt checkpoint. Accepts both
+    # torchvision key naming (``features.*.block.*.layer_scale``) and
+    # facebookresearch / Liu et al. key naming (``stages.*.{dwconv,
+    # norm,pwconv1,pwconv2,gamma}``, ``downsample_layers.*``). File
+    # formats: ``.pth`` / ``.pt`` / ``.bin`` (PyTorch pickle) and
+    # ``.safetensors`` (HuggingFace).
+    #
+    # Mayaku ships no URLs and no auto-download — the user supplies the
+    # file. Common sources: the original ConvNeXt release, the DINOv3
+    # LVD-1689M distillation
+    # (``facebook/dinov3-convnext-{tiny,small,base,large}-pretrain-lvd1689m``
+    # on HuggingFace, license-gated; accept the upstream license and
+    # download manually), or a user fine-tune. Only valid for
+    # ``convnext_*`` variants.
     weights_path: str | None = None
 
     @model_validator(mode="after")
     def _check_arch_specific_fields(self) -> BackboneConfig:
-        is_convnext = self.name in _CONVNEXT_VARIANTS
+        # Naming convention: ConvNeXt variants are exactly those whose
+        # name starts with ``convnext_`` (BackboneName Literal enforces
+        # the closed set). Same predicate as ``is_convnext_variant`` —
+        # they're kept in sync by the convention, not a shared table.
+        is_convnext = self.name.startswith("convnext_")
         if is_convnext:
             # ConvNeXt uses LayerNorm exclusively — the BN-family knobs are
             # nonsense for it. We don't silently ignore them because that

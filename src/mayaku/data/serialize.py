@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Sequence
-from typing import Generic, TypeVar, overload
+from typing import Any, Generic, TypeVar, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -75,6 +75,26 @@ class SerializedList(Sequence[T], Generic[T]):
         # out of scope at the end of __init__ and the per-item bytes
         # objects are freed.
         self._buffer: bytes = b"".join(encoded)
+        self._mv = memoryview(self._buffer)
+
+    # ``memoryview`` is not picklable — it's a thin wrapper over a
+    # buffer, not a value type. Exclude ``_mv`` from the pickle stream
+    # and reconstruct it from ``_buffer`` (which is picklable) on the
+    # receiving end. Required for ``DataLoader(num_workers > 0)`` on
+    # macOS, Windows, and Python 3.14+ Linux — all of which pickle
+    # the dataset to send it to worker processes (``spawn`` /
+    # ``forkserver`` start methods).
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "_sizes": self._sizes,
+            "_offsets": self._offsets,
+            "_buffer": self._buffer,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self._sizes = state["_sizes"]
+        self._offsets = state["_offsets"]
+        self._buffer = state["_buffer"]
         self._mv = memoryview(self._buffer)
 
     def __len__(self) -> int:
