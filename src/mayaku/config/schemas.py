@@ -58,7 +58,43 @@ __all__ = [
     "TestConfig",
 ]
 
-BackboneName = Literal["resnet50", "resnet101", "resnext101_32x8d"]
+BackboneName = Literal[
+    "resnet50",
+    "resnet101",
+    "resnext101_32x8d",
+    # ConvNeXt variants (Tiny / Small / Base / Large). The architecture
+    # is standard ConvNeXt (torchvision's reference). Two naming
+    # families ship:
+    #
+    # * ``convnext_*`` — semantically neutral; pair with random init or
+    #   torchvision's ImageNet-1k weights via ``--pretrained-backbone``.
+    # * ``dinov3_convnext_*`` — same architecture, but signals intent to
+    #   load DINOv3 LVD-1689M distillation weights via
+    #   :attr:`BackboneConfig.weights_path`. Weights are license-gated;
+    #   Mayaku ships no URLs.
+    #
+    # Both families resolve to the same :class:`ConvNeXtBackbone` class.
+    "convnext_tiny",
+    "convnext_small",
+    "convnext_base",
+    "convnext_large",
+    "dinov3_convnext_tiny",
+    "dinov3_convnext_small",
+    "dinov3_convnext_base",
+    "dinov3_convnext_large",
+]
+_CONVNEXT_VARIANTS: frozenset[str] = frozenset(
+    {
+        "convnext_tiny",
+        "convnext_small",
+        "convnext_base",
+        "convnext_large",
+        "dinov3_convnext_tiny",
+        "dinov3_convnext_small",
+        "dinov3_convnext_base",
+        "dinov3_convnext_large",
+    }
+)
 MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn"]
 DeviceSetting = Literal["cpu", "mps", "cuda", "auto"]
 
@@ -79,7 +115,7 @@ class _BaseModel(BaseModel):
 
 
 class BackboneConfig(_BaseModel):
-    """ResNet/ResNeXt + stem/freezing knobs.
+    """Backbone selection + stem/freezing knobs.
 
     Architecture-specific shape (e.g. ResNeXt's ``num_groups=32`` /
     ``width_per_group=8`` / ``stride_in_1x1=False`` from the FAIR C2
@@ -87,6 +123,11 @@ class BackboneConfig(_BaseModel):
     `DETECTRON2_TECHNICAL_SPEC.md` §2.1) is keyed off ``name`` rather
     than carried as separate fields — Step 7 will translate this into
     the actual module construction.
+
+    The same config covers ResNet/ResNeXt and DINOv3 ConvNeXt variants;
+    a model-validator rejects field combinations that don't apply to
+    the chosen architecture (e.g. ``stride_in_1x1`` only makes sense
+    for ResNets, ``weights_path`` only for ConvNeXts).
     """
 
     name: BackboneName = "resnet50"
@@ -101,6 +142,48 @@ class BackboneConfig(_BaseModel):
     # produces wrong activations (same shapes, identical kernels, different
     # downsampling step). Flip this to True when loading D2 model-zoo weights.
     stride_in_1x1: bool = False
+
+    # Local path to a DINOv3 ConvNeXt checkpoint (``.pth`` from Meta's
+    # release or ``.safetensors`` from HuggingFace). DINOv3 weights are
+    # license-gated; Mayaku ships no URLs and no auto-download. Users
+    # accept the DINOv3 License on HuggingFace
+    # (``facebook/dinov3-convnext-{tiny,small,base,large}-pretrain-lvd1689m``)
+    # and point this field at the downloaded file. Only valid when
+    # ``name`` is a ``dinov3_convnext_*`` variant.
+    weights_path: str | None = None
+
+    @model_validator(mode="after")
+    def _check_arch_specific_fields(self) -> BackboneConfig:
+        is_convnext = self.name in _CONVNEXT_VARIANTS
+        if is_convnext:
+            # ConvNeXt uses LayerNorm exclusively — the BN-family knobs are
+            # nonsense for it. We don't silently ignore them because that
+            # masks user error; we reject any non-default value.
+            if self.norm != "FrozenBN":
+                raise ValueError(
+                    f"backbone.norm={self.norm!r} only applies to ResNet variants; "
+                    f"ConvNeXt uses LayerNorm intrinsically. Remove the field or "
+                    f"leave it at the default 'FrozenBN'."
+                )
+            if self.stride_in_1x1:
+                raise ValueError(
+                    "backbone.stride_in_1x1=True only applies to ResNet variants "
+                    "loading Detectron2 MSRA-pretrained weights; ConvNeXt has no "
+                    "bottleneck to relocate the stride within."
+                )
+            if self.res5_dilation != 1:
+                raise ValueError(
+                    "backbone.res5_dilation only applies to ResNet variants."
+                )
+        else:
+            if self.weights_path is not None:
+                raise ValueError(
+                    f"backbone.weights_path is only valid for ConvNeXt variants "
+                    f"(got name={self.name!r}). ResNet/ResNeXt use torchvision's "
+                    f"published ImageNet weights via the --pretrained-backbone CLI "
+                    f"flag (``weights='DEFAULT'``)."
+                )
+        return self
 
 
 class FPNConfig(_BaseModel):

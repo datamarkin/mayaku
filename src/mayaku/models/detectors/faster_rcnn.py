@@ -37,7 +37,7 @@ import torch
 from torch import Tensor, nn
 
 from mayaku.config.schemas import MayakuConfig
-from mayaku.models.backbones.resnet import ResNetBackbone
+from mayaku.models.backbones import build_bottom_up
 from mayaku.models.necks import FPN, LastLevelMaxPool
 from mayaku.models.proposals.rpn import RPN, build_rpn
 from mayaku.models.roi_heads.standard import (
@@ -142,12 +142,9 @@ def build_faster_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None)
             f"build_faster_rcnn requires meta_architecture='faster_rcnn'; got "
             f"{cfg.model.meta_architecture!r}"
         )
-    bottom_up = ResNetBackbone(
-        name=cfg.model.backbone.name,
-        norm=cfg.model.backbone.norm,
-        freeze_at=cfg.model.backbone.freeze_at,
+    bottom_up = build_bottom_up(
+        cfg.model.backbone,
         weights=backbone_weights,  # type: ignore[arg-type]
-        stride_in_1x1=cfg.model.backbone.stride_in_1x1,
     )
     fpn = FPN(
         bottom_up=bottom_up,

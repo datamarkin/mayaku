@@ -19,7 +19,7 @@ coords so the model graph is export-friendly.
 from __future__ import annotations
 
 from mayaku.config.schemas import MayakuConfig
-from mayaku.models.backbones.resnet import ResNetBackbone
+from mayaku.models.backbones import build_bottom_up
 from mayaku.models.detectors.faster_rcnn import FasterRCNN
 from mayaku.models.necks import FPN, LastLevelMaxPool
 from mayaku.models.proposals.rpn import build_rpn
@@ -43,12 +43,9 @@ def build_mask_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) -
         )
     assert cfg.model.roi_mask_head is not None  # enforced by ModelConfig validator
 
-    bottom_up = ResNetBackbone(
-        name=cfg.model.backbone.name,
-        norm=cfg.model.backbone.norm,
-        freeze_at=cfg.model.backbone.freeze_at,
+    bottom_up = build_bottom_up(
+        cfg.model.backbone,
         weights=backbone_weights,  # type: ignore[arg-type]
-        stride_in_1x1=cfg.model.backbone.stride_in_1x1,
     )
     fpn = FPN(
         bottom_up=bottom_up,
