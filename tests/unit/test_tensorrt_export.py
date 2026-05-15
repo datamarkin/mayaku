@@ -32,11 +32,22 @@ from mayaku.models.detectors import build_faster_rcnn
 pytestmark = [pytest.mark.tensorrt, pytest.mark.slow]
 
 
-def _tiny_cfg() -> MayakuConfig:
+def _tiny_cfg(backbone_name: str = "resnet50") -> MayakuConfig:
+    """Build a minimal Faster R-CNN config wired around ``backbone_name``.
+
+    Branches on the backbone family because the schema validator rejects
+    ResNet-only fields (``norm``, ``stride_in_1x1``) on ConvNeXt.
+    """
+    from mayaku.models.backbones import is_convnext_variant
+
+    if is_convnext_variant(backbone_name):
+        backbone = BackboneConfig(name=backbone_name, freeze_at=0)  # type: ignore[arg-type]
+    else:
+        backbone = BackboneConfig(name=backbone_name, freeze_at=2, norm="FrozenBN")  # type: ignore[arg-type]
     return MayakuConfig(
         model=ModelConfig(
             meta_architecture="faster_rcnn",
-            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
+            backbone=backbone,
             rpn=RPNConfig(
                 pre_nms_topk_train=100,
                 pre_nms_topk_test=50,
@@ -85,9 +96,15 @@ def test_tensorrt_export_fp16_flag_propagates(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tensorrt_parity_within_tolerance(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
+def test_tensorrt_parity_within_tolerance(tmp_path: Path, backbone_name: str) -> None:
+    """End-to-end TensorRT engine build + parity vs eager, parametrised
+    over backbone family. ConvNeXt routes its LayerNorm + depthwise
+    conv through the ONNX front-end the TRT builder consumes (opset 17,
+    which TRT 10+ supports natively).
+    """
     torch.manual_seed(0)
-    model = build_faster_rcnn(_tiny_cfg()).cuda().eval()
+    model = build_faster_rcnn(_tiny_cfg(backbone_name)).cuda().eval()
     out = tmp_path / "model.engine"
     sample = torch.randn(1, 3, 96, 96)
     exporter = TensorRTExporter()

@@ -29,11 +29,22 @@ from mayaku.models.detectors import build_faster_rcnn
 pytestmark = [pytest.mark.tensorrt, pytest.mark.slow]
 
 
-def _tiny_cfg() -> MayakuConfig:
+def _tiny_cfg(backbone_name: str = "resnet50") -> MayakuConfig:
+    """Build a minimal Faster R-CNN config wired around ``backbone_name``.
+
+    Branches on the backbone family because the schema validator rejects
+    ResNet-only fields (``norm``, ``stride_in_1x1``) on ConvNeXt.
+    """
+    from mayaku.models.backbones import is_convnext_variant
+
+    if is_convnext_variant(backbone_name):
+        backbone = BackboneConfig(name=backbone_name, freeze_at=0)  # type: ignore[arg-type]
+    else:
+        backbone = BackboneConfig(name=backbone_name, freeze_at=2, norm="FrozenBN")  # type: ignore[arg-type]
     return MayakuConfig(
         model=ModelConfig(
             meta_architecture="faster_rcnn",
-            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
+            backbone=backbone,
             rpn=RPNConfig(
                 pre_nms_topk_train=100,
                 pre_nms_topk_test=50,
@@ -47,18 +58,26 @@ def _tiny_cfg() -> MayakuConfig:
     )
 
 
-def _build_engine(tmp_path: Path, h: int, w: int) -> tuple[torch.nn.Module, Path]:
+def _build_engine(
+    tmp_path: Path,
+    h: int,
+    w: int,
+    backbone_name: str = "resnet50",
+) -> tuple[torch.nn.Module, Path]:
     torch.manual_seed(0)
-    model = build_faster_rcnn(_tiny_cfg()).cuda().eval()
+    model = build_faster_rcnn(_tiny_cfg(backbone_name)).cuda().eval()
     out = tmp_path / "model.engine"
     sample = torch.randn(1, 3, h, w)
     TensorRTExporter().export(model, sample, out)
     return model, out
 
 
-def test_backbone_forward_returns_expected_levels(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
+def test_backbone_forward_returns_expected_levels(
+    tmp_path: Path, backbone_name: str
+) -> None:
     h, w = 96, 96
-    _, engine_path = _build_engine(tmp_path, h, w)
+    _, engine_path = _build_engine(tmp_path, h, w, backbone_name)
     backbone = TensorRTBackbone(engine_path, pinned=(h, w))
     x = torch.zeros((1, 3, h, w), dtype=torch.float32, device="cuda")
     out = backbone(x)
@@ -69,9 +88,10 @@ def test_backbone_forward_returns_expected_levels(tmp_path: Path) -> None:
     assert out["p6"].shape[-2:] == (2, 2)  # ceil(96 / 64)
 
 
-def test_backbone_parity_against_eager(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
+def test_backbone_parity_against_eager(tmp_path: Path, backbone_name: str) -> None:
     h, w = 96, 96
-    model, engine_path = _build_engine(tmp_path, h, w)
+    model, engine_path = _build_engine(tmp_path, h, w, backbone_name)
     sample = torch.randn(1, 3, h, w)
 
     # Eager reference under strict fp32 (matches exporter's parity setup).

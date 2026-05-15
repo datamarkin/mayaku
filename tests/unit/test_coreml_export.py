@@ -31,11 +31,23 @@ from mayaku.models.detectors import build_faster_rcnn
 pytestmark = pytest.mark.coreml  # auto-skips when coremltools isn't installed
 
 
-def _tiny_cfg() -> MayakuConfig:
+def _tiny_cfg(backbone_name: str = "resnet50") -> MayakuConfig:
+    """Build a minimal Faster R-CNN config wired around ``backbone_name``.
+
+    The schema validator rejects ResNet-specific fields (``norm``,
+    ``stride_in_1x1``) on ConvNeXt variants — branch on family so both
+    naming groups produce a valid config.
+    """
+    from mayaku.models.backbones import is_convnext_variant
+
+    if is_convnext_variant(backbone_name):
+        backbone = BackboneConfig(name=backbone_name, freeze_at=0)  # type: ignore[arg-type]
+    else:
+        backbone = BackboneConfig(name=backbone_name, freeze_at=2, norm="FrozenBN")  # type: ignore[arg-type]
     return MayakuConfig(
         model=ModelConfig(
             meta_architecture="faster_rcnn",
-            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
+            backbone=backbone,
             rpn=RPNConfig(
                 pre_nms_topk_train=100,
                 pre_nms_topk_test=50,
@@ -173,17 +185,22 @@ def test_coreml_backbone_rejects_non_macos() -> None:
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="Core ML.framework is macOS-only")
-def test_coreml_backbone_shape_contract(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
+def test_coreml_backbone_shape_contract(tmp_path: Path, backbone_name: str) -> None:
     """Probing at a shape smaller than the export shape exercises
     CoreMLBackbone's pad-then-crop path. The output dict must carry the
     same keys and shapes the eager backbone would produce on the
     same probe — values need not match exactly because conv chains
     amplify the boundary-zero-pad difference under random-init weights.
+
+    Parametrised over backbone families so the ConvNeXt op set
+    (depthwise Conv2d, LayerNorm, GELU) is exercised through coremltools'
+    torch-export tracer, not just ResNet's BN-family ops.
     """
     from mayaku.inference.export import CoreMLBackbone
 
     torch.manual_seed(0)
-    cfg = _tiny_cfg()
+    cfg = _tiny_cfg(backbone_name)
     model = build_faster_rcnn(cfg).eval()
     out = tmp_path / "model.mlpackage"
     sample = torch.randn(1, 3, 96, 96)
@@ -204,7 +221,10 @@ def test_coreml_backbone_shape_contract(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="Core ML.framework is macOS-only")
-def test_coreml_backbone_values_match_eager_at_export_shape(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backbone_name", ["resnet50", "dinov3_convnext_tiny"])
+def test_coreml_backbone_values_match_eager_at_export_shape(
+    tmp_path: Path, backbone_name: str
+) -> None:
     """At the export shape (no pad/crop boundary effect), CoreMLBackbone
     forward must match the eager backbone within the same tolerance band
     as :meth:`CoreMLExporter.parity_check`. This validates the runtime
@@ -213,7 +233,7 @@ def test_coreml_backbone_values_match_eager_at_export_shape(tmp_path: Path) -> N
     from mayaku.inference.export import CoreMLBackbone
 
     torch.manual_seed(0)
-    cfg = _tiny_cfg()
+    cfg = _tiny_cfg(backbone_name)
     model = build_faster_rcnn(cfg).eval()
     out = tmp_path / "model.mlpackage"
     sample = torch.randn(1, 3, 96, 96)
