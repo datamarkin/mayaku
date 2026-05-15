@@ -1,0 +1,66 @@
+# Faster R-CNN — ConvNeXt-Large + FPN, 1x schedule (90k iters).
+# Backbone: ConvNeXt-Large (198M params, depths [3,3,27,3], dims [192,384,768,1536]).
+#
+# Ships with `weights_path` pre-filled for the DINOv3 LVD-1689M
+# checkpoint. Swap for any compatible ConvNeXt .pth or .safetensors
+# (the original Liu et al. release, other distillations, your own
+# fine-tunes), or drop the field and pair with `--pretrained-backbone`
+# for torchvision ImageNet-1k init instead.
+#
+# Recipe: cosine LR, EMA weight averaging, photometric jitter.
+# Whole-backbone fine-tune (freeze_at=0).
+#
+# DINOv3 weights are license-gated; download from
+# https://huggingface.co/facebook/dinov3-convnext-large-pretrain-lvd1689m
+# after accepting the upstream license.
+#
+# VRAM rough guide (1x, 800-pixel short side, fp32):
+#   12 GB GPU: not recommended — even ims_per_batch=1 may OOM at full resolution.
+#              Try ims_per_batch=1, grad_accum=16, enable AMP (fp16/bf16),
+#              or drop input.min_size_train to a smaller range.
+#   24 GB GPU: ims_per_batch=2, grad_accum_steps=8 (effective batch 16) — this file
+#   40 GB GPU: ims_per_batch=4, grad_accum_steps=4
+#   80 GB GPU: ims_per_batch=8, grad_accum_steps=2
+model:
+  meta_architecture: faster_rcnn
+  backbone:
+    name: convnext_large
+    freeze_at: 0
+    weights_path: models/dinov3/dinov3_convnext_large_pretrain_lvd1689m-61fa432d.pth
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  pixel_std: [58.395, 57.120, 57.375]
+
+input:
+  min_size_test: 800
+  max_size_test: 1333
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  # ConvNeXt-Large is ~9x ResNet-50. Enable AMP for 24GB. If you have
+  # bf16 (Ampere+), prefer amp_dtype: bf16 — drops the GradScaler and
+  # has wider dynamic range than fp16. The default below is fp32 to
+  # keep the recipe portable; flip amp_enabled to true on real runs.
+  ims_per_batch: 2
+  grad_accum_steps: 8
+  base_lr: 0.02
+  max_iter: 90_000
+  steps: [60_000, 80_000]
+  warmup_iters: 1_000
+  warmup_factor: 0.001
+  warmup_method: linear
+  lr_scheduler_name: WarmupCosineLR
+  amp_enabled: false
+  amp_dtype: fp16
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2_000.0

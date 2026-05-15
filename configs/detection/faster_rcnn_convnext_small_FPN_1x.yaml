@@ -1,0 +1,59 @@
+# Faster R-CNN — ConvNeXt-Small + FPN, 1x schedule (90k iters).
+# Backbone: ConvNeXt-Small (50M params, depths [3,3,27,3], dims [96,192,384,768]).
+#
+# Ships with `weights_path` pre-filled for the DINOv3 LVD-1689M
+# checkpoint. Swap for any compatible ConvNeXt .pth or .safetensors
+# (the original Liu et al. release, other distillations, your own
+# fine-tunes), or drop the field and pair with `--pretrained-backbone`
+# for torchvision ImageNet-1k init instead.
+#
+# Recipe: cosine LR, EMA weight averaging, photometric jitter.
+# Whole-backbone fine-tune (freeze_at=0).
+#
+# DINOv3 weights are license-gated; download from
+# https://huggingface.co/facebook/dinov3-convnext-small-pretrain-lvd1689m
+# after accepting the upstream license.
+#
+# VRAM rough guide (1x, 800-pixel short side, fp32):
+#   12 GB GPU: ims_per_batch=4, grad_accum_steps=4 (effective batch 16) — this file
+#   24 GB GPU: ims_per_batch=8, grad_accum_steps=2
+model:
+  meta_architecture: faster_rcnn
+  backbone:
+    name: convnext_small
+    freeze_at: 0
+    weights_path: models/dinov3/dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  pixel_std: [58.395, 57.120, 57.375]
+
+input:
+  min_size_test: 800
+  max_size_test: 1333
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  # ConvNeXt-Small is ~2x ResNet-50's parameter count; per-step VRAM is
+  # meaningfully higher. Drop ims_per_batch and increase grad_accum to
+  # keep the effective batch at 16.
+  ims_per_batch: 4
+  grad_accum_steps: 4
+  base_lr: 0.02
+  max_iter: 90_000
+  steps: [60_000, 80_000]
+  warmup_iters: 1_000
+  warmup_factor: 0.001
+  warmup_method: linear
+  lr_scheduler_name: WarmupCosineLR
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2_000.0
