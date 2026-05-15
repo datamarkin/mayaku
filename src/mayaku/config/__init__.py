@@ -13,6 +13,7 @@ from mayaku.config.io import dump_yaml, load_yaml, merge_overrides, to_yaml_stri
 from mayaku.config.schedules import schedule_1x, schedule_2x, schedule_3x
 from mayaku.config.schemas import (
     AnchorGeneratorConfig,
+    AutoConfig,
     BackboneConfig,
     BackboneName,
     DataLoaderConfig,
@@ -33,6 +34,7 @@ from mayaku.config.schemas import (
 
 __all__ = [
     "AnchorGeneratorConfig",
+    "AutoConfig",
     "BackboneConfig",
     "BackboneName",
     "DataLoaderConfig",

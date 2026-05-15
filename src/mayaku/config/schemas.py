@@ -39,6 +39,7 @@ from mayaku.backends.device import DeviceKind
 
 __all__ = [
     "AnchorGeneratorConfig",
+    "AutoConfig",
     "BackboneConfig",
     "BackboneName",
     "DataLoaderConfig",
@@ -510,6 +511,42 @@ class DataLoaderConfig(_BaseModel):
     repeat_threshold: Annotated[float, Field(gt=0.0, le=1.0)] = 0.001
 
 
+class AutoConfig(_BaseModel):
+    """Dataset-aware auto-tuning of fine-tune fields at ``mayaku train`` start.
+
+    When ``enabled`` is true (the default), ``mayaku train`` runs a
+    single read-only pass over the COCO dataset *before* model
+    construction and overrides fine-tune-relevant fields that the user
+    did NOT explicitly set in the source YAML:
+
+    * ``model.roi_heads.num_classes`` — from the dataset's category count
+    * ``model.anchor_generator.sizes`` / ``aspect_ratios`` — k-means on
+      GT box √area and w/h (skipped if <50 boxes)
+    * ``model.backbone.freeze_at`` — from dataset size bucket
+    * ``solver.base_lr`` / ``max_iter`` / ``steps`` / ``warmup_iters`` /
+      ``lr_scheduler_name`` / ``ema_enabled`` / ``ema_decay`` / ``ema_tau``
+      — from dataset size bucket, anchored to the D2 scratch recipe and
+      applying both batch-scaling and the 10× fine-tune drop
+    * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
+      dataset size bucket
+    * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to
+      ``RepeatFactorTrainingSampler`` when class-imbalance ratio > 10
+
+    Explicit user values always win — auto-config only fills gaps. The
+    resolved config is dumped to ``output_dir/config.yaml`` for
+    reproducibility.
+
+    Set ``enabled: false`` for replication runs where the config's
+    defaults are intentional (e.g. the bundled COCO 1x/3x recipes), or
+    to make the train run bit-identical to a hand-written recipe.
+
+    Tiny datasets (<10 images) are skipped automatically — there isn't
+    enough signal to derive a sensible recipe.
+    """
+
+    enabled: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Top-level
 # ---------------------------------------------------------------------------
@@ -525,3 +562,4 @@ class MayakuConfig(_BaseModel):
     solver: SolverConfig = Field(default_factory=SolverConfig)
     test: TestConfig = Field(default_factory=TestConfig)
     dataloader: DataLoaderConfig = Field(default_factory=DataLoaderConfig)
+    auto_config: AutoConfig = Field(default_factory=AutoConfig)

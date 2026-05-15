@@ -11,17 +11,18 @@ from __future__ import annotations
 
 import gc
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 from mayaku.backends.device import Device
 from mayaku.backends.mps import apply_mps_environment
 from mayaku.cli._factory import build_detector
-from mayaku.config import MayakuConfig, dump_yaml, load_yaml
+from mayaku.config import MayakuConfig, dump_yaml, merge_overrides
 from mayaku.data import (
     AspectRatioGroupedDataset,
     Augmentation,
@@ -57,6 +58,13 @@ from mayaku.engine import (
     build_lr_scheduler,
     build_optimizer,
 )
+from mayaku.tuning import (
+    analyze_dataset,
+    collect_set_paths,
+    derive_overrides,
+    filter_unset,
+    walk_leaves,
+)
 
 __all__ = ["run_train"]
 
@@ -91,11 +99,35 @@ def run_train(
             "backbone weights it was trained from. Pick one."
         )
 
-    cfg = config if isinstance(config, MayakuConfig) else load_yaml(config)
+    # Track which YAML paths the user explicitly set. Auto-config later
+    # uses this to skip any field the user already pinned, so explicit
+    # values always win over the dataset-derived recipe. Python-direct
+    # callers (``config`` is a constructed MayakuConfig) start with an
+    # empty set — auto-config will fill in everything except CLI flags
+    # which we mark below.
+    user_set_paths: set[str]
+    if isinstance(config, MayakuConfig):
+        cfg = config
+        user_set_paths = set()
+    else:
+        text = Path(config).read_text(encoding="utf-8")
+        raw_yaml = yaml.safe_load(text) or {}
+        if not isinstance(raw_yaml, Mapping):
+            raise ValueError(
+                f"YAML at {config} must be a mapping at the top level; "
+                f"got {type(raw_yaml).__name__}"
+            )
+        raw_dict = dict(raw_yaml)
+        user_set_paths = collect_set_paths(raw_dict)
+        cfg = MayakuConfig.model_validate(raw_dict)
+
     if max_iter is not None:
         cfg = cfg.model_copy(
             update={"solver": cfg.solver.model_copy(update={"max_iter": max_iter})}
         )
+        # CLI --max-iter is an explicit user choice; preserve it through
+        # auto-config even though the value didn't come from the YAML.
+        user_set_paths.add("solver.max_iter")
 
     # Periodic eval requires both the dataset paths *and* an enabled
     # period; rejecting the half-configured cases up front means users
@@ -112,21 +144,6 @@ def run_train(
             "--val-json/--val-images supplied but test.eval_period=0; the val "
             "dataset will be ignored. Set test.eval_period to a positive "
             "iteration count to enable mid-training eval.",
-            stacklevel=2,
-        )
-
-    # Surface the most common silent footgun: freezing early backbone stages
-    # at random init (the schema's freeze_at=2 default assumes a pretrained
-    # backbone). Warn here rather than after model construction so the
-    # message lands before the slow torch.load / weight download.
-    if not pretrained_backbone and weights is None and cfg.model.backbone.freeze_at >= 1:
-        warnings.warn(
-            f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
-            "is freezing the early stages. Random-init frozen features cannot "
-            "be recovered downstream and training will not converge — your "
-            "model will detect nothing. Pass --pretrained-backbone, or set "
-            "model.backbone.freeze_at=0 in the YAML for true from-scratch "
-            "training.",
             stacklevel=2,
         )
 
@@ -165,22 +182,11 @@ def run_train(
                 "yaml convention) when training with --pretrained-backbone."
             )
 
-    dev = Device(kind=device) if device else Device.auto()  # type: ignore[arg-type]
-    if dev.kind == "mps":
-        apply_mps_environment()
-    model = build_detector(
-        cfg,
-        backbone_weights="DEFAULT" if pretrained_backbone else None,
-    ).to(dev.torch)
-    if weights is not None:
-        state = torch.load(weights, map_location="cpu", weights_only=True)
-        if isinstance(state, dict) and "model" in state:
-            state = state["model"]
-        _load_for_finetune(model, state)
-
-    optimizer = build_optimizer(model, cfg.solver)
-    scheduler = build_lr_scheduler(optimizer, cfg.solver)
-
+    # Load the dataset BEFORE model construction so auto-config can
+    # analyse the box / class distribution and rewrite anchor sizes,
+    # ROI head class count, schedule, etc. before any weights are
+    # allocated. The same `dataset_dicts_raw` is reused downstream for
+    # RFS repeat factors and the training loop, so this isn't extra work.
     metadata = build_coco_metadata(name="cli_train", json_path=coco_gt_json)
     # Drop annotation fields the meta-architecture won't read. For
     # COCO 2017 train this saves ~3-4 GB of polygon Python objects on
@@ -196,6 +202,58 @@ def run_train(
         keep_segmentation=keep_seg,
         keep_keypoints=keep_kp,
     )
+
+    # Dataset-aware auto-config. The recipe layer fills in fine-tune-
+    # relevant fields (anchor sizes/ARs, num_classes, base_lr, schedule,
+    # mosaic / mixup probs, sampler choice) that the user did NOT set
+    # explicitly. Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
+    # ``auto_config.enabled = False`` both short-circuit cleanly with no
+    # overrides.
+    if cfg.auto_config.enabled:
+        stats = analyze_dataset(
+            dataset_dicts_raw,
+            num_classes=len(metadata.thing_classes),
+            resize_short_edge=cfg.input.min_size_test,
+            resize_max_edge=cfg.input.max_size_test,
+        )
+        proposed = derive_overrides(stats, cfg, user_set_paths)
+        actual = filter_unset(proposed, user_set_paths)
+        if actual:
+            cfg = merge_overrides(cfg, actual)
+            _log_auto_config_report(stats, actual, user_set_paths)
+
+    # Surface the most common silent footgun: freezing early backbone stages
+    # at random init (the schema's freeze_at=2 default assumes a pretrained
+    # backbone). Warn here rather than after model construction so the
+    # message lands before the slow torch.load / weight download. Runs
+    # after auto-config so the freeze_at being checked is the one that
+    # will actually train.
+    if not pretrained_backbone and weights is None and cfg.model.backbone.freeze_at >= 1:
+        warnings.warn(
+            f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
+            "is freezing the early stages. Random-init frozen features cannot "
+            "be recovered downstream and training will not converge — your "
+            "model will detect nothing. Pass --pretrained-backbone, or set "
+            "model.backbone.freeze_at=0 in the YAML for true from-scratch "
+            "training.",
+            stacklevel=2,
+        )
+
+    dev = Device(kind=device) if device else Device.auto()  # type: ignore[arg-type]
+    if dev.kind == "mps":
+        apply_mps_environment()
+    model = build_detector(
+        cfg,
+        backbone_weights="DEFAULT" if pretrained_backbone else None,
+    ).to(dev.torch)
+    if weights is not None:
+        state = torch.load(weights, map_location="cpu", weights_only=True)
+        if isinstance(state, dict) and "model" in state:
+            state = state["model"]
+        _load_for_finetune(model, state)
+
+    optimizer = build_optimizer(model, cfg.solver)
+    scheduler = build_lr_scheduler(optimizer, cfg.solver)
 
     # Compute RFS repeat factors on the *raw* list — SerializedList
     # would unpickle every dict twice (once now, once at training).
@@ -362,6 +420,31 @@ def run_train(
         hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
     trainer.train(start_iter=0, max_iter=cfg.solver.max_iter)
+
+
+def _log_auto_config_report(
+    stats: Any, applied: Mapping[str, Any], user_set_paths: set[str]
+) -> None:
+    """Print a scannable summary of what auto-config decided.
+
+    Goes through stdout so it sits next to the existing ``[train]``
+    lines from :func:`_load_for_finetune`.
+    """
+    print(
+        f"[auto-config] N_train={stats.num_images} num_classes={stats.num_classes} "
+        f"num_boxes={stats.num_boxes} imbalance={stats.class_imbalance:.1f}x",
+        flush=True,
+    )
+    for path, value in walk_leaves(applied):
+        print(f"[auto-config] {path} -> {value!r}", flush=True)
+    if user_set_paths:
+        kept = sorted(
+            p
+            for p in user_set_paths
+            if p.split(".", 1)[0] in {"model", "solver", "input", "dataloader"}
+        )
+        if kept:
+            print(f"[auto-config] user-set (preserved): {kept}", flush=True)
 
 
 def _load_for_finetune(model: torch.nn.Module, state: dict[str, Any]) -> None:
