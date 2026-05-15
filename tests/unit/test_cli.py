@@ -13,10 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pytest
 import torch
-from PIL import Image
 from typer.testing import CliRunner
 
 from mayaku.cli import app
@@ -25,85 +23,9 @@ from mayaku.cli.eval import run_eval
 from mayaku.cli.export import run_export
 from mayaku.cli.predict import run_predict
 from mayaku.cli.train import run_train
-from mayaku.config import (
-    BackboneConfig,
-    MayakuConfig,
-    ModelConfig,
-    ROIBoxHeadConfig,
-    ROIHeadsConfig,
-    RPNConfig,
-    SolverConfig,
-    dump_yaml,
-)
+from mayaku.config import MayakuConfig, dump_yaml
 
-# ---------------------------------------------------------------------------
-# Toy fixture: 1-image COCO, tiny config, optional pretrained weights
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def toy_workspace(tmp_path: Path) -> dict[str, Path]:
-    images_dir = tmp_path / "images"
-    images_dir.mkdir()
-    rgb = (np.random.default_rng(0).random((64, 64, 3)) * 255).astype(np.uint8)
-    Image.fromarray(rgb).save(images_dir / "img.png")
-
-    coco = {
-        "images": [{"id": 1, "file_name": "img.png", "height": 64, "width": 64}],
-        "categories": [{"id": 1, "name": "thing", "supercategory": "thing"}],
-        "annotations": [
-            {
-                "id": 100,
-                "image_id": 1,
-                "category_id": 1,
-                "bbox": [10.0, 10.0, 30.0, 30.0],
-                "area": 900.0,
-                "iscrowd": 0,
-            }
-        ],
-    }
-    json_path = tmp_path / "gt.json"
-    json_path.write_text(json.dumps(coco))
-
-    cfg = MayakuConfig(
-        model=ModelConfig(
-            meta_architecture="faster_rcnn",
-            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
-            rpn=RPNConfig(
-                pre_nms_topk_train=100,
-                pre_nms_topk_test=50,
-                post_nms_topk_train=20,
-                post_nms_topk_test=10,
-                batch_size_per_image=16,
-            ),
-            roi_heads=ROIHeadsConfig(num_classes=2, batch_size_per_image=8),
-            roi_box_head=ROIBoxHeadConfig(num_fc=1, fc_dim=32),
-        ),
-        solver=SolverConfig(
-            base_lr=1e-4,
-            momentum=0.0,
-            ims_per_batch=1,
-            max_iter=2,
-            warmup_iters=1,
-            warmup_factor=0.5,
-            steps=(1,),
-            checkpoint_period=2,
-        ),
-    )
-    cfg_path = tmp_path / "cfg.yaml"
-    dump_yaml(cfg, cfg_path)
-
-    # Pre-built weights file so eval/predict can pass --weights.
-    model = build_detector(cfg)
-    weights = tmp_path / "model.pth"
-    torch.save(model.state_dict(), weights)
-    return {
-        "images": images_dir,
-        "json": json_path,
-        "cfg": cfg_path,
-        "weights": weights,
-        "image_file": images_dir / "img.png",
-    }
+# `toy_workspace` is a shared fixture defined in tests/conftest.py.
 
 
 # ---------------------------------------------------------------------------
