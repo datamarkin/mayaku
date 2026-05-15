@@ -162,9 +162,7 @@ class BackboneConfig(_BaseModel):
                     "bottleneck to relocate the stride within."
                 )
             if self.res5_dilation != 1:
-                raise ValueError(
-                    "backbone.res5_dilation only applies to ResNet variants."
-                )
+                raise ValueError("backbone.res5_dilation only applies to ResNet variants.")
         else:
             if self.weights_path is not None:
                 raise ValueError(

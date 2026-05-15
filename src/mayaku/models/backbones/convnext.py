@@ -147,8 +147,7 @@ class ConvNeXtBackbone(Backbone):
         super().__init__()
         if name not in _VARIANT_CHANNELS:
             raise ValueError(
-                f"unknown ConvNeXt variant {name!r}; expected one of "
-                f"{tuple(_VARIANT_CHANNELS)}"
+                f"unknown ConvNeXt variant {name!r}; expected one of {tuple(_VARIANT_CHANNELS)}"
             )
         if not 0 <= freeze_at <= 5:
             raise ValueError(f"freeze_at must be in [0, 5]; got {freeze_at}")
@@ -160,9 +159,7 @@ class ConvNeXtBackbone(Backbone):
         self.name = name
         self.freeze_at = freeze_at
         self._out_features = tuple(out_features)
-        self._out_feature_channels = {
-            f: _VARIANT_CHANNELS[name][f] for f in self._out_features
-        }
+        self._out_feature_channels = {f: _VARIANT_CHANNELS[name][f] for f in self._out_features}
         self._out_feature_strides = {f: _OUT_STRIDES[f] for f in self._out_features}
 
         # Choose: random init, or torchvision-pretrained "DEFAULT". The
@@ -407,9 +404,7 @@ def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, T
                 # the runtime forward doesn't broadcast — keeps the
                 # post-load model bitwise-identical to a torchvision init.
                 channels = value.shape[0]
-                out[f"_res_stages.{stage}.{j}.layer_scale"] = value.view(
-                    channels, 1, 1
-                )
+                out[f"_res_stages.{stage}.{j}.layer_scale"] = value.view(channels, 1, 1)
                 continue
             if sub not in _BLOCK_SUB:
                 # Unexpected sub-key — let the strict-load filter drop it.
@@ -447,9 +442,7 @@ def build_convnext(
     """
     name = cfg.name
     if name not in _VARIANT_CHANNELS:
-        raise ValueError(
-            f"build_convnext requires a ConvNeXt variant; got {name!r}"
-        )
+        raise ValueError(f"build_convnext requires a ConvNeXt variant; got {name!r}")
     return ConvNeXtBackbone(
         name=name,
         freeze_at=cfg.freeze_at,

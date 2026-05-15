@@ -249,9 +249,7 @@ class EqualizeTransform(_PhotometricTransform):
                 # Channel is constant — equalisation is identity.
                 out[..., c] = ch
                 continue
-            lut = np.clip(
-                np.round((cdf - cdf_min) * 255.0 / denom), 0, 255
-            ).astype(np.uint8)
+            lut = np.clip(np.round((cdf - cdf_min) * 255.0 / denom), 0, 255).astype(np.uint8)
             out[..., c] = lut[ch]
         return out
 
@@ -391,9 +389,7 @@ class RandAugment(Augmentation):
         if max_magnitude <= 0.0:
             raise ValueError(f"max_magnitude must be > 0; got {max_magnitude}")
         if not 0.0 <= magnitude <= max_magnitude:
-            raise ValueError(
-                f"magnitude must be in [0, {max_magnitude}]; got {magnitude}"
-            )
+            raise ValueError(f"magnitude must be in [0, {max_magnitude}]; got {magnitude}")
         if num_ops > len(self._OPS):
             raise ValueError(
                 f"num_ops={num_ops} exceeds pool size {len(self._OPS)} "
@@ -443,9 +439,7 @@ class RandAugment(Augmentation):
         m_norm = self.magnitude / self.max_magnitude
         # Sample without replacement so a single image gets distinct ops
         # — increases per-image diversity vs. uniform-with-replacement.
-        chosen = self.rng.choice(
-            np.array(self._OPS), size=self.num_ops, replace=False
-        )
+        chosen = self.rng.choice(np.array(self._OPS), size=self.num_ops, replace=False)
         ops: list[_PhotometricTransform] = []
         for name in chosen:
             t = self._sample_op(str(name), m_norm)

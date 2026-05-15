@@ -136,9 +136,7 @@ class RepeatFactorTrainingSampler(Sampler[int]):
         rank: int = 0,
     ) -> None:
         if repeat_factors.ndim != 1:
-            raise ValueError(
-                f"repeat_factors must be 1-D; got shape {tuple(repeat_factors.shape)}"
-            )
+            raise ValueError(f"repeat_factors must be 1-D; got shape {tuple(repeat_factors.shape)}")
         if repeat_factors.numel() == 0:
             raise ValueError("repeat_factors is empty; nothing to sample")
         if (repeat_factors < 0).any():
@@ -181,9 +179,7 @@ class RepeatFactorTrainingSampler(Sampler[int]):
         category_freq = {c: n / num_images for c, n in category_count.items()}
 
         # Step 2: per-category repeat factor.
-        category_rep = {
-            c: max(1.0, math.sqrt(repeat_thresh / f)) for c, f in category_freq.items()
-        }
+        category_rep = {c: max(1.0, math.sqrt(repeat_thresh / f)) for c, f in category_freq.items()}
 
         # Step 3: per-image repeat factor — max over its labels.
         # Empty-annotation images get r=1.0 (sample at base rate); they

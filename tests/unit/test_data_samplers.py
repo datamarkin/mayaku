@@ -220,9 +220,7 @@ def test_rfs_validates_inputs() -> None:
             [_dd([0])], repeat_thresh=0.0
         )
     with pytest.raises(ValueError, match="empty"):
-        RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
-            [], repeat_thresh=0.001
-        )
+        RepeatFactorTrainingSampler.repeat_factors_from_category_frequency([], repeat_thresh=0.001)
 
 
 def test_rfs_len_unsupported() -> None:

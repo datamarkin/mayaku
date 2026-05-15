@@ -81,16 +81,66 @@ class SizeBucket:
 _BUCKETS: Final[tuple[tuple[float, SizeBucket], ...]] = (
     # (upper_exclusive_image_count, bucket). Last entry uses sentinel
     # math.inf so any larger dataset still falls into a bucket.
-    (500, SizeBucket("xs", base_lr=5e-4, epochs=25, freeze_at=3,
-                     mosaic_prob=0.0, mixup_prob=0.0, copy_paste_prob=0.0)),
-    (2_000, SizeBucket("s", base_lr=1e-3, epochs=15, freeze_at=2,
-                       mosaic_prob=0.0, mixup_prob=0.0, copy_paste_prob=0.0)),
-    (5_000, SizeBucket("m", base_lr=1e-3, epochs=12, freeze_at=2,
-                       mosaic_prob=0.3, mixup_prob=0.0, copy_paste_prob=0.0)),
-    (50_000, SizeBucket("l", base_lr=2e-3, epochs=10, freeze_at=2,
-                        mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.0)),
-    (math.inf, SizeBucket("xl", base_lr=2e-3, epochs=8, freeze_at=2,
-                          mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1)),
+    (
+        500,
+        SizeBucket(
+            "xs",
+            base_lr=5e-4,
+            epochs=25,
+            freeze_at=3,
+            mosaic_prob=0.0,
+            mixup_prob=0.0,
+            copy_paste_prob=0.0,
+        ),
+    ),
+    (
+        2_000,
+        SizeBucket(
+            "s",
+            base_lr=1e-3,
+            epochs=15,
+            freeze_at=2,
+            mosaic_prob=0.0,
+            mixup_prob=0.0,
+            copy_paste_prob=0.0,
+        ),
+    ),
+    (
+        5_000,
+        SizeBucket(
+            "m",
+            base_lr=1e-3,
+            epochs=12,
+            freeze_at=2,
+            mosaic_prob=0.3,
+            mixup_prob=0.0,
+            copy_paste_prob=0.0,
+        ),
+    ),
+    (
+        50_000,
+        SizeBucket(
+            "l",
+            base_lr=2e-3,
+            epochs=10,
+            freeze_at=2,
+            mosaic_prob=0.5,
+            mixup_prob=0.1,
+            copy_paste_prob=0.0,
+        ),
+    ),
+    (
+        math.inf,
+        SizeBucket(
+            "xl",
+            base_lr=2e-3,
+            epochs=8,
+            freeze_at=2,
+            mosaic_prob=0.5,
+            mixup_prob=0.1,
+            copy_paste_prob=0.1,
+        ),
+    ),
 )
 
 
@@ -135,8 +185,9 @@ def _build_schedule(max_iter: int) -> dict[str, Any]:
     return {"max_iter": max_iter, "steps": steps, "warmup_iters": warmup_iters}
 
 
-def _epoch_schedule(num_images: int, ims_per_batch: int, grad_accum_steps: int,
-                    epochs: int) -> dict[str, Any]:
+def _epoch_schedule(
+    num_images: int, ims_per_batch: int, grad_accum_steps: int, epochs: int
+) -> dict[str, Any]:
     """Like :func:`_build_schedule` but derives ``max_iter`` from an
     epoch budget over the effective batch size."""
     effective_batch = max(1, ims_per_batch * grad_accum_steps)

@@ -204,7 +204,9 @@ def test_train_rejects_missing_train_json(toy_workspace: dict[str, Any], tmp_pat
         )
 
 
-def test_train_rejects_non_directory_train_images(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+def test_train_rejects_non_directory_train_images(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
     with pytest.raises(NotADirectoryError, match="train_images"):
         train(
             config=toy_workspace["cfg"],
@@ -213,5 +215,3 @@ def test_train_rejects_non_directory_train_images(toy_workspace: dict[str, Any],
             output_dir=tmp_path / "run_bad_images",
             device="cpu",
         )
-
-

@@ -356,6 +356,7 @@ For the full honest comparison (including where D2 is still better), see [`docs/
 
 ```bash
 ruff check src tests
+ruff format --check src tests     # CI also runs this; missing it locally is a common cause of CI-only failures
 mypy
 MAYAKU_DEVICE=cpu pytest          # also: mps, cuda
 ```

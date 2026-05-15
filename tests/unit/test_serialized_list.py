@@ -83,8 +83,7 @@ def test_pickle_roundtrip() -> None:
     bite Linux on Python 3.14+ when the runtime default flips to
     ``forkserver``)."""
     src = [
-        {"file_name": f"img_{i}.jpg", "annotations": [{"bbox": [0, 0, 10, 10]}]}
-        for i in range(5)
+        {"file_name": f"img_{i}.jpg", "annotations": [{"bbox": [0, 0, 10, 10]}]} for i in range(5)
     ]
     sl = SerializedList(src)
     blob = pickle.dumps(sl)

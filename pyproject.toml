@@ -132,6 +132,7 @@ module = [
   "coremltools.*",
   "openvino.*",
   "onnxruntime.*",
+  "safetensors.*",
   "tensorrt.*",
 ]
 ignore_missing_imports = true
