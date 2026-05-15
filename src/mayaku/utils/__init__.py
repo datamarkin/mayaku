@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from mayaku.utils.checkpoint import (
+    git_hash,
+    select_final_weights,
+    strip_num_batches_tracked,
+)
 from mayaku.utils.download import (
     DEFAULT_MANIFEST_URL,
     DEFAULT_VARIANT,
@@ -19,6 +24,9 @@ __all__ = [
     "DownloadError",
     "bgr_to_rgb",
     "download_model",
+    "git_hash",
     "list_models",
     "read_image",
+    "select_final_weights",
+    "strip_num_batches_tracked",
 ]

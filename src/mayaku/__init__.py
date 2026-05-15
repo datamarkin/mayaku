@@ -12,3 +12,16 @@ import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 __version__ = "0.0.0"
+
+# Lazy top-level export. ``from mayaku import train`` works without
+# eagerly pulling ``torch`` + the entire CLI stack on plain ``import
+# mayaku``. PEP 562 ``__getattr__`` resolves the name on first access.
+__all__ = ["train"]
+
+
+def __getattr__(name: str) -> object:
+    if name == "train":
+        from mayaku.api import train
+
+        return train
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
