@@ -207,9 +207,7 @@ def resolve_ddp_device(device_setting: str | None, num_gpus: int) -> Device:
     and ``num_gpus`` must not exceed visible CUDA devices.
     """
     dev = (
-        Device.auto()
-        if device_setting in (None, "auto")
-        else Device(kind=device_setting)  # type: ignore[arg-type]
+        Device.auto() if device_setting in (None, "auto") else Device(kind=device_setting)  # type: ignore[arg-type]
     )
     if num_gpus <= 1:
         return dev
