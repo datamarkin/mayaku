@@ -10,16 +10,17 @@
 
 ## Why migrate from Detectron2?
 
-| | Detectron2 | Mayaku |
-|---|---|---|
+|                                  | Detectron2 | Mayaku |
+|----------------------------------|---|---|
 | Apple Silicon (MPS) train + eval | not supported | first-class |
-| `pip install -e .` on macOS | painful (custom CUDA kernels, ABI mismatches) | works out of the box |
-| ONNX export | community-maintained, brittle, broken for keypoint | parity-tested (atol=1e-3, opset 17) |
-| CoreML export | not first-class | shipped CLI verb, fp16/fp32, `mlprogram` |
-| OpenVINO export | not first-class | shipped CLI verb |
-| TensorRT export | not first-class | shipped CLI verb |
-| Configuration | yacs / LazyConfig | Pydantic v2 (frozen, fail-at-load) |
-| Last release | v0.6 (Nov 2021) | active |
+| AMD train + inference            | not supported | via ROCm — pure-PyTorch, no source changes |
+| `pip install -e .` on macOS      | painful (custom CUDA kernels, ABI mismatches) | works out of the box |
+| ONNX export                      | community-maintained, brittle, broken for keypoint | parity-tested (atol=1e-3, opset 17) |
+| CoreML export                    | not first-class | shipped CLI verb, fp16/fp32, `mlprogram` |
+| OpenVINO export                  | not first-class | shipped CLI verb |
+| TensorRT export                  | not first-class | shipped CLI verb |
+| Configuration                    | yacs / LazyConfig | Pydantic v2 (frozen, fail-at-load) |
+| Last release                     | v0.6 (Nov 2021) | active |
 
 You don't have to retrain or convert anything. All 12 model-zoo checkpoints reproduce D2's published COCO val2017 numbers within ±0.1 AP and ship [pre-converted and hosted](#pre-converted-models) — `mayaku predict --weights <name>` fetches on first use. Switch the runtime, keep the weights.
 
@@ -131,7 +132,7 @@ Machine-readable index: [`manifest.json`](https://dtmfiles.com/mayaku/v1/models/
 |---|---|
 | Detectors | Faster R-CNN · Mask R-CNN · Keypoint R-CNN (56×56 heatmaps) |
 | Backbones | ResNet-50, ResNet-101, ResNeXt-101 (32×8d) — all with FPN |
-| Backends | CUDA · MPS · CPU (single codebase, single wheel) |
+| Backends | CUDA · ROCm · MPS · CPU (single codebase, single wheel; ROCm via PyTorch's CUDA-API alias) |
 | Export targets | `mayaku export {onnx, coreml, openvino, tensorrt}` — all four parity-tested. TensorRT needs a CUDA host. |
 | Configuration | Pydantic v2, frozen + extra-forbidden, validated at load |
 | Distributed | DDP via `mayaku train --num-gpus N` (or `mayaku.api.train(..., num_gpus=N)`, or `torchrun`) — `nccl`/RCCL on CUDA/ROCm, `gloo` elsewhere |
