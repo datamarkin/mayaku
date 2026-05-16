@@ -263,6 +263,15 @@ def run_train(
     world_size = get_world_size()
     rank = get_rank()
 
+    # Under DDP on CUDA, pin this Device to the rank's assigned GPU.
+    # Both launch paths (``_worker_entry`` and ``init_from_env_if_needed``)
+    # have already called ``torch.cuda.set_device(rank)``; mirror that
+    # into the Device descriptor so ``model.to(dev.torch)`` and
+    # ``create_ddp_model(model, dev)`` use ``cuda:rank`` instead of
+    # ``cuda:0``. Without this every rank would silently train on cuda:0.
+    if dev.kind == "cuda" and world_size > 1:
+        dev = Device(kind="cuda", index=rank)
+
     model = build_detector(
         cfg,
         backbone_weights="DEFAULT" if pretrained_backbone else None,
@@ -482,10 +491,14 @@ def run_train(
                     cfg.solver.checkpoint_period,
                 )
             )
-    if cfg.test.eval_period > 0 and is_main_process():
-        # Mid-training eval runs on rank 0 only — running it on every
-        # rank would N-fold duplicate the work and the eval loader has
-        # no rank-aware slicing.
+    if cfg.test.eval_period > 0:
+        # Mid-training eval runs on every rank in v1: gating to rank 0
+        # only would let rank 0 sit in eval past NCCL's 30-min watchdog
+        # while the other ranks block in their next iter's all_reduce,
+        # then crash. Redundant eval across N ranks is wasteful but
+        # keeps every rank reaching the same collectives at roughly the
+        # same wall-clock — see docs/portability.md for the offline
+        # ``mayaku eval`` workaround on large val sets.
         assert val_json is not None and val_image_root is not None  # validated above
         val_loader = _build_val_loader(cfg, val_json, val_image_root)
         evaluator = COCOEvaluator(val_json, output_dir=output_dir / "eval")

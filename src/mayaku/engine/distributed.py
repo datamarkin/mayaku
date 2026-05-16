@@ -327,6 +327,14 @@ def _worker_entry(
     timeout: dt.timedelta,
 ) -> None:
     backend = "nccl" if device_kind == "cuda" else "gloo"
+    if device_kind == "cuda":
+        # NCCL reads the current device at init time and registers this
+        # rank against it. Setting the device AFTER init_process_group
+        # leaves every rank registered against cuda:0 and the bootstrap
+        # collective hangs (or every rank silently shares one GPU).
+        # Restored from commit 67cb3c5 which was lost in the revert.
+        torch.cuda.set_device(rank)
+    os.environ.setdefault("LOCAL_RANK", str(rank))
     dist.init_process_group(
         backend=backend,
         init_method=dist_url,
@@ -334,11 +342,6 @@ def _worker_entry(
         rank=rank,
         timeout=timeout,
     )
-    if device_kind == "cuda":
-        # Pin this rank to a single GPU. Equivalent to setting
-        # CUDA_VISIBLE_DEVICES per-rank but more explicit.
-        torch.cuda.set_device(rank)
-    os.environ.setdefault("LOCAL_RANK", str(rank))
     # ROCm hosts without an InfiniBand fabric stall in NCCL/RCCL's
     # IB-probe phase. Disabling IB by default is harmless on NVIDIA
     # single-node runs (Ethernet/NVLink are the actual transports).
