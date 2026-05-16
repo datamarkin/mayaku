@@ -28,7 +28,8 @@ from mayaku.cli.download import render_index, run_download
 from mayaku.cli.eval import run_eval
 from mayaku.cli.export import run_export
 from mayaku.cli.predict import run_predict
-from mayaku.cli.train import run_train
+from mayaku.cli.train import run_train, run_train_worker
+from mayaku.engine import launch, resolve_ddp_device
 from mayaku.utils.download import DEFAULT_MANIFEST_URL, VARIANTS
 
 app = typer.Typer(
@@ -78,8 +79,48 @@ def _train(
         file_okay=False,
         help="Image directory matching --val-json.",
     ),
+    num_gpus: int = typer.Option(
+        1,
+        "--num-gpus",
+        min=1,
+        help=(
+            "Number of GPUs to train on (DDP). Default 1 (single-process). "
+            "Values > 1 spawn that many worker processes via "
+            "`mayaku.engine.launch` (NCCL on CUDA/ROCm, gloo elsewhere). "
+            "Multiply `solver.base_lr` by --num-gpus (linear scaling rule) "
+            "in the config when scaling up. MPS is single-device only."
+        ),
+    ),
 ) -> None:
     """Train a detector. ``CONFIG`` is a YAML loadable by :func:`load_yaml`."""
+    if num_gpus > 1:
+        try:
+            dev = resolve_ddp_device(device, num_gpus)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        # MPS fallback tracker is a no-op outside MPS (already rejected
+        # by resolve_ddp_device for multi-GPU), so we skip the context
+        # manager here — `launch` spawns workers and the parent process
+        # does no GPU work.
+        launch(
+            run_train_worker,
+            num_gpus,
+            device=dev,
+            args=(
+                config,
+                json_path,
+                images,
+                output,
+                weights,
+                pretrained_backbone,
+                device,
+                max_iter,
+                log_period,
+                val_json,
+                val_images,
+            ),
+        )
+        return
     # Install the MPS op-fallback tracker at the shell-CLI boundary
     # only. Library callers (``run_train`` from Python) are free to
     # install the tracker themselves or skip it. ``track_mps_fallbacks``

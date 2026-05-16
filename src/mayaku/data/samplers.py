@@ -57,6 +57,18 @@ class TrainingSampler(Sampler[int]):
             raise ValueError(f"TrainingSampler requires size > 0; got {size}")
         if not 0 <= rank < num_replicas:
             raise ValueError(f"rank={rank} must be in [0, num_replicas={num_replicas})")
+        # With ``size < num_replicas`` some ranks would receive zero
+        # indices per epoch and starve their DataLoader, deadlocking
+        # the DDP backward pass (other ranks call all_reduce while the
+        # starved rank never produces a batch). Real datasets are
+        # always >> num_replicas, so refuse the degenerate case loudly
+        # rather than hang.
+        if size < num_replicas:
+            raise ValueError(
+                f"TrainingSampler size={size} < num_replicas={num_replicas}: "
+                f"rank(s) >= {size} would receive no indices and starve "
+                "the DDP backward. Use a larger dataset or fewer ranks."
+            )
         self.size = size
         self.shuffle = shuffle
         self.seed = seed

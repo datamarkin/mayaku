@@ -134,7 +134,7 @@ Machine-readable index: [`manifest.json`](https://dtmfiles.com/mayaku/v1/models/
 | Backends | CUDA · MPS · CPU (single codebase, single wheel) |
 | Export targets | `mayaku export {onnx, coreml, openvino, tensorrt}` — all four parity-tested. TensorRT needs a CUDA host. |
 | Configuration | Pydantic v2, frozen + extra-forbidden, validated at load |
-| Distributed | DDP via `torchrun` (`nccl` on CUDA, `gloo` elsewhere) |
+| Distributed | DDP via `mayaku train --num-gpus N` (or `mayaku.api.train(..., num_gpus=N)`, or `torchrun`) — `nccl`/RCCL on CUDA/ROCm, `gloo` elsewhere |
 | License | Apache 2.0 |
 
 See [`docs/architecture.md`](docs/architecture.md) for module layout and [`docs/portability.md`](docs/portability.md) for the per-backend matrix.

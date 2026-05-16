@@ -57,6 +57,11 @@ from mayaku.engine import (
     SimpleTrainer,
     build_lr_scheduler,
     build_optimizer,
+    create_ddp_model,
+    get_rank,
+    get_world_size,
+    init_from_env_if_needed,
+    is_main_process,
 )
 from mayaku.tuning import (
     analyze_dataset,
@@ -66,7 +71,7 @@ from mayaku.tuning import (
     walk_leaves,
 )
 
-__all__ = ["run_train"]
+__all__ = ["run_train", "run_train_worker"]
 
 
 def run_train(
@@ -239,9 +244,25 @@ def run_train(
             stacklevel=2,
         )
 
-    dev = Device(kind=device) if device else Device.auto()  # type: ignore[arg-type]
+    dev = Device.auto() if not device or device == "auto" else Device(kind=device)  # type: ignore[arg-type]
     if dev.kind == "mps":
         apply_mps_environment()
+
+    # If the user launched this process via ``torchrun`` (env vars
+    # WORLD_SIZE/RANK/LOCAL_RANK set, but no init_process_group called
+    # yet), bring up the process group from those env vars so the rest
+    # of this function sees the right world_size/rank. No-op when
+    # called from inside :func:`mayaku.engine.launch` (already inited)
+    # or when WORLD_SIZE is 1.
+    init_from_env_if_needed(dev)
+
+    # Distributed-training context. ``world_size`` and ``rank`` come from
+    # ``mayaku.engine.distributed`` — when this CLI runs outside of any
+    # process group they return 1/0, so the single-GPU code path below
+    # stays bit-identical to before.
+    world_size = get_world_size()
+    rank = get_rank()
+
     model = build_detector(
         cfg,
         backbone_weights="DEFAULT" if pretrained_backbone else None,
@@ -252,8 +273,12 @@ def run_train(
             state = state["model"]
         _load_for_finetune(model, state)
 
+    # build_optimizer needs the unwrapped model so its parameter-group
+    # iteration finds the actual modules; DDP wrap happens *after*.
     optimizer = build_optimizer(model, cfg.solver)
     scheduler = build_lr_scheduler(optimizer, cfg.solver)
+    if world_size > 1:
+        model = create_ddp_model(model, dev)
 
     # Compute RFS repeat factors on the *raw* list — SerializedList
     # would unpickle every dict twice (once now, once at training).
@@ -339,11 +364,23 @@ def run_train(
         mapped = MultiSampleMappedDataset(dataset_dicts, mapper, multi_sample_augs)
     else:
         mapped = _MappedList(dataset_dicts, mapper)
+    # Samplers are rank-aware: each rank reads a strided slice of the
+    # shuffled index stream so no two ranks see the same image in the
+    # same effective batch. ``num_replicas`` / ``rank`` default to 1/0
+    # outside DDP, keeping the single-GPU path bit-identical.
     sampler: TrainingSampler | RepeatFactorTrainingSampler
     if repeat_factors is not None:
-        sampler = RepeatFactorTrainingSampler(repeat_factors, seed=0)
+        sampler = RepeatFactorTrainingSampler(
+            repeat_factors, seed=0, num_replicas=world_size, rank=rank
+        )
     else:
-        sampler = TrainingSampler(size=len(mapped), shuffle=True, seed=0)
+        sampler = TrainingSampler(
+            size=len(mapped),
+            shuffle=True,
+            seed=0,
+            num_replicas=world_size,
+            rank=rank,
+        )
     dl = DataLoader(
         mapped,
         sampler=sampler,
@@ -384,18 +421,46 @@ def run_train(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Under DDP ``model`` is a DistributedDataParallel wrapper whose
+    # ``state_dict`` carries ``module.`` prefixes that don't match the
+    # unwrapped layout used everywhere else (eval, predict, export). We
+    # save the underlying module so checkpoints stay interchangeable
+    # between single-GPU and DDP runs. Only unwrap when DDP actually
+    # wrapped the model (``world_size > 1`` above) — otherwise a raw
+    # detector that happens to expose a submodule named ``module``
+    # would be silently grabbed instead.
+    unwrapped_model: torch.nn.Module
+    if world_size > 1:
+        inner = model.module
+        assert isinstance(inner, torch.nn.Module)
+        unwrapped_model = inner
+    else:
+        unwrapped_model = model
+
     # Dump the resolved config alongside the run so a checkpoint always
     # has its provenance recorded next to it. Mirrors Detectron2's
-    # `cfg.dump()` convention. Overwriting on each run is intentional —
-    # the *resolved* config is a function of the call args, not history.
-    dump_yaml(cfg, output_dir / "config.yaml")
+    # `cfg.dump()` convention. Rank-0 only under DDP to avoid N writers
+    # racing on the same path.
+    if is_main_process():
+        dump_yaml(cfg, output_dir / "config.yaml")
     timer = IterationTimer()
     hooks: list[Any] = [
         timer,
         LRScheduler(scheduler),
-        MetricsPrinter(optimizer=optimizer, period=log_period, timer=timer),
-        PeriodicCheckpointer(model, output_dir, cfg.solver.checkpoint_period, optimizer=optimizer),
     ]
+    # Side-effect hooks (stdout / disk writes) run on rank 0 only.
+    # Logic-only hooks (timer, LR scheduler, EMA update) fire on every
+    # rank — they need to to keep state in sync.
+    if is_main_process():
+        hooks.append(MetricsPrinter(optimizer=optimizer, period=log_period, timer=timer))
+        hooks.append(
+            PeriodicCheckpointer(
+                unwrapped_model,
+                output_dir,
+                cfg.solver.checkpoint_period,
+                optimizer=optimizer,
+            )
+        )
 
     # EMA — register AFTER the live-model checkpointer so the EMA update
     # step doesn't fight the live save. The EMA shadow is checkpointed to
@@ -403,23 +468,65 @@ def run_train(
     # to ship; the EMA weights typically score 0.3-0.5 AP higher.
     ema: ModelEMA | None = None
     if cfg.solver.ema_enabled:
-        ema = ModelEMA(model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
-        hooks.append(EMAHook(ema, model))
-        hooks.append(
-            PeriodicCheckpointer(
-                ema.shadow,
-                output_dir / "ema",
-                cfg.solver.checkpoint_period,
+        # ModelEMA deep-copies the underlying model state. Deep-copying a
+        # DDP wrapper would mirror the wrapper's process-group references,
+        # which isn't what we want — pass the unwrapped module so the
+        # shadow is a clean replica of the actual parameters.
+        ema = ModelEMA(unwrapped_model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
+        hooks.append(EMAHook(ema, unwrapped_model))
+        if is_main_process():
+            hooks.append(
+                PeriodicCheckpointer(
+                    ema.shadow,
+                    output_dir / "ema",
+                    cfg.solver.checkpoint_period,
+                )
             )
-        )
-    if cfg.test.eval_period > 0:
+    if cfg.test.eval_period > 0 and is_main_process():
+        # Mid-training eval runs on rank 0 only — running it on every
+        # rank would N-fold duplicate the work and the eval loader has
+        # no rank-aware slicing.
         assert val_json is not None and val_image_root is not None  # validated above
         val_loader = _build_val_loader(cfg, val_json, val_image_root)
         evaluator = COCOEvaluator(val_json, output_dir=output_dir / "eval")
-        eval_model = ema.shadow if ema is not None else model
+        eval_model = ema.shadow if ema is not None else unwrapped_model
         hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
     trainer.train(start_iter=0, max_iter=cfg.solver.max_iter)
+
+
+def run_train_worker(
+    config: Path | MayakuConfig,
+    coco_gt_json: Path,
+    image_root: Path,
+    output_dir: Path,
+    weights: Path | None,
+    pretrained_backbone: bool,
+    device: str | None,
+    max_iter: int | None,
+    log_period: int,
+    val_json: Path | None,
+    val_image_root: Path | None,
+) -> None:
+    """Positional-arg adapter for :func:`mayaku.engine.launch`.
+
+    ``launch`` calls ``main_func(*args)``; ``run_train`` is keyword-only
+    after the first positional. Module-level so :mod:`multiprocessing`
+    can pickle the reference when ``launch`` spawns workers.
+    """
+    run_train(
+        config,
+        coco_gt_json=coco_gt_json,
+        image_root=image_root,
+        output_dir=output_dir,
+        weights=weights,
+        pretrained_backbone=pretrained_backbone,
+        device=device,
+        max_iter=max_iter,
+        log_period=log_period,
+        val_json=val_json,
+        val_image_root=val_image_root,
+    )
 
 
 def _log_auto_config_report(

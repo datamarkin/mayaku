@@ -84,6 +84,9 @@ def run_eval(
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model" in state:
         state = state["model"]
+    # Drop BN's num_batches_tracked buffer — FrozenBatchNorm2d doesn't have
+    # it, but EMA shadows from a BN-trained run do.
+    state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
     model.load_state_dict(state)
     if device is not None:
         if device == "mps":

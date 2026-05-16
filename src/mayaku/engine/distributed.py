@@ -53,8 +53,10 @@ __all__ = [
     "create_ddp_model",
     "get_rank",
     "get_world_size",
+    "init_from_env_if_needed",
     "is_main_process",
     "launch",
+    "resolve_ddp_device",
     "synchronize",
 ]
 
@@ -145,7 +147,11 @@ def all_gather_object(obj: T) -> list[T]:
 
 
 def create_ddp_model(
-    model: nn.Module, device: Device, *, broadcast_buffers: bool = False
+    model: nn.Module,
+    device: Device,
+    *,
+    broadcast_buffers: bool = False,
+    find_unused_parameters: bool = True,
 ) -> nn.Module:
     """Wrap ``model`` in :class:`DistributedDataParallel` when world > 1.
 
@@ -153,6 +159,15 @@ def create_ddp_model(
     `create_ddp_model`): backbone BNs are ``FrozenBatchNorm2d`` so the
     running stats don't change per-iteration, and broadcasting them
     every step is wasted bandwidth.
+
+    ``find_unused_parameters=True`` is the safe default for detection
+    models — Faster R-CNN heads can skip parameters on iters where no
+    matching proposals/targets flow through a given branch (e.g. the
+    bbox-regression rows for classes absent from the current batch).
+    Without it, DDP's bucket reducer waits forever for gradients that
+    never arrive and ``loss.backward()`` deadlocks. The ~3-5% per-step
+    overhead is acceptable for correctness; pass ``False`` to opt out
+    when the model is known-fully-used (e.g. classification-only).
 
     ``device_ids`` is passed only on CUDA — gloo's DDP path has no use
     for it and a non-empty list trips an assertion in PT 2.4+.
@@ -165,9 +180,82 @@ def create_ddp_model(
             device_ids=[device.index],
             output_device=device.index,
             broadcast_buffers=broadcast_buffers,
+            find_unused_parameters=find_unused_parameters,
         )
     # gloo / cpu / mps multi-machine: no device_ids.
-    return DistributedDataParallel(model, broadcast_buffers=broadcast_buffers)
+    return DistributedDataParallel(
+        model,
+        broadcast_buffers=broadcast_buffers,
+        find_unused_parameters=find_unused_parameters,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-GPU launch validation
+# ---------------------------------------------------------------------------
+
+
+def resolve_ddp_device(device_setting: str | None, num_gpus: int) -> Device:
+    """Resolve a Device from a user-facing setting and validate it for DDP.
+
+    ``device_setting`` accepts the same shapes as the CLI / API
+    surfaces — ``None`` or ``"auto"`` triggers :meth:`Device.auto`,
+    a concrete kind (``"cuda"``, ``"cpu"``, ``"mps"``) is honoured.
+
+    Raises :class:`ValueError` when ``num_gpus > 1`` and the resolved
+    device can't host that many ranks: MPS has no multi-process story,
+    and ``num_gpus`` must not exceed visible CUDA devices.
+    """
+    dev = (
+        Device.auto()
+        if device_setting in (None, "auto")
+        else Device(kind=device_setting)  # type: ignore[arg-type]
+    )
+    if num_gpus <= 1:
+        return dev
+    if dev.kind == "mps":
+        raise ValueError("MPS does not support multi-GPU training; use num_gpus=1 on MPS.")
+    if dev.kind == "cuda":
+        visible = torch.cuda.device_count()
+        if visible < num_gpus:
+            raise ValueError(
+                f"num_gpus={num_gpus} requested but only {visible} CUDA "
+                "device(s) visible. On AMD hosts set MAYAKU_DEVICE=cuda."
+            )
+    return dev
+
+
+# ---------------------------------------------------------------------------
+# torchrun integration
+# ---------------------------------------------------------------------------
+
+
+def init_from_env_if_needed(device: Device) -> None:
+    """Initialise distributed from torchrun-set env vars if not already initialised.
+
+    ``torchrun`` (and ``torch.distributed.run``) sets ``WORLD_SIZE`` /
+    ``RANK`` / ``LOCAL_RANK`` env vars and spawns the processes, but it
+    does NOT call ``init_process_group`` on the user's behalf. When
+    ``mayaku train --num-gpus 1`` runs under torchrun, this helper
+    initialises the process group from those env vars so
+    :func:`get_world_size` / :func:`get_rank` report the right values
+    for the rest of the run.
+
+    No-op when:
+        - ``torch.distributed`` is unavailable
+        - already initialised (e.g. inside our own :func:`launch`)
+        - ``WORLD_SIZE`` is unset or ``<= 1``
+    """
+    if not dist.is_available() or dist.is_initialized():
+        return
+    if int(os.environ.get("WORLD_SIZE", "1")) <= 1:
+        return
+    backend = "nccl" if device.kind == "cuda" else "gloo"
+    if device.kind == "cuda":
+        # NCCL ordering: set the active CUDA device BEFORE init_process_group
+        # so the per-rank stream is bound to the right GPU.
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group(backend=backend, timeout=DEFAULT_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +339,12 @@ def _worker_entry(
         # CUDA_VISIBLE_DEVICES per-rank but more explicit.
         torch.cuda.set_device(rank)
     os.environ.setdefault("LOCAL_RANK", str(rank))
+    # ROCm hosts without an InfiniBand fabric stall in NCCL/RCCL's
+    # IB-probe phase. Disabling IB by default is harmless on NVIDIA
+    # single-node runs (Ethernet/NVLink are the actual transports).
+    # Users running multi-node IB clusters can override these.
+    os.environ.setdefault("NCCL_IB_DISABLE", "1")
+    os.environ.setdefault("NCCL_DEBUG", "WARN")
     try:
         synchronize()
         main_func(*args)

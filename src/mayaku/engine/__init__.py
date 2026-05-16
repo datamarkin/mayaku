@@ -17,8 +17,10 @@ from mayaku.engine.distributed import (
     create_ddp_model,
     get_rank,
     get_world_size,
+    init_from_env_if_needed,
     is_main_process,
     launch,
+    resolve_ddp_device,
     synchronize,
 )
 from mayaku.engine.ema import EMAHook, ModelEMA
@@ -54,8 +56,10 @@ __all__ = [
     "get_rank",
     "get_world_size",
     "inference_on_dataset",
+    "init_from_env_if_needed",
     "instances_to_coco_json",
     "is_main_process",
     "launch",
+    "resolve_ddp_device",
     "synchronize",
 ]

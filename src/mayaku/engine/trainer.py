@@ -30,6 +30,7 @@ from torch import Tensor, nn
 from mayaku.backends.amp import NullGradScaler, autocast, make_grad_scaler
 from mayaku.backends.device import Device
 from mayaku.engine.callbacks import HookBase
+from mayaku.engine.distributed import get_world_size
 
 __all__ = ["AMPTrainer", "GradClipType", "SimpleTrainer", "TrainerBase"]
 
@@ -289,6 +290,23 @@ class SimpleTrainer(TrainerBase):
         ``grad_norms`` (when provided) is recorded under ``grad_<key>``
         names so :class:`MetricsPrinter` can include them in the line.
         """
+        world = get_world_size()
+        if world > 1:
+            # Average across ranks so logged numbers are comparable to
+            # a single-GPU baseline rather than rank-0's local view. One
+            # all_reduce per iter — negligible vs the forward/backward
+            # work. Grad norms stay per-rank: they're diagnostic and
+            # the per-rank value is what would actually be clipped.
+            keys = sorted(loss_dict)
+            tensor = torch.tensor(
+                [loss_dict[k] for k in keys] + [total], dtype=torch.float32
+            )
+            if torch.distributed.get_backend() == "nccl":
+                tensor = tensor.cuda()
+            torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+            reduced: list[float] = (tensor / world).cpu().tolist()
+            loss_dict = dict(zip(keys, reduced[:-1], strict=True))
+            total = reduced[-1]
         self.last_loss = total
         record: dict[str, float] = {"total_loss": total, **dict(loss_dict)}
         if grad_norms is not None:

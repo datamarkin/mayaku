@@ -215,3 +215,71 @@ def test_train_rejects_non_directory_train_images(
             output_dir=tmp_path / "run_bad_images",
             device="cpu",
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-process gloo (num_gpus > 1) — exercises the launch() integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_train_num_gpus_2_on_cpu_via_gloo(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
+    """Spawn 2 gloo workers via :func:`mayaku.engine.launch`.
+
+    Validates the multi-process DDP code paths end-to-end on CPU
+    (sampler rank slicing, rank-0 hook gating, post-train metadata
+    write in the parent). The 2-rank CPU/gloo path is the cheapest
+    way to exercise the DDP integration without requiring multi-GPU
+    hardware.
+
+    The shared ``toy_workspace`` fixture has 1 image, but
+    ``TrainingSampler`` refuses ``size < num_replicas`` (any rank with
+    no indices would starve and deadlock the DDP backward), so we
+    extend the workspace to 4 images for this test only.
+
+    ``dataloader.num_workers=0`` because on macOS each rank's
+    DataLoader would re-spawn the test interpreter for every worker —
+    8 spawned children (2 ranks × 4 dataloader workers) inflate the
+    test runtime by an order of magnitude. The 0-worker path still
+    exercises every distributed code path we care about here.
+    """
+    import numpy as np
+    from PIL import Image
+
+    images_dir = toy_workspace["images"]
+    coco = json.loads(toy_workspace["json"].read_text())
+    rng = np.random.default_rng(1)
+    for i in range(2, 5):  # add img2/img3/img4 alongside the fixture's img.png
+        arr = (rng.random((64, 64, 3)) * 255).astype(np.uint8)
+        Image.fromarray(arr).save(images_dir / f"img{i}.png")
+        coco["images"].append({"id": i, "file_name": f"img{i}.png", "height": 64, "width": 64})
+        coco["annotations"].append(
+            {
+                "id": 100 + i,
+                "image_id": i,
+                "category_id": 1,
+                "bbox": [10.0, 10.0, 30.0, 30.0],
+                "area": 900.0,
+                "iscrowd": 0,
+            }
+        )
+    toy_workspace["json"].write_text(json.dumps(coco))
+
+    out = tmp_path / "run_ddp_cpu"
+    result = train(
+        config=toy_workspace["cfg"],
+        train_json=toy_workspace["json"],
+        train_images=toy_workspace["images"],
+        output_dir=out,
+        overrides={"dataloader": {"num_workers": 0}},
+        device="cpu",
+        num_gpus=2,
+    )
+    # Same artefact shape as the single-GPU run.
+    assert result["final_weights"].exists()
+    assert (out / "train" / "config.yaml").exists()
+    assert (out / "train" / "metadata.json").exists()
+    meta = json.loads((out / "train" / "metadata.json").read_text())
+    assert meta["num_gpus"] == 2

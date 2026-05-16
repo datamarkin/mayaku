@@ -199,6 +199,10 @@ class Predictor:
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
         model = build_detector(cfg).eval()
+        # Drop BN's num_batches_tracked buffer — FrozenBatchNorm2d (used by
+        # the inference backbone) doesn't have it, but EMA shadows from a
+        # BN-trained run do, so a strict load would reject them.
+        state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
         model.load_state_dict(state)
         model = model.to(torch.device(device))
 

@@ -33,6 +33,11 @@ Behaviour:
   {"base_lr": 1e-3}}`` or ``{"test": {"eval_period": 5000}}``).
   Invalid keys raise pydantic's standard "Extra inputs are not
   permitted" error.
+* ``num_gpus`` (default ``1``) spawns ``num_gpus`` DDP workers via
+  :func:`mayaku.engine.launch` when ``> 1``. NCCL on CUDA/ROCm, gloo
+  elsewhere. Apply the linear LR scaling rule (multiply
+  ``solver.base_lr`` by ``num_gpus``) when scaling up. MPS is
+  single-device only and rejects ``num_gpus > 1``.
 * ``pretrained_backbone`` (torchvision ImageNet init) is **not** a
   parameter — it's derived from ``cfg.model.backbone.weights_path``:
   if ``weights_path`` is set, the local file wins and torchvision
@@ -66,9 +71,10 @@ from typing import Any
 import torch
 
 from mayaku.cli.eval import run_eval
-from mayaku.cli.train import run_train
+from mayaku.cli.train import run_train, run_train_worker
 from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
+from mayaku.engine import launch, resolve_ddp_device
 from mayaku.utils import git_hash, select_final_weights
 
 __all__ = ["train"]
@@ -84,6 +90,7 @@ def train(
     output_dir: Path | None = None,
     overrides: Mapping[str, Any] | None = None,
     device: DeviceSetting = "auto",
+    num_gpus: int = 1,
 ) -> dict[str, Any]:
     """Train, pick the best checkpoint, optionally run final eval.
 
@@ -105,6 +112,8 @@ def train(
             "val_json and val_images must both be provided, or both omitted; "
             f"got val_json={val_json!r}, val_images={val_images!r}"
         )
+    if num_gpus < 1:
+        raise ValueError(f"num_gpus must be >= 1; got {num_gpus}")
 
     # --- Normalize config to MayakuConfig + remember its source -----------
     if isinstance(config, MayakuConfig):
@@ -147,16 +156,43 @@ def train(
     # eval_period=0". Final eval below uses the val paths regardless.
     forward_val = cfg.test.eval_period > 0
     train_start = time.time()
-    run_train(
-        cfg,
-        coco_gt_json=train_json,
-        image_root=train_images,
-        output_dir=train_dir,
-        pretrained_backbone=pretrained_backbone,
-        device=device,
-        val_json=val_json if forward_val else None,
-        val_image_root=val_images if forward_val else None,
-    )
+    if num_gpus == 1:
+        run_train(
+            cfg,
+            coco_gt_json=train_json,
+            image_root=train_images,
+            output_dir=train_dir,
+            pretrained_backbone=pretrained_backbone,
+            device=device,
+            val_json=val_json if forward_val else None,
+            val_image_root=val_images if forward_val else None,
+        )
+    else:
+        # Multi-GPU DDP: spawn ``num_gpus`` workers via :func:`launch`.
+        # Each worker calls ``run_train`` and brings up its own slice of
+        # the process group; we don't run any GPU work in the parent.
+        # Post-train (select_final_weights, final eval, metadata) stays
+        # on the parent so the return value comes back from a single
+        # well-defined caller, not N racy workers.
+        dev = resolve_ddp_device(device, num_gpus)
+        launch(
+            run_train_worker,
+            num_gpus,
+            device=dev,
+            args=(
+                cfg,
+                train_json,
+                train_images,
+                train_dir,
+                None,  # weights
+                pretrained_backbone,
+                device,
+                None,  # max_iter (cfg already carries it)
+                20,  # log_period default
+                val_json if forward_val else None,
+                val_images if forward_val else None,
+            ),
+        )
     train_seconds = time.time() - train_start
     print(f"[mayaku.train] training done in {train_seconds:.0f}s ({train_seconds / 3600:.2f}h)")
 
@@ -201,9 +237,13 @@ def train(
         "backbone": cfg.model.backbone.name,
         "weights_path": cfg.model.backbone.weights_path,
         "num_classes": cfg.model.roi_heads.num_classes,
+        "num_gpus": num_gpus,
         "max_iter": cfg.solver.max_iter,
         "ims_per_batch": cfg.solver.ims_per_batch,
         "grad_accum_steps": cfg.solver.grad_accum_steps,
+        # ``ims_per_batch`` is per-rank; cross-rank effective batch is
+        # this value × num_gpus × grad_accum_steps. Apply the linear LR
+        # scaling rule against the cross-rank value when scaling up.
         "effective_batch_size": cfg.solver.ims_per_batch * cfg.solver.grad_accum_steps,
         "base_lr": cfg.solver.base_lr,
         "ema_enabled": cfg.solver.ema_enabled,
