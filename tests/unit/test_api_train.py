@@ -223,9 +223,7 @@ def test_train_rejects_non_directory_train_images(
 
 
 @pytest.mark.slow
-def test_train_num_gpus_2_on_cpu_via_gloo(
-    toy_workspace: dict[str, Any], tmp_path: Path
-) -> None:
+def test_train_num_gpus_2_on_cpu_via_gloo(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
     """Spawn 2 gloo workers via :func:`mayaku.engine.launch`.
 
     Validates the multi-process DDP code paths end-to-end on CPU

@@ -298,9 +298,7 @@ class SimpleTrainer(TrainerBase):
             # work. Grad norms stay per-rank: they're diagnostic and
             # the per-rank value is what would actually be clipped.
             keys = sorted(loss_dict)
-            tensor = torch.tensor(
-                [loss_dict[k] for k in keys] + [total], dtype=torch.float32
-            )
+            tensor = torch.tensor([loss_dict[k] for k in keys] + [total], dtype=torch.float32)
             if torch.distributed.get_backend() == "nccl":
                 tensor = tensor.cuda()
             torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
