@@ -36,12 +36,38 @@ from mayaku.models.backbones._frozen_bn import FrozenBatchNorm2d
 __all__ = ["build_lr_scheduler", "build_optimizer"]
 
 
-def build_optimizer(model: nn.Module, cfg: SolverConfig) -> torch.optim.SGD:
-    """SGD with two parameter groups: norm params vs everything else.
+def build_optimizer(model: nn.Module, cfg: SolverConfig) -> torch.optim.Optimizer:
+    """Build the optimizer chosen by ``cfg.optimizer_name``.
 
-    ``cfg.weight_decay_norm`` is applied to the norm group (default 0),
-    ``cfg.weight_decay`` to everything else.
+    Two parameter groups are always emitted: norm params (BatchNorm /
+    LayerNorm / GroupNorm / FrozenBatchNorm) get ``cfg.weight_decay_norm``
+    (default 0), everything else gets ``cfg.weight_decay``. This split
+    is the standard D2 practice and is preserved for both SGD and AdamW.
+
+    SGD uses ``momentum`` / ``nesterov``; AdamW uses ``betas`` / ``eps``.
+    The unused pair is silently ignored.
     """
+    param_groups = _split_norm_groups(model, cfg)
+    if cfg.optimizer_name == "SGD":
+        return torch.optim.SGD(
+            param_groups,
+            lr=cfg.base_lr,
+            momentum=cfg.momentum,
+            nesterov=cfg.nesterov,
+        )
+    elif cfg.optimizer_name == "AdamW":
+        return torch.optim.AdamW(
+            param_groups,
+            lr=cfg.base_lr,
+            betas=cfg.betas,
+            eps=cfg.eps,
+        )
+    else:
+        # Defended by the schema's Literal — unreachable in normal flow.
+        raise ValueError(f"unknown optimizer_name: {cfg.optimizer_name!r}")
+
+
+def _split_norm_groups(model: nn.Module, cfg: SolverConfig) -> list[dict[str, object]]:
     norm_params: list[nn.Parameter] = []
     other_params: list[nn.Parameter] = []
     seen: set[int] = set()
@@ -62,16 +88,11 @@ def build_optimizer(model: nn.Module, cfg: SolverConfig) -> torch.optim.SGD:
     if norm_params:
         param_groups.append({"params": norm_params, "weight_decay": cfg.weight_decay_norm})
     if not param_groups:
-        # Defensive: torch.optim.SGD raises on an empty params list. The
+        # Defensive: torch.optim raises on an empty params list. The
         # caller almost certainly has a bug (frozen everything?) but
         # we'd rather surface it as a clearer message.
         raise ValueError("build_optimizer: no trainable parameters found on the model")
-    return torch.optim.SGD(
-        param_groups,
-        lr=cfg.base_lr,
-        momentum=cfg.momentum,
-        nesterov=cfg.nesterov,
-    )
+    return param_groups
 
 
 def build_lr_scheduler(

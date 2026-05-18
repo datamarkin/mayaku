@@ -504,8 +504,18 @@ class SolverConfig(_BaseModel):
     warmup_iters: Annotated[int, Field(ge=0)] = 1000
     warmup_factor: Annotated[float, Field(gt=0.0, le=1.0)] = 1.0 / 1000.0
     warmup_method: Literal["linear", "constant"] = "linear"
+
+    # Optimizer choice. ``"SGD"`` (default) is the D2-replication path
+    # and pairs with ``momentum`` / ``nesterov`` below. ``"AdamW"`` is
+    # the published-validated path for ConvNeXt / Swin / ViT backbones
+    # and pairs with ``betas`` / ``eps``. The unused pair is silently
+    # ignored by the optimizer builder, matching torch's own behaviour.
+    optimizer_name: Literal["SGD", "AdamW"] = "SGD"
     momentum: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.9
     nesterov: bool = False
+    betas: tuple[float, float] = (0.9, 0.999)
+    eps: Annotated[float, Field(gt=0.0)] = 1.0e-8
+
     weight_decay: Annotated[float, Field(ge=0.0)] = 1e-4
     weight_decay_norm: Annotated[float, Field(ge=0.0)] = 0.0
     gamma: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.1

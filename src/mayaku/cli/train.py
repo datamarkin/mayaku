@@ -233,7 +233,16 @@ def run_train(
     # message lands before the slow torch.load / weight download. Runs
     # after auto-config so the freeze_at being checked is the one that
     # will actually train.
-    if not pretrained_backbone and weights is None and cfg.model.backbone.freeze_at >= 1:
+    #
+    # ``cfg.model.backbone.weights_path`` is loaded inside the backbone
+    # __init__ before ``_apply_freeze``, so it counts as a real init source
+    # here even though it isn't fed through the top-level ``weights`` path.
+    backbone_initialized = (
+        pretrained_backbone
+        or weights is not None
+        or cfg.model.backbone.weights_path is not None
+    )
+    if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
         warnings.warn(
             f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
             "is freezing the early stages. Random-init frozen features cannot "

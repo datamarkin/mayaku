@@ -1,6 +1,13 @@
 # Faster R-CNN — ConvNeXt-Tiny + FPN, 1x schedule (90k iters).
 # Backbone: ConvNeXt-Tiny (29M params, depths [3,3,9,3], dims [96,192,384,768]).
 #
+# Optimizer: AdamW. ConvNeXt is an AdamW architecture — the original
+# Liu et al. 2022 paper, the official `facebookresearch/ConvNeXt`
+# object-detection repo, MMDet's ConvNeXt configs, and Detectron2's
+# ConvNeXt baselines all use AdamW. SGD at the R-50 LR (0.02) destroys
+# the pretrained features in the first thousand iterations on
+# LayerNorm/GELU-based architectures.
+#
 # Ships with `weights_path` pre-filled for the DINOv3 LVD-1689M
 # checkpoint (distillation from a frozen ViT-7B teacher). Swap it for
 # any compatible ConvNeXt .pth or .safetensors (the original Liu et al.
@@ -8,7 +15,7 @@
 # field and pair with `--pretrained-backbone` for torchvision
 # ImageNet-1k init instead.
 #
-# Recipe: cosine LR, EMA weight averaging, photometric jitter, Mosaic + MixUp.
+# Recipe: AdamW + cosine LR + EMA weight averaging + photometric jitter.
 # Whole-backbone fine-tune (freeze_at=0) — strong pretrained features
 # (e.g., DINOv3) make whole-backbone fine-tune the typical recipe;
 # freezing early stages tends to leave AP on the table.
@@ -16,8 +23,6 @@
 # DINOv3 weights are license-gated; Mayaku ships no URLs. Download from
 # https://huggingface.co/facebook/dinov3-convnext-tiny-pretrain-lvd1689m
 # after accepting the upstream license.
-# The default `weights_path` below is repo-relative — run from the repo root,
-# or replace with an absolute path.
 #
 # VRAM rough guide (1x schedule, 800-pixel short side, fp32):
 #   12 GB GPU: ims_per_batch=8, grad_accum_steps=2 (effective batch 16) — this file
@@ -32,7 +37,7 @@ model:
     # to 1 (freeze stem) to recover ~10% backbone compute if VRAM-bound;
     # freeze_at >= 2 is rarely worth it.
     freeze_at: 0
-    weights_path: models/dinov3/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
+    weights_path: convnext_tiny.pth
   roi_heads:
     num_classes: 80
   roi_box_head:
@@ -55,17 +60,31 @@ input:
   color_jitter_prob: 0.5
 
 solver:
-  # Effective batch = ims_per_batch * grad_accum_steps. ConvNeXt-Tiny is
-  # comparable to ResNet-50 in VRAM so the R-50 1x defaults apply.
+  # AdamW recipe calibrated for effective batch 16 from the official
+  # ConvNeXt object-detection repo (and matched by MMDet's ConvNeXt-Tiny
+  # COCO configs).
+  optimizer_name: AdamW
+  base_lr: 1.0e-4
+  weight_decay: 0.05
+  weight_decay_norm: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
   ims_per_batch: 8
-  grad_accum_steps: 2
-  base_lr: 0.02
+  grad_accum_steps: 2          # effective batch = 16
   max_iter: 90_000
-  steps: [60_000, 80_000]
-  warmup_iters: 1_000
+  steps: [60_000, 80_000]      # cosine ignores these but the schema requires a valid tuple
+  warmup_iters: 1_500
   warmup_factor: 0.001
   warmup_method: linear
   lr_scheduler_name: WarmupCosineLR
+
+  # AdamW typically clips with max_norm ~ 0.1 — much tighter than SGD's
+  # 5.0 because Adam-style updates are already moment-normalised.
+  clip_gradients_enabled: true
+  clip_gradients_value: 0.1
+  clip_gradients_type: norm
+
   ema_enabled: true
   ema_decay: 0.9999
   ema_tau: 2_000.0
