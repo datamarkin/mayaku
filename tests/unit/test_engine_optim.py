@@ -64,6 +64,38 @@ def test_optimizer_uses_base_lr_and_momentum() -> None:
         assert g["momentum"] == 0.5
 
 
+def test_optimizer_default_is_sgd() -> None:
+    """Defaults preserve the SGD path bit-identically."""
+    model = _toy_model()
+    opt = build_optimizer(model, _solver_cfg())
+    assert isinstance(opt, torch.optim.SGD)
+
+
+def test_optimizer_adamw_factory() -> None:
+    """`optimizer_name="AdamW"` returns AdamW with the configured betas / eps / weight_decay."""
+    model = _toy_model()
+    opt = build_optimizer(
+        model,
+        _solver_cfg(
+            optimizer_name="AdamW",
+            base_lr=1e-4,
+            betas=(0.9, 0.95),
+            eps=1e-7,
+            weight_decay=0.05,
+            weight_decay_norm=0.0,
+        ),
+    )
+    assert isinstance(opt, torch.optim.AdamW)
+    # Same norm-vs-other split as SGD.
+    assert len(opt.param_groups) == 2
+    weights = sorted(g["weight_decay"] for g in opt.param_groups)
+    assert weights == [0.0, 0.05]
+    for g in opt.param_groups:
+        assert g["lr"] == 1e-4
+        assert g["betas"] == (0.9, 0.95)
+        assert g["eps"] == 1e-7
+
+
 # ---------------------------------------------------------------------------
 # build_lr_scheduler — multistep
 # ---------------------------------------------------------------------------

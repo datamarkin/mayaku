@@ -209,3 +209,21 @@ def test_solver_momentum_and_gamma_bounds() -> None:
         SolverConfig(gamma=1.0)
     with pytest.raises(ValidationError):
         SolverConfig(gamma=0.0)
+
+
+def test_solver_optimizer_name_accepts_sgd_and_adamw() -> None:
+    assert SolverConfig().optimizer_name == "SGD"   # default unchanged
+    assert SolverConfig(optimizer_name="AdamW").optimizer_name == "AdamW"
+    with pytest.raises(ValidationError):
+        SolverConfig(optimizer_name="Foo")   # type: ignore[arg-type]
+
+
+def test_solver_adamw_field_defaults() -> None:
+    cfg = SolverConfig()
+    assert cfg.betas == (0.9, 0.999)
+    assert cfg.eps == 1e-8
+
+
+def test_solver_eps_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        SolverConfig(eps=0.0)
