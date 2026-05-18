@@ -519,6 +519,20 @@ class SolverConfig(_BaseModel):
     weight_decay: Annotated[float, Field(ge=0.0)] = 1e-4
     weight_decay_norm: Annotated[float, Field(ge=0.0)] = 0.0
     gamma: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.1
+
+    # Layer-wise learning rate decay (LLRD). When enabled, each backbone
+    # parameter's LR is scaled by ``llrd_decay ** ((num_layers + 2) - layer_id - 1)``
+    # where ``layer_id`` is assigned input→output along the backbone depth
+    # and ``num_layers`` is derived from the backbone variant (ConvNeXt-T:
+    # 6; ConvNeXt-S/B/L: 12; ResNet: 4). Detector neck/heads (FPN/RPN/ROI)
+    # are treated as the top layer and keep ``base_lr``. Default off so
+    # all prior runs are reproducible bit-for-bit. The ConvNeXt scheme is
+    # MMDet's ``get_layer_id_for_convnext`` (with the stage-2 ``block_id //
+    # 3`` bucketing); ResNet is per-stage. ``llrd_decay`` is a recipe
+    # sweep knob — no canonical per-variant value exists; see the
+    # ``*_llrd.yaml`` recipes for cited starting points.
+    llrd_enabled: bool = False
+    llrd_decay: Annotated[float, Field(gt=0.0, le=1.0)] = 0.8
     amp_enabled: bool = False
     # Resolved at Step 13 (engine). ``"fp16"`` is the safe cross-backend
     # default; ``"bf16"`` is recommended on CUDA Ampere+ where it gives a
