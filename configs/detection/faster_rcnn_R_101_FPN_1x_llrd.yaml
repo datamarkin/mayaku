@@ -1,0 +1,63 @@
+# R-101-FPN Faster R-CNN + LLRD — 1x schedule (90k iters).
+#
+# Variant of faster_rcnn_R_101_FPN_1x.yaml with layer-wise learning
+# rate decay (LLRD) enabled. Intended for distilled / foundation
+# pretrained ResNet backbones.
+#
+# Scheme: per-stage (stem=0, res{2,3,4,5}={1,2,3,4}, head=5).
+# num_layers=4 (derived, not configured).
+#
+# KNOWN LIMITATION — affects R-101 specifically: per-stage ResNet
+# LLRD collapses all 23 blocks of R-101's res4 to a single layer_id.
+# That is the bulk of the network on one LR — LLRD will be near-flat
+# over the largest stage. If transfer quality from distilled R-101
+# backbones turns out to matter, the v2 work is adding block_id//K
+# bucketing for res4 (see src/mayaku/engine/optim.py header note).
+#
+# llrd_decay PROVENANCE — sweep mandatory before publication.
+# 0.75 has NO MMDet reference for ResNet detection; chosen by analogy
+# to BEiT-style recipes. Treat as a sweep starting point. Suggested
+# grid: {0.6, 0.7, 0.75, 0.85, 0.95}.
+model:
+  meta_architecture: faster_rcnn
+  backbone:
+    name: resnet101
+    norm: FrozenBN
+    # See R-50 _llrd note: override to freeze_at=0 so LLRD actually
+    # scales the early layers.
+    freeze_at: 0
+    stride_in_1x1: false
+  roi_heads:
+    num_classes: 80
+  roi_box_head:
+    num_conv: 0
+    num_fc: 2
+    fc_dim: 1024
+  pixel_std: [58.395, 57.120, 57.375]
+
+input:
+  min_size_test: 800
+  max_size_test: 1333
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  llrd_enabled: true
+  llrd_decay: 0.75
+
+  ims_per_batch: 8
+  grad_accum_steps: 2
+  base_lr: 0.02
+  max_iter: 90_000
+  steps: [60_000, 80_000]
+  warmup_iters: 1_000
+  warmup_factor: 0.001
+  warmup_method: linear
+  lr_scheduler_name: WarmupCosineLR
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2_000.0
