@@ -51,6 +51,7 @@ from mayaku.engine import (
     EvalHook,
     IterationTimer,
     LRScheduler,
+    LRSnapshotHook,
     MetricsPrinter,
     ModelEMA,
     PeriodicCheckpointer,
@@ -479,6 +480,17 @@ def run_train(
                 optimizer=optimizer,
             )
         )
+        # LLRD survival check: snapshot per-group LR at named milestones
+        # so the run artifact carries proof that decay ratios are preserved
+        # through warmup + cosine. Only meaningful when LLRD actually
+        # splits the optimizer into per-layer groups.
+        if cfg.solver.llrd_enabled:
+            milestones = (
+                cfg.solver.warmup_iters,
+                cfg.solver.max_iter // 2,
+                cfg.solver.max_iter,
+            )
+            hooks.append(LRSnapshotHook(optimizer, milestones))
 
     # EMA — register AFTER the live-model checkpointer so the EMA update
     # step doesn't fight the live save. The EMA shadow is checkpointed to

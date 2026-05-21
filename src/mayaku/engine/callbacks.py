@@ -36,6 +36,7 @@ __all__ = [
     "HookBase",
     "IterationTimer",
     "LRScheduler",
+    "LRSnapshotHook",
     "MemoryTrim",
     "MetricsPrinter",
     "PeriodicCheckpointer",
@@ -386,3 +387,65 @@ class EvalHook(_BaseHook):
 
         metrics = inference_on_dataset(self.model, self.data_loader, self.evaluator)
         print(f"[eval @ iter {iter_}] {metrics}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# LRSnapshotHook
+# ---------------------------------------------------------------------------
+
+
+class LRSnapshotHook(_BaseHook):
+    """Dump per-group learning rates at named iter milestones.
+
+    Useful as a survival check for layer-wise LR decay (LLRD): the
+    ratio between a shallow-layer group and a deep-layer group should
+    stay constant across warmup → cosine → end. ``LambdaLR`` preserves
+    each group's captured ``initial_lr`` and multiplies by a single
+    scalar lambda, so the ratios are provably preserved — this hook
+    surfaces that property in the run artifact rather than only in the
+    source.
+
+    Emits lines of the form::
+
+        [lr-snapshot @ iter N] {'layer0_decay': 1.0e-05, 'layer0_norm': 1.0e-05, ...}
+
+    Parseable with ``ast.literal_eval`` on the trailing dict.
+
+    Args:
+        optimizer: The torch optimizer whose ``param_groups`` are
+            queried.
+        snapshot_iters: 1-indexed iter values at which to fire.
+            ``before_train`` always fires once with ``iter=0`` so the
+            initial ratios are captured before any scheduler step.
+    """
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        snapshot_iters: Iterable[int],
+    ) -> None:
+        self.optimizer = optimizer
+        self._targets = {int(i) for i in snapshot_iters if int(i) > 0}
+        self._fired_initial = False
+
+    def before_train(self) -> None:
+        # Initial-state snapshot: shows each group's ``initial_lr`` as
+        # captured by LambdaLR before the first scheduler step. This is
+        # the iter-0 row LLRD-survival arguments lean on.
+        if self._fired_initial:
+            return
+        self._fired_initial = True
+        self._emit(0)
+
+    def after_step(self) -> None:
+        assert self.trainer is not None, "trainer reference not bound"
+        next_iter = self.trainer.iter + 1
+        if next_iter in self._targets:
+            self._emit(next_iter)
+
+    def _emit(self, iter_: int) -> None:
+        snap: dict[str, float] = {}
+        for idx, group in enumerate(self.optimizer.param_groups):
+            name = group.get("name") or f"group_{idx:02d}"
+            snap[str(name)] = float(group["lr"])
+        print(f"[lr-snapshot @ iter {iter_}] {snap}", flush=True)
