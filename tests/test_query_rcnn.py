@@ -8,10 +8,12 @@ import pytest
 from mayaku.config.schemas import MayakuConfig
 from mayaku.models.detectors.query_rcnn import QueryRCNN, build_query_rcnn
 from mayaku.models.heads.query_head import QueryHead
+from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
 from mayaku.models.heads.query_stage import DynamicConv, QueryStage
 from mayaku.models.losses.set_criterion import SetCriterion, generalized_box_iou
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.instances import Instances
+from mayaku.structures.masks import PolygonMasks
 
 
 def _make_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5) -> MayakuConfig:
@@ -28,8 +30,24 @@ def _make_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5
     )
 
 
+def _make_mask_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5) -> MayakuConfig:
+    return MayakuConfig(
+        model={
+            "meta_architecture": "query_rcnn",
+            "backbone": {"name": "resnet50"},
+            "query_rcnn_head": {
+                "num_proposals": num_proposals,
+                "num_stages": num_stages,
+            },
+            "roi_heads": {"num_classes": num_classes},
+            "query_rcnn_mask": {},
+        }
+    )
+
+
 def _make_batch(
-    batch_size: int = 1, h: int = 256, w: int = 256, num_gt: int = 2, num_classes: int = 5
+    batch_size: int = 1, h: int = 256, w: int = 256, num_gt: int = 2, num_classes: int = 5,
+    with_masks: bool = False,
 ) -> list[dict]:
     batch = []
     for _ in range(batch_size):
@@ -44,6 +62,13 @@ def _make_batch(
         gt_boxes = Boxes(boxes)
         gt_classes = torch.randint(0, num_classes, (num_gt,))
         instances = Instances(image_size=(h, w), gt_boxes=gt_boxes, gt_classes=gt_classes)
+        if with_masks:
+            polygons = []
+            for i in range(num_gt):
+                x0, y0, x1, y1 = boxes[i].tolist()
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                polygons.append([torch.tensor([x0, y0, x1, y0, x1, y1, x0, y1], dtype=torch.float32)])
+            instances.gt_masks = PolygonMasks(polygons)
         batch.append({"image": img, "instances": instances})
     return batch
 
@@ -196,6 +221,48 @@ class TestQueryRCNN:
         losses = model(batch)
         assert len(losses) == 9  # 3 stages × 3 loss types
         assert all(v.isfinite() for v in losses.values())
+
+    def test_mask_forward_train(self) -> None:
+        cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
+        model = build_query_rcnn(cfg, backbone_weights=None)
+        model.train()
+        batch = _make_batch(batch_size=2, num_gt=2, with_masks=True)
+        losses = model(batch)
+        assert "loss_mask" in losses
+        assert losses["loss_mask"].isfinite()
+        assert losses["loss_mask"].requires_grad
+        # Detection losses still present: 2 stages × 3 types + 1 mask
+        assert len(losses) == 7
+
+    def test_mask_forward_inference(self) -> None:
+        cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
+        model = build_query_rcnn(cfg, backbone_weights=None)
+        model.eval()
+        with torch.no_grad():
+            results = model([{"image": torch.randn(3, 256, 256)}])
+        inst = results[0]["instances"]
+        if len(inst) > 0:
+            assert hasattr(inst, "pred_masks")
+            assert inst.pred_masks.shape[1] == 1  # class-agnostic
+            assert inst.pred_masks.shape[2] == 28
+
+    def test_mask_gradient_flow(self) -> None:
+        cfg = _make_mask_cfg(num_proposals=5, num_stages=2, num_classes=5)
+        model = build_query_rcnn(cfg, backbone_weights=None)
+        model.train()
+        batch = _make_batch(batch_size=1, num_gt=2, with_masks=True)
+        losses = model(batch)
+        total = sum(losses.values())
+        total.backward()
+        assert model.mask_head.kernel_fc.weight.grad is not None
+        assert model.mask_head.kernel_fc.weight.grad.norm() > 0
+
+    def test_dynamic_mask_head_shapes(self) -> None:
+        head = QueryDynamicMaskHead(hidden_dim=256, conv_dim=256, num_conv=4)
+        roi_feats = torch.randn(5, 256, 14, 14)
+        obj_feats = torch.randn(5, 256)
+        out = head(roi_feats, obj_feats)
+        assert out.shape == (5, 1, 28, 28)
 
     def test_cascade_iou_config_validation(self) -> None:
         with pytest.raises(Exception):
