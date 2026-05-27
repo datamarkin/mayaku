@@ -89,6 +89,18 @@ class SetCriterion(nn.Module):
         return {"loss_ce": loss_ce, "loss_bbox": loss_bbox, "loss_giou": loss_giou}
 
     @torch.no_grad()
+    def match(
+        self,
+        outputs: dict[str, Tensor],
+        targets: list[dict[str, Tensor]],
+        stage_idx: int = 0,
+    ) -> list[tuple[Tensor, Tensor]]:
+        """Run Hungarian matching on a single stage's outputs."""
+        return self._hungarian_match(
+            outputs["pred_logits"], outputs["pred_boxes"], targets, stage_idx,
+        )
+
+    @torch.no_grad()
     def _hungarian_match(
         self,
         pred_logits: Tensor,
