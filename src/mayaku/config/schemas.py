@@ -49,6 +49,9 @@ __all__ = [
     "MayakuConfig",
     "MetaArchitecture",
     "ModelConfig",
+    "QueryRCNNHeadConfig",
+    "QueryRCNNKeypointConfig",
+    "QueryRCNNMaskConfig",
     "ROIBoxHeadConfig",
     "ROIHeadsConfig",
     "ROIKeypointHeadConfig",
@@ -62,19 +65,19 @@ BackboneName = Literal[
     "resnet50",
     "resnet101",
     "resnext101_32x8d",
-    # ConvNeXt variants (Tiny / Small / Base / Large). Standard ConvNeXt
-    # architecture (torchvision's reference). Weight provenance is
-    # carried by :attr:`BackboneConfig.weights_path`, not the name —
-    # the same `convnext_small` works with random init, torchvision
-    # ImageNet-1k (via ``--pretrained-backbone``), or any local
-    # checkpoint supplied as a path (the original Liu et al. release,
-    # the DINOv3 LVD-1689M distillation, user fine-tunes, …).
+    # ConvNeXt variants. Atto/Femto/Pico/Nano use V2 size configs with
+    # V1-style blocks (no GRN). Tiny/Small/Base/Large are torchvision's
+    # reference. Weight provenance is carried by weights_path, not name.
+    "convnext_atto",
+    "convnext_femto",
+    "convnext_pico",
+    "convnext_nano",
     "convnext_tiny",
     "convnext_small",
     "convnext_base",
     "convnext_large",
 ]
-MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn"]
+MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn", "query_rcnn"]
 DeviceSetting = Literal["cpu", "mps", "cuda", "auto"]
 
 
@@ -336,6 +339,87 @@ class ROIHeadsConfig(_BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# QueryRCNN head
+# ---------------------------------------------------------------------------
+
+
+class QueryRCNNHeadConfig(_BaseModel):
+    """QueryRCNN iterative dynamic head configuration.
+
+    Implements a set-prediction detector with learned proposals that
+    iteratively refine via self-attention and dynamic convolution. No RPN,
+    no NMS — fixed output of ``num_proposals`` predictions.
+    """
+
+    num_proposals: Annotated[int, Field(gt=0)] = 300
+    hidden_dim: Annotated[int, Field(gt=0)] = 256
+    num_heads: Annotated[int, Field(gt=0)] = 8
+    num_stages: Annotated[int, Field(gt=0)] = 6
+    dim_feedforward: Annotated[int, Field(gt=0)] = 2048
+    dim_dynamic: Annotated[int, Field(gt=0)] = 64
+    pooler_resolution: Annotated[int, Field(gt=0)] = 7
+    dropout: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+
+    # Hungarian matching cost weights
+    cost_class: Annotated[float, Field(gt=0.0)] = 2.0
+    cost_bbox: Annotated[float, Field(gt=0.0)] = 5.0
+    cost_giou: Annotated[float, Field(gt=0.0)] = 2.0
+
+    # Cascade-IoU: per-stage minimum IoU floor for Hungarian matching.
+    # Empty tuple = disabled (vanilla flat matching). When set, length
+    # must equal num_stages. Predictions below the floor cannot match a
+    # GT in that stage. Training-only — zero inference/export impact.
+    # Recommended for 6 stages: (0.0, 0.0, 0.4, 0.5, 0.6, 0.7)
+    cascade_iou_thresholds: tuple[float, ...] = ()
+
+    # Inference-time knobs: use fewer stages or proposals at test time
+    # for speed without retraining. None = use training values.
+    inference_num_stages: Annotated[int, Field(gt=0)] | None = None
+    inference_num_proposals: Annotated[int, Field(gt=0)] | None = None
+
+    @model_validator(mode="after")
+    def _check_cascade_iou(self) -> QueryRCNNHeadConfig:
+        t = self.cascade_iou_thresholds
+        if t and len(t) != self.num_stages:
+            raise ValueError(
+                f"cascade_iou_thresholds length ({len(t)}) must equal "
+                f"num_stages ({self.num_stages}) or be empty"
+            )
+        if any(v < 0.0 or v > 1.0 for v in t):
+            raise ValueError("cascade_iou_thresholds values must be in [0.0, 1.0]")
+        if self.inference_num_stages is not None and self.inference_num_stages > self.num_stages:
+            raise ValueError(
+                f"inference_num_stages ({self.inference_num_stages}) cannot exceed "
+                f"num_stages ({self.num_stages})"
+            )
+        if self.inference_num_proposals is not None and self.inference_num_proposals > self.num_proposals:
+            raise ValueError(
+                f"inference_num_proposals ({self.inference_num_proposals}) cannot exceed "
+                f"num_proposals ({self.num_proposals})"
+            )
+        return self
+
+
+class QueryRCNNMaskConfig(_BaseModel):
+    """QueryRCNN dynamic mask head (Phase 2 — not yet implemented)."""
+
+    pooler_resolution: Annotated[int, Field(gt=0)] = 14
+    mask_resolution: Annotated[int, Field(gt=0)] = 28
+    num_conv: Annotated[int, Field(gt=0)] = 4
+    conv_dim: Annotated[int, Field(gt=0)] = 256
+    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
+
+
+class QueryRCNNKeypointConfig(_BaseModel):
+    """QueryRCNN keypoint head (Phase 3 — not yet implemented)."""
+
+    pooler_resolution: Annotated[int, Field(gt=0)] = 14
+    num_keypoints: Annotated[int, Field(gt=0)] = 17
+    heatmap_resolution: Annotated[int, Field(gt=0)] = 56
+    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
+
+
+# ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
@@ -370,14 +454,32 @@ class ModelConfig(_BaseModel):
     roi_mask_head: ROIMaskHeadConfig | None = None
     roi_keypoint_head: ROIKeypointHeadConfig | None = None
 
+    # QueryRCNN head configs (only used when meta_architecture == "query_rcnn")
+    query_rcnn_head: QueryRCNNHeadConfig | None = None
+    query_rcnn_mask: QueryRCNNMaskConfig | None = None
+    query_rcnn_keypoint: QueryRCNNKeypointConfig | None = None
+
     @model_validator(mode="after")
     def _check_consistency(self) -> ModelConfig:
         # meta_architecture, mask_on, keypoint_on, and the head sub-configs
         # must agree. We treat meta_architecture as the single source of
         # truth for which heads are required and accept matching booleans
         # as a redundant convenience for callers who forget either side.
+        is_query = self.meta_architecture == "query_rcnn"
         wants_mask = self.meta_architecture == "mask_rcnn"
         wants_kpt = self.meta_architecture == "keypoint_rcnn"
+
+        # QueryRCNN has its own head configs and doesn't use mask_on/keypoint_on flags
+        if is_query:
+            if self.mask_on or self.keypoint_on:
+                raise ValueError(
+                    "query_rcnn uses query_rcnn_mask/query_rcnn_keypoint configs, "
+                    "not mask_on/keypoint_on flags"
+                )
+            if self.query_rcnn_head is None:
+                raise ValueError("query_rcnn requires query_rcnn_head to be set")
+            return self
+
         if self.mask_on != wants_mask:
             raise ValueError(
                 f"mask_on={self.mask_on} disagrees with "
@@ -396,6 +498,8 @@ class ModelConfig(_BaseModel):
             raise ValueError("roi_mask_head is set but meta_architecture is not mask_rcnn")
         if not wants_kpt and self.roi_keypoint_head is not None:
             raise ValueError("roi_keypoint_head is set but meta_architecture is not keypoint_rcnn")
+        if self.query_rcnn_head is not None:
+            raise ValueError("query_rcnn_head is set but meta_architecture is not query_rcnn")
         return self
 
     def resolved_device(self) -> DeviceKind:
