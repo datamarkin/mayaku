@@ -1,0 +1,56 @@
+# QueryRCNN — R50-FPN, balloon fine-tune from converted Sparse R-CNN checkpoint.
+model:
+  meta_architecture: query_rcnn
+  backbone:
+    name: resnet50
+    freeze_at: 2
+  weights: /tmp/sparse_rcnn_r50_300pro_3x_mayaku.pth
+  roi_heads:
+    num_classes: 1
+  query_rcnn_head:
+    num_proposals: 300
+    hidden_dim: 256
+    num_heads: 8
+    num_stages: 6
+    dim_feedforward: 2048
+    dim_dynamic: 64
+    pooler_resolution: 7
+    dropout: 0.0
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+
+input:
+  min_size_test: 800
+  max_size_test: 1333
+
+solver:
+  optimizer_name: AdamW
+  base_lr: 2.5e-5
+  weight_decay: 1.0e-4
+  weight_decay_norm: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+  ims_per_batch: 8
+  grad_accum_steps: 2
+  max_iter: 400
+  steps: [300, 360]
+  warmup_iters: 10
+  warmup_factor: 0.01
+  warmup_method: linear
+  lr_scheduler_name: WarmupMultiStepLR
+
+  clip_gradients_enabled: true
+  clip_gradients_value: 1.0
+  clip_gradients_type: norm
+
+  amp_enabled: false
+  amp_dtype: fp16
+
+  ema_enabled: true
+  ema_decay: 0.999
+  ema_tau: 100.0
+
+test:
+  detections_per_image: 300

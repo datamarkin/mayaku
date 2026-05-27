@@ -37,7 +37,7 @@ model:
     # to 1 (freeze stem) to recover ~10% backbone compute if VRAM-bound;
     # freeze_at >= 2 is rarely worth it.
     freeze_at: 0
-    weights_path: convnext_tiny.pth
+    weights_path: /home/dataserver/Downloads/convnext_tiny_22k_224.pth
   roi_heads:
     num_classes: 80
   roi_box_head:

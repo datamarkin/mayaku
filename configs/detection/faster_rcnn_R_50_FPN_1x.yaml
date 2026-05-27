@@ -11,6 +11,7 @@
 # D2 published 1x: 37.9 box AP. Target with this recipe: ≥ 39 AP.
 model:
   meta_architecture: faster_rcnn
+  weights: /mnt/markin/Intranet/mymodel/model_iter_0090000.pth
   backbone:
     name: resnet50
     norm: FrozenBN
@@ -24,7 +25,7 @@ model:
     # training, so we match torchvision.
     stride_in_1x1: false
   roi_heads:
-    num_classes: 80
+    num_classes: 1
   roi_box_head:
     num_conv: 0
     num_fc: 2
@@ -58,8 +59,8 @@ solver:
   # GPU keep ims_per_batch=16, grad_accum_steps=1 (the D2 1x baseline).
   # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
   # gradients are mathematically identical, AP target unchanged.
-  ims_per_batch: 8
-  grad_accum_steps: 2
+  ims_per_batch: 16
+  grad_accum_steps: 1
   base_lr: 0.02
   # 1x schedule: 90k iters with LR decay milestones kept for schema
   # validation, but they're inert under WarmupCosineLR (which uses a
