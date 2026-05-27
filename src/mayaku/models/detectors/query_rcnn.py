@@ -3,6 +3,10 @@
 Follows the original Sparse R-CNN (PeizeSun/SparseR-CNN) architecture:
 absolute xyxy boxes throughout, Faster-RCNN-style delta encoding,
 weight_dict applied externally to loss dict, DDP-aware normalization.
+
+Phase 2 adds a dynamic mask head (QueryInst pattern) driven by
+obj_features from the last iterative stage.
+Phase 3 adds a standard heatmap keypoint head on ROI-pooled features.
 """
 
 from __future__ import annotations
@@ -15,9 +19,18 @@ from torch import Tensor, nn
 
 from mayaku.config.schemas import MayakuConfig
 from mayaku.models.backbones import build_bottom_up
+from mayaku.models.heads.mask_head import mask_rcnn_inference, mask_rcnn_loss
+from mayaku.models.heads.keypoint_head import (
+    KRCNNConvDeconvUpsampleHead,
+    keypoint_rcnn_inference,
+    keypoint_rcnn_loss,
+    select_proposals_with_visible_keypoints,
+)
 from mayaku.models.heads.query_head import QueryHead
+from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
 from mayaku.models.losses.set_criterion import SetCriterion
 from mayaku.models.necks import FPN
+from mayaku.models.poolers import ROIPooler
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.image_list import ImageList
 from mayaku.structures.instances import Instances
@@ -43,6 +56,10 @@ class QueryRCNN(nn.Module):
         detections_per_image: int = 100,
         inference_num_stages: int | None = None,
         inference_num_proposals: int | None = None,
+        mask_head: QueryDynamicMaskHead | None = None,
+        mask_pooler: ROIPooler | None = None,
+        keypoint_head: nn.Module | None = None,
+        keypoint_pooler: ROIPooler | None = None,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -55,11 +72,23 @@ class QueryRCNN(nn.Module):
         self.detections_per_image = detections_per_image
         self.inference_num_stages = inference_num_stages
         self.inference_num_proposals = inference_num_proposals
+        self.mask_head = mask_head
+        self.mask_pooler = mask_pooler
+        self.keypoint_head = keypoint_head
+        self.keypoint_pooler = keypoint_pooler
 
         mean_t = torch.tensor(pixel_mean, dtype=torch.float32).view(-1, 1, 1)
         std_t = torch.tensor(pixel_std, dtype=torch.float32).view(-1, 1, 1)
         self.register_buffer("pixel_mean", mean_t, persistent=False)
         self.register_buffer("pixel_std", std_t, persistent=False)
+
+    @property
+    def mask_on(self) -> bool:
+        return self.mask_head is not None
+
+    @property
+    def keypoint_on(self) -> bool:
+        return self.keypoint_head is not None
 
     def forward(
         self, batched_inputs: Sequence[dict[str, Any]]
@@ -76,6 +105,13 @@ class QueryRCNN(nn.Module):
             outputs_list = self.head(feature_list, images.image_sizes)
             loss_dict = self.criterion(outputs_list, targets)
 
+            if self.mask_on or self.keypoint_on:
+                last = outputs_list[-1]
+                mask_kp_losses = self._forward_mask_keypoint_train(
+                    feature_list, last, targets, images.image_sizes,
+                )
+                loss_dict.update(mask_kp_losses)
+
             # Apply weight_dict externally (matches original Sparse R-CNN)
             weighted = {}
             for k, v in loss_dict.items():
@@ -91,41 +127,88 @@ class QueryRCNN(nn.Module):
             num_stages_override=self.inference_num_stages,
             num_proposals_override=self.inference_num_proposals,
         )
-        return self._inference(outputs_list[-1], images.image_sizes)
+        return self._inference(outputs_list[-1], feature_list, images.image_sizes)
 
-    def _prepare_targets(
+    # ------------------------------------------------------------------
+    # Training: mask + keypoint branches
+    # ------------------------------------------------------------------
+
+    def _forward_mask_keypoint_train(
         self,
-        gt_instances: list[Instances],
+        feature_list: list[Tensor],
+        last_outputs: dict[str, Tensor],
+        targets: list[dict[str, Tensor]],
         image_sizes: list[tuple[int, int]],
-    ) -> list[dict[str, Tensor]]:
-        """Convert GT instances to the target format matching original Sparse R-CNN."""
-        device = self.pixel_mean.device
-        targets = []
-        for instances, (h, w) in zip(gt_instances, image_sizes):
-            raw_boxes = instances.gt_boxes
-            gt_boxes_xyxy = raw_boxes.tensor if isinstance(raw_boxes, Boxes) else raw_boxes
-            gt_classes = instances.gt_classes
+    ) -> dict[str, Tensor]:
+        num_stages = len(self.head.head_series)
+        indices = self.criterion.match(last_outputs, targets, stage_idx=num_stages - 1)
 
-            image_size_xyxy = torch.as_tensor([w, h, w, h], dtype=torch.float32, device=device)
-            image_size_xyxy_tgt = image_size_xyxy.unsqueeze(0).expand(len(gt_classes), -1)
+        fg_instances = self._build_fg_instances(indices, targets, image_sizes)
 
-            targets.append({
-                "labels": gt_classes.to(device),
-                "boxes_xyxy": gt_boxes_xyxy.to(device),
-                "image_size_xyxy": image_size_xyxy,
-                "image_size_xyxy_tgt": image_size_xyxy_tgt,
-            })
-        return targets
+        losses: dict[str, Tensor] = {}
+        if self.mask_on:
+            losses.update(self._forward_mask_train(
+                feature_list, last_outputs, fg_instances, indices,
+            ))
+        if self.keypoint_on:
+            losses.update(self._forward_keypoint_train(feature_list, fg_instances))
+        return losses
+
+    def _forward_mask_train(
+        self,
+        feature_list: list[Tensor],
+        last_outputs: dict[str, Tensor],
+        fg_instances: list[Instances],
+        indices: list[tuple[Tensor, Tensor]],
+    ) -> dict[str, Tensor]:
+        valid_mask = [len(inst) > 0 and inst.has("gt_masks") for inst in fg_instances]
+        valid = [inst for inst, m in zip(fg_instances, valid_mask) if m]
+        if not valid:
+            return {"loss_mask": self.mask_head.kernel_fc.weight.sum() * 0.0}
+
+        assert self.mask_pooler is not None
+        mask_roi_feats = self.mask_pooler(feature_list, [inst.proposal_boxes for inst in valid])
+
+        obj_features = last_outputs["obj_features"]  # (1, B*N, d)
+        valid_indices = [idx for idx, m in zip(indices, valid_mask) if m]
+        fg_obj = self._gather_fg_obj_features(
+            obj_features, valid_indices, last_outputs["pred_logits"].shape[:2],
+        )
+
+        mask_logits = self.mask_head(mask_roi_feats, fg_obj)
+        loss_mask = mask_rcnn_loss(mask_logits, valid, cls_agnostic=True)
+        return {"loss_mask": loss_mask}
+
+    def _forward_keypoint_train(
+        self,
+        feature_list: list[Tensor],
+        fg_instances: list[Instances],
+    ) -> dict[str, Tensor]:
+        kp_instances = [
+            inst for inst in fg_instances
+            if len(inst) > 0 and inst.has("gt_keypoints")
+        ]
+        kp_instances, _ = select_proposals_with_visible_keypoints(kp_instances)
+        valid = [inst for inst in kp_instances if len(inst) > 0]
+        if not valid:
+            return {"loss_keypoint": next(self.keypoint_head.parameters()).sum() * 0.0}
+
+        assert self.keypoint_pooler is not None
+        kp_roi_feats = self.keypoint_pooler(feature_list, [inst.proposal_boxes for inst in valid])
+        kp_logits = self.keypoint_head(kp_roi_feats)
+        loss_kp = keypoint_rcnn_loss(kp_logits, valid)
+        return {"loss_keypoint": loss_kp}
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
     def _inference(
         self,
         outputs: dict[str, Tensor],
+        feature_list: list[Tensor],
         image_sizes: list[tuple[int, int]],
     ) -> list[dict[str, Any]]:
-        """Post-process last stage predictions into per-image Instances.
-
-        Matches original: sigmoid scores, flatten N*K, take topk=N.
-        """
         pred_logits = outputs["pred_logits"]  # (B, N, K)
         pred_boxes = outputs["pred_boxes"]  # (B, N, 4) absolute xyxy
 
@@ -137,10 +220,11 @@ class QueryRCNN(nn.Module):
         labels = torch.arange(self.num_classes, device=pred_logits.device)
         labels = labels.unsqueeze(0).repeat(num_proposals, 1).flatten(0, 1)  # (N*K,)
 
+        per_image_proposal_indices: list[Tensor] = []
+
         for b in range(batch_size):
             h, w = image_sizes[b]
 
-            # Flatten across proposals × classes, take top-N
             scores_per_image = scores[b]  # (N, K)
             box_pred = pred_boxes[b]  # (N, 4)
 
@@ -148,16 +232,14 @@ class QueryRCNN(nn.Module):
                 min(self.detections_per_image, scores_per_image.numel()), sorted=False
             )
             labels_per_image = labels[topk_indices]
+            proposal_indices = topk_indices // self.num_classes
 
-            # Each proposal's box is repeated for all classes, then indexed
             box_pred_expanded = box_pred.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
             boxes_per_image = box_pred_expanded[topk_indices]
 
-            # Clip to image bounds
             boxes_per_image[:, 0::2].clamp_(min=0, max=w)
             boxes_per_image[:, 1::2].clamp_(min=0, max=h)
 
-            # Filter by score threshold
             keep = scores_flat > self.score_thresh
             inst = Instances(
                 image_size=(h, w),
@@ -165,9 +247,129 @@ class QueryRCNN(nn.Module):
                 scores=scores_flat[keep],
                 pred_classes=labels_per_image[keep],
             )
+            per_image_proposal_indices.append(proposal_indices[keep])
             results.append({"instances": inst})
 
+        if self.mask_on:
+            self._forward_mask_infer(feature_list, outputs, results, per_image_proposal_indices)
+        if self.keypoint_on:
+            self._forward_keypoint_infer(feature_list, results)
+
         return results
+
+    def _forward_mask_infer(
+        self,
+        feature_list: list[Tensor],
+        outputs: dict[str, Tensor],
+        results: list[dict[str, Any]],
+        per_image_proposal_indices: list[Tensor],
+    ) -> None:
+        instances = [r["instances"] for r in results]
+        if all(len(inst) == 0 for inst in instances):
+            return
+
+        assert self.mask_pooler is not None
+        mask_roi_feats = self.mask_pooler(feature_list, [inst.pred_boxes for inst in instances])
+
+        obj_features = outputs["obj_features"].squeeze(0)  # (B*N, d)
+        N = outputs["pred_logits"].shape[1]
+        parts = []
+        for b, pidx in enumerate(per_image_proposal_indices):
+            if pidx.numel() > 0:
+                parts.append(obj_features[b * N + pidx])
+            else:
+                parts.append(obj_features.new_zeros(0, obj_features.shape[-1]))
+        fg_obj = torch.cat(parts, dim=0)
+
+        mask_logits = self.mask_head(mask_roi_feats, fg_obj)
+        mask_rcnn_inference(mask_logits, instances, cls_agnostic=True)
+
+    def _forward_keypoint_infer(
+        self,
+        feature_list: list[Tensor],
+        results: list[dict[str, Any]],
+    ) -> None:
+        instances = [r["instances"] for r in results]
+        if all(len(inst) == 0 for inst in instances):
+            return
+
+        assert self.keypoint_pooler is not None
+        kp_roi_feats = self.keypoint_pooler(feature_list, [inst.pred_boxes for inst in instances])
+        kp_logits = self.keypoint_head(kp_roi_feats)
+        keypoint_rcnn_inference(kp_logits, instances)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _prepare_targets(
+        self,
+        gt_instances: list[Instances],
+        image_sizes: list[tuple[int, int]],
+    ) -> list[dict[str, Any]]:
+        device = self.pixel_mean.device
+        targets = []
+        for instances, (h, w) in zip(gt_instances, image_sizes):
+            raw_boxes = instances.gt_boxes
+            gt_boxes_xyxy = raw_boxes.tensor if isinstance(raw_boxes, Boxes) else raw_boxes
+            gt_classes = instances.gt_classes
+
+            image_size_xyxy = torch.as_tensor([w, h, w, h], dtype=torch.float32, device=device)
+            image_size_xyxy_tgt = image_size_xyxy.unsqueeze(0).expand(len(gt_classes), -1)
+
+            t: dict[str, Any] = {
+                "labels": gt_classes.to(device),
+                "boxes_xyxy": gt_boxes_xyxy.to(device),
+                "image_size_xyxy": image_size_xyxy,
+                "image_size_xyxy_tgt": image_size_xyxy_tgt,
+            }
+            if self.mask_on and instances.has("gt_masks"):
+                t["gt_masks"] = instances.gt_masks
+            if self.keypoint_on and instances.has("gt_keypoints"):
+                t["gt_keypoints"] = instances.gt_keypoints
+            targets.append(t)
+        return targets
+
+    def _build_fg_instances(
+        self,
+        indices: list[tuple[Tensor, Tensor]],
+        targets: list[dict[str, Any]],
+        image_sizes: list[tuple[int, int]],
+    ) -> list[Instances]:
+        fg_list = []
+        for b, (src_idx, tgt_idx) in enumerate(indices):
+            h, w = image_sizes[b]
+            inst = Instances(image_size=(h, w))
+            if src_idx.numel() == 0:
+                device = targets[b]["labels"].device
+                inst.proposal_boxes = Boxes(torch.zeros(0, 4, device=device))
+                inst.gt_classes = torch.zeros(0, dtype=torch.long, device=device)
+                fg_list.append(inst)
+                continue
+            inst.proposal_boxes = Boxes(targets[b]["boxes_xyxy"][tgt_idx])
+            inst.gt_classes = targets[b]["labels"][tgt_idx]
+            if "gt_masks" in targets[b]:
+                inst.gt_masks = targets[b]["gt_masks"][tgt_idx]
+            if "gt_keypoints" in targets[b]:
+                inst.gt_keypoints = targets[b]["gt_keypoints"][tgt_idx]
+            fg_list.append(inst)
+        return fg_list
+
+    def _gather_fg_obj_features(
+        self,
+        obj_features: Tensor,
+        indices: list[tuple[Tensor, Tensor]],
+        batch_proposals_shape: tuple[int, int],
+    ) -> Tensor:
+        B, N = batch_proposals_shape
+        obj_flat = obj_features.squeeze(0)  # (B*N, d)
+        parts = []
+        for b, (src_idx, _) in enumerate(indices):
+            if src_idx.numel() > 0:
+                parts.append(obj_flat[b * N + src_idx])
+        if not parts:
+            return obj_flat.new_zeros(0, obj_flat.shape[-1])
+        return torch.cat(parts, dim=0)
 
     def _preprocess_image(self, batched_inputs: Sequence[dict[str, Any]]) -> ImageList:
         device = self.pixel_mean.device
@@ -250,12 +452,47 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         cascade_iou_thresholds=qr_cfg.cascade_iou_thresholds,
     )
 
-    # Weight dict: applied to raw losses in forward()
-    weight_dict = {
-        "loss_ce": qr_cfg.cost_class,    # 2.0
-        "loss_bbox": qr_cfg.cost_bbox,   # 5.0
-        "loss_giou": qr_cfg.cost_giou,   # 2.0
+    weight_dict: dict[str, float] = {
+        "loss_ce": qr_cfg.cost_class,
+        "loss_bbox": qr_cfg.cost_bbox,
+        "loss_giou": qr_cfg.cost_giou,
     }
+
+    # Phase 2: Mask head
+    mask_head: QueryDynamicMaskHead | None = None
+    mask_pooler: ROIPooler | None = None
+    if cfg.model.query_rcnn_mask is not None:
+        mask_cfg = cfg.model.query_rcnn_mask
+        mask_pooler = ROIPooler(
+            output_size=mask_cfg.pooler_resolution,
+            scales=pooler_scales,
+            sampling_ratio=0,
+        )
+        mask_head = QueryDynamicMaskHead(
+            hidden_dim=qr_cfg.hidden_dim,
+            conv_dim=mask_cfg.conv_dim,
+            num_conv=mask_cfg.num_conv,
+            mask_resolution=mask_cfg.mask_resolution,
+            pooler_resolution=mask_cfg.pooler_resolution,
+        )
+        weight_dict["loss_mask"] = mask_cfg.loss_weight
+
+    # Phase 3: Keypoint head
+    keypoint_head: KRCNNConvDeconvUpsampleHead | None = None
+    keypoint_pooler: ROIPooler | None = None
+    if cfg.model.query_rcnn_keypoint is not None:
+        kp_cfg = cfg.model.query_rcnn_keypoint
+        from mayaku.models.backbones._base import ShapeSpec
+        keypoint_pooler = ROIPooler(
+            output_size=kp_cfg.pooler_resolution,
+            scales=pooler_scales,
+            sampling_ratio=0,
+        )
+        keypoint_head = KRCNNConvDeconvUpsampleHead(
+            input_shape=ShapeSpec(channels=cfg.model.fpn.out_channels, stride=1),
+            num_keypoints=kp_cfg.num_keypoints,
+        )
+        weight_dict["loss_keypoint"] = kp_cfg.loss_weight
 
     return QueryRCNN(
         backbone=fpn,
@@ -270,4 +507,8 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         detections_per_image=cfg.test.detections_per_image,
         inference_num_stages=qr_cfg.inference_num_stages,
         inference_num_proposals=qr_cfg.inference_num_proposals,
+        mask_head=mask_head,
+        mask_pooler=mask_pooler,
+        keypoint_head=keypoint_head,
+        keypoint_pooler=keypoint_pooler,
     )
