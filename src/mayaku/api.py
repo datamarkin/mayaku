@@ -144,6 +144,10 @@ def train(
     train_dir.mkdir(parents=True, exist_ok=True)
 
     pretrained_backbone = cfg.model.backbone.weights_path is None
+    # Full-model checkpoint (fine-tuning from a trained detector)
+    detector_weights = Path(cfg.model.weights) if cfg.model.weights is not None else None
+    if detector_weights is not None:
+        pretrained_backbone = False
 
     print(f"[mayaku.train] {config_stem} -> {resolved_output_dir}")
 
@@ -162,6 +166,7 @@ def train(
             coco_gt_json=train_json,
             image_root=train_images,
             output_dir=train_dir,
+            weights=detector_weights,
             pretrained_backbone=pretrained_backbone,
             device=device,
             val_json=val_json if forward_val else None,
@@ -184,7 +189,7 @@ def train(
                 train_json,
                 train_images,
                 train_dir,
-                None,  # weights
+                detector_weights,  # weights
                 pretrained_backbone,
                 device,
                 None,  # max_iter (cfg already carries it)
@@ -201,13 +206,19 @@ def train(
     print(f"[mayaku.train] final weights: {final_weights}")
 
     # --- Optional final eval ----------------------------------------------
+    # Load the resolved config that run_train persisted — it includes
+    # auto-config adjustments (num_classes, schedule, etc.) that the
+    # caller's ``cfg`` doesn't have.
+    resolved_cfg_path = train_dir / "config.yaml"
+    eval_cfg = load_yaml(resolved_cfg_path) if resolved_cfg_path.exists() else cfg
+
     bbox: dict[str, Any] = {}
     eval_seconds: float | None = None
     if eval_after:
         assert val_json is not None and val_images is not None
         eval_start = time.time()
         metrics = run_eval(
-            cfg,
+            eval_cfg,
             weights=final_weights,
             coco_gt_json=val_json,
             image_root=val_images,
