@@ -57,6 +57,10 @@ from mayaku.models.backbones._base import Backbone
 __all__ = ["ConvNeXtBackbone", "ConvNeXtVariant"]
 
 ConvNeXtVariant = Literal[
+    "convnext_atto",
+    "convnext_femto",
+    "convnext_pico",
+    "convnext_nano",
     "convnext_tiny",
     "convnext_small",
     "convnext_base",
@@ -68,6 +72,10 @@ WeightsChoice = Literal["DEFAULT"] | None
 # Per-variant stage-output channel tables. Strides are identical across
 # variants (4 / 8 / 16 / 32) so they live in a single mapping.
 _VARIANT_CHANNELS: dict[ConvNeXtVariant, dict[str, int]] = {
+    "convnext_atto": {"res2": 40, "res3": 80, "res4": 160, "res5": 320},
+    "convnext_femto": {"res2": 48, "res3": 96, "res4": 192, "res5": 384},
+    "convnext_pico": {"res2": 64, "res3": 128, "res4": 256, "res5": 512},
+    "convnext_nano": {"res2": 80, "res3": 160, "res4": 320, "res5": 640},
     "convnext_tiny": {"res2": 96, "res3": 192, "res4": 384, "res5": 768},
     "convnext_small": {"res2": 96, "res3": 192, "res4": 384, "res5": 768},
     "convnext_base": {"res2": 128, "res3": 256, "res4": 512, "res5": 1024},
@@ -94,12 +102,27 @@ _STAGE_FEATURE_INDEX: dict[str, tuple[int, int]] = {
     "res5": (6, 7),
 }
 
-_TORCHVISION_FACTORIES: dict[ConvNeXtVariant, Callable[..., tv.ConvNeXt]] = {
+_TORCHVISION_FACTORIES: dict[str, Callable[..., tv.ConvNeXt]] = {
     "convnext_tiny": tv.convnext_tiny,
     "convnext_small": tv.convnext_small,
     "convnext_base": tv.convnext_base,
     "convnext_large": tv.convnext_large,
 }
+
+# Custom variants not in torchvision (V2 size configs, V1 block style)
+_CUSTOM_BLOCK_SETTINGS: dict[str, list[tuple[int, int | None, int]]] = {
+    "convnext_atto": [(40, 80, 2), (80, 160, 2), (160, 320, 6), (320, None, 2)],
+    "convnext_femto": [(48, 96, 2), (96, 192, 2), (192, 384, 6), (384, None, 2)],
+    "convnext_pico": [(64, 128, 2), (128, 256, 2), (256, 512, 6), (512, None, 2)],
+    "convnext_nano": [(80, 160, 2), (160, 320, 2), (320, 640, 8), (640, None, 2)],
+}
+
+
+def _build_custom_convnext(name: str) -> tv.ConvNeXt:
+    from torchvision.models.convnext import CNBlockConfig
+    settings = _CUSTOM_BLOCK_SETTINGS[name]
+    block_setting = [CNBlockConfig(c_in, c_out, depth) for c_in, c_out, depth in settings]
+    return tv.ConvNeXt(block_setting=block_setting, stochastic_depth_prob=0.1)
 
 _TORCHVISION_DEFAULT_WEIGHTS: dict[ConvNeXtVariant, tv.WeightsEnum] = {
     "convnext_tiny": tv.ConvNeXt_Tiny_Weights.IMAGENET1K_V1,
@@ -167,14 +190,22 @@ class ConvNeXtBackbone(Backbone):
         # construction, so we don't accidentally trigger a network
         # download for the torchvision weights when the caller already
         # has a local checkpoint in hand.
-        tv_weights = (
-            _TORCHVISION_DEFAULT_WEIGHTS[name]
-            if weights == "DEFAULT" and weights_path is None
-            else None
-        )
         if weights is not None and weights != "DEFAULT":
             raise ValueError(f"weights must be None or 'DEFAULT'; got {weights!r}")
-        tv_model = _TORCHVISION_FACTORIES[name](weights=tv_weights)
+
+        if name in _TORCHVISION_FACTORIES:
+            tv_weights = (
+                _TORCHVISION_DEFAULT_WEIGHTS[name]
+                if weights == "DEFAULT" and weights_path is None
+                else None
+            )
+            tv_model = _TORCHVISION_FACTORIES[name](weights=tv_weights)
+        else:
+            if weights == "DEFAULT":
+                raise ValueError(
+                    f"{name} has no torchvision pretrained weights; use weights_path instead"
+                )
+            tv_model = _build_custom_convnext(name)
 
         # torchvision ConvNeXt's ``features`` is a Sequential of 8
         # children alternating downsample/stage. The stem (features[0])
@@ -343,7 +374,7 @@ def _unwrap_checkpoint(raw: dict[str, Any]) -> dict[str, Tensor]:
 
 
 def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Rename facebookresearch-style keys → torchvision keys, reshape ``gamma`` → ``layer_scale``.
+    """Rename external ConvNeXt keys → Mayaku's internal layout, reshape ``gamma`` → ``layer_scale``.
 
     Mapping:
 
@@ -366,6 +397,13 @@ def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, T
     ``features.*``. The two-step rename (source → tv features.*, then
     features.* → mayaku carved-name) keeps the per-step logic readable.
     """
+    # Detect key format: timm/v1.5 uses "stem_0" / "stages_X.blocks.Y",
+    # facebookresearch uses "downsample_layers" / "stages.k.j.dwconv".
+    # If any key starts with "stem_" or contains ".blocks.", it's timm.
+    is_timm = any(k.startswith("stem_") or ".blocks." in k for k in state)
+    if is_timm:
+        return _remap_timm_convnext_state_dict(state)
+
     out: dict[str, Tensor] = {}
     # Block sub-module index inside the torchvision CNBlock.block
     # Sequential: dwconv=0, Permute=1, LayerNorm=2, pwconv1=3, GELU=4,
@@ -398,16 +436,10 @@ def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, T
             sub = parts[3]
             stage = _STAGE_NAMES[k]
             if sub == "gamma":
-                # The source format stores layer-scale as a length-C
-                # vector applied in NHWC space; torchvision stores it as
-                # ``(C, 1, 1)`` applied in NCHW space. Reshape here so
-                # the runtime forward doesn't broadcast — keeps the
-                # post-load model bitwise-identical to a torchvision init.
                 channels = value.shape[0]
                 out[f"_res_stages.{stage}.{j}.layer_scale"] = value.view(channels, 1, 1)
                 continue
             if sub not in _BLOCK_SUB:
-                # Unexpected sub-key — let the strict-load filter drop it.
                 out[key] = value
                 continue
             tail = ".".join(parts[4:])  # "weight" / "bias"
@@ -416,6 +448,73 @@ def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, T
 
         # ---- everything else (norm, norms, mask_token, ...) --------------
         # Pass through; caller filters against the carved model's keys.
+        out[key] = value
+
+    return out
+
+
+def _remap_timm_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
+    """Rename timm/ConvNeXt-v1.5 keys → Mayaku's internal layout.
+
+    Handles the key naming from distilled ConvNeXt checkpoints:
+        stem_0/stem_1                 → stem.0/stem.1
+        stages_X.blocks.Y.conv_dw    → _res_stages.resN.Y.block.0
+        stages_X.blocks.Y.norm       → _res_stages.resN.Y.block.2
+        stages_X.blocks.Y.mlp.fc1    → _res_stages.resN.Y.block.3
+        stages_X.blocks.Y.mlp.fc2    → _res_stages.resN.Y.block.5
+        stages_X.blocks.Y.gamma      → _res_stages.resN.Y.layer_scale (C→C,1,1)
+        stages_X.downsample.{0,1}    → _res_downs.resN.{0,1}
+    """
+    out: dict[str, Tensor] = {}
+    _BLOCK_SUB = {"conv_dw": 0, "norm": 2}
+    _MLP_SUB = {"fc1": 3, "fc2": 5}
+    _STAGE_NAMES = ("res2", "res3", "res4", "res5")
+
+    for key, value in state.items():
+        parts = key.split(".")
+
+        # ---- stem_0.weight / stem_1.bias ----
+        if parts[0].startswith("stem_"):
+            idx = parts[0].split("_")[1]  # "0" or "1"
+            tail = ".".join(parts[1:])
+            out[f"stem.{idx}.{tail}"] = value
+            continue
+
+        # ---- stages_X.downsample.{0,1}.{weight,bias} ----
+        # stages_1.downsample = downsample before stage 1 = between res2→res3
+        if parts[0].startswith("stages_") and len(parts) >= 2 and parts[1] == "downsample":
+            k = int(parts[0].split("_")[1])
+            stage = _STAGE_NAMES[k]  # stages_1.downsample → res3
+            tail = ".".join(parts[2:])
+            out[f"_res_downs.{stage}.{tail}"] = value
+            continue
+
+        # ---- stages_X.blocks.Y.{conv_dw,norm,mlp.fc1,mlp.fc2,gamma} ----
+        if parts[0].startswith("stages_") and len(parts) >= 3 and parts[1] == "blocks":
+            k = int(parts[0].split("_")[1])
+            j = int(parts[2])
+            stage = _STAGE_NAMES[k]
+            sub = parts[3]
+
+            if sub == "gamma":
+                channels = value.shape[0]
+                out[f"_res_stages.{stage}.{j}.layer_scale"] = value.view(channels, 1, 1)
+                continue
+            if sub == "mlp" and len(parts) >= 5:
+                mlp_sub = parts[4]  # "fc1" or "fc2"
+                if mlp_sub in _MLP_SUB:
+                    tail = ".".join(parts[5:])
+                    # timm uses Conv2d(1×1) for MLP; torchvision uses Linear.
+                    # Squeeze spatial dims: (out, in, 1, 1) → (out, in)
+                    if tail == "weight" and value.dim() == 4:
+                        value = value.squeeze(-1).squeeze(-1)
+                    out[f"_res_stages.{stage}.{j}.block.{_MLP_SUB[mlp_sub]}.{tail}"] = value
+                    continue
+            if sub in _BLOCK_SUB:
+                tail = ".".join(parts[4:])
+                out[f"_res_stages.{stage}.{j}.block.{_BLOCK_SUB[sub]}.{tail}"] = value
+                continue
+
         out[key] = value
 
     return out
