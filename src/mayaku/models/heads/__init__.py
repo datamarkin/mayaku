@@ -23,6 +23,7 @@ from mayaku.models.heads.mask_head import (
     select_foreground_proposals,
 )
 from mayaku.models.heads.query_head import QueryHead
+from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
 from mayaku.models.heads.query_stage import DynamicConv, QueryStage
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "FastRCNNOutputLayers",
     "KRCNNConvDeconvUpsampleHead",
     "MaskRCNNConvUpsampleHead",
+    "QueryDynamicMaskHead",
     "QueryHead",
     "QueryStage",
     "build_box_head",

@@ -500,6 +500,10 @@ class ModelConfig(_BaseModel):
             raise ValueError("roi_keypoint_head is set but meta_architecture is not keypoint_rcnn")
         if self.query_rcnn_head is not None:
             raise ValueError("query_rcnn_head is set but meta_architecture is not query_rcnn")
+        if self.query_rcnn_mask is not None:
+            raise ValueError("query_rcnn_mask is only valid with meta_architecture='query_rcnn'")
+        if self.query_rcnn_keypoint is not None:
+            raise ValueError("query_rcnn_keypoint is only valid with meta_architecture='query_rcnn'")
         return self
 
     def resolved_device(self) -> DeviceKind:
