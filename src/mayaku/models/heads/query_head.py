@@ -131,10 +131,12 @@ class QueryHead(nn.Module):
             outputs_coord_list.append(pred_bboxes)
             bboxes = pred_bboxes.detach()
 
-        return [
+        results = [
             {"pred_logits": cls, "pred_boxes": box}
             for cls, box in zip(outputs_class_list, outputs_coord_list)
         ]
+        results[-1]["obj_features"] = proposal_features
+        return results
 
 
 def _cxcywh_to_xyxy(boxes: Tensor) -> Tensor:
