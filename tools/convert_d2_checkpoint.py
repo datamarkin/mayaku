@@ -102,6 +102,19 @@ _RENAME_RULES: list[tuple[re.Pattern[str], _Replacement]] = [
      lambda m: f"roi_heads.keypoint_head.convs.{int(m.group(1)) - 1}.{m.group(2)}"),
     (re.compile(r"^roi_heads\.keypoint_head\.score_lowres\.(weight|bias)$"),
      r"roi_heads.keypoint_head.deconv.\1"),
+
+    # Sparse R-CNN / QueryRCNN: proposal embeddings live at the top level
+    # in D2 (SparseRCNN.init_proposal_{features,boxes}) but inside
+    # QueryHead in Mayaku (QueryRCNN.head.init_proposal_{features,boxes}).
+    (re.compile(r"^init_proposal_(features|boxes)\.weight$"),
+     r"head.init_proposal_\1.weight"),
+
+    # Sparse R-CNN / QueryRCNN: head_series keys are identical between D2
+    # DynamicHead and Mayaku QueryHead (same sub-module names: self_attn,
+    # inst_interact, linear1/2, norm1/2/3, cls_module, class_logits,
+    # reg_module, bboxes_delta). Pass through unchanged.
+    (re.compile(r"^head\.(.+)$"),
+     r"head.\1"),
 ]
 
 
