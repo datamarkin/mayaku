@@ -1,0 +1,109 @@
+# QueryRCNN NANO — ConvNeXt-Femto(DINOv3-distilled) + thin FPN + QGN, 2 stages.
+# Second point on the ~10-15M small-model menu (qgn_program_log.md, 2026-06-07).
+#
+# Target: ~12.6M total, params-optimal, more refinement depth than the pico/
+# 1-stage point. Tests the weaker-backbone end of the menu. From-backbone init
+# (h=128 shape mismatch, no warm-start). 640px.
+#
+# Same head shrink as the pico nano (h=128, fpn 128, ffn 1024) but 2 stages,
+# so cascade_iou is meaningful and ON: (0.0, 0.5) — late-stage IoU floor for
+# localization polish (measured +0.34 on coco_4k at h=256).
+# P6/P7: not yet (pending module); large-object AP expected to suffer.
+#
+# Pre-registered expectation [ASSUMED]: a touch below the pico/1-stage point
+# on backbone strength but with more refinement; both ~30-34 AP at 1x. The
+# pair maps two points of the size/AP curve.
+
+model:
+  meta_architecture: query_rcnn
+  pixel_mean: [123.675, 116.28, 103.53]
+  pixel_std:  [58.395, 57.12, 57.375]
+  backbone:
+    name: convnext_femto
+    weights_path: /home/dataserver/Projects/ConvNeXt-v1.5/runs/atto-femto/epoch_094_convnext_femto.pt
+    freeze_at: 0
+    norm: FrozenBN
+  fpn:
+    in_features: [res2, res3, res4, res5]
+    out_channels: 128
+    norm: ''
+    fuse_type: sum
+  roi_heads:
+    num_classes: 80
+  query_rcnn_head:
+    num_proposals: 300
+    hidden_dim: 128
+    num_heads: 8
+    num_stages: 2
+    query_generator: true
+    dim_feedforward: 1024
+    dim_dynamic: 64
+    pooler_resolution: 7
+    dropout: 0.0
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+    cascade_iou_thresholds: [0.0, 0.5]
+
+input:
+  min_size_train: [512, 544, 576, 608, 640]
+  max_size_train: 1067
+  min_size_train_sampling: choice
+  min_size_test: 640
+  max_size_test: 1067
+  random_flip: horizontal
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  optimizer_name: AdamW
+  base_lr: 2.5e-5
+  weight_decay: 1.0e-4
+  weight_decay_norm: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+  llrd_enabled: true
+  llrd_decay: 0.8
+
+  lr_scheduler_name: WarmupCosineLR
+  max_iter: 90000
+  steps: [60000, 80000]
+  warmup_iters: 1500
+  warmup_factor: 0.001
+  warmup_method: linear
+
+  ims_per_batch: 4
+  grad_accum_steps: 4
+
+  clip_gradients_enabled: true
+  clip_gradients_value: 1.0
+  clip_gradients_type: norm
+  grad_norm_log_enabled: false
+
+  amp_enabled: false
+  amp_dtype: fp16
+
+  checkpoint_period: 5000
+
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2000.0
+
+test:
+  detections_per_image: 100
+  eval_period: 5000
+  precise_bn_enabled: false
+
+dataloader:
+  num_workers: 4
+  aspect_ratio_grouping: true
+  sampler_train: TrainingSampler
+  filter_empty_annotations: true
+
+auto_config:
+  enabled: false

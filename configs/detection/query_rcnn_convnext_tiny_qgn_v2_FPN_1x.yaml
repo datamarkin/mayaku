@@ -1,0 +1,130 @@
+# QueryRCNN QGN v2 — ConvNeXt-Tiny(DINOv3) + FPN + QueryGenerator.
+# Production-candidate v2. NOT YET QUEUED (prepared 2026-06-07).
+#
+# Relationship to v1 (query_rcnn_convnext_tiny_qgn2_FPN_1x, the 90k run in
+# flight): v1 is the purist one-variable run (QGN-2, everything else == the
+# 46.68 flagship). v2 layers on the two config-only fixes the per-class
+# analysis pointed at — see qgn_program_log.md, entry 2026-06-07.
+#
+# Changes vs v1:
+#   1. num_stages 2 -> 3, inference_num_stages 2  (Tier 3, "depth scaffold")
+#      Train with 3 cascade stages so stage-3 deep supervision shapes the
+#      shared FPN/backbone/early-stage features, then DEPLOY truncated to 2.
+#      Evidence: R50 scaffold test — native-4 lost -3.13 vs 6-stage, but
+#      truncating-6-to-4 lost only -1.32 (2.4x cheaper). Caveat: "3" is a
+#      chosen point, not a swept optimum; the qgn6-truncation sweep is the
+#      clean way to find the real knee. Logged as such.
+#   2. cascade_iou_thresholds [] -> (0.0, 0.4, 0.6)  (Tier 2)
+#      Per-stage IoU floor; late stage must match at higher IoU -> localization
+#      polish, targets the large+thin object loss. Measured +0.34 AP on coco_4k.
+#
+# NOT included (needs code, deferred to a pilot):
+#   - P6/P7 pyramid for the QGN (Tier 1). FPN currently emits only maxpool-P6
+#     and the QGN reads P3-P5 (max stride 32). The headline large-object fix,
+#     but it needs a LastLevelP6P7 module first. Pilot on coco_4k -> full val
+#     APl before committing a 90k. See log.
+#
+# Pre-registered expectation (grade against the v1 final and the log):
+#   APl recovery +1.5..3.0, overall +0.4..0.9 over v1 at matched iters;
+#   small-object (APs) advantage must NOT regress.
+
+model:
+  meta_architecture: query_rcnn
+  pixel_mean: [123.675, 116.28, 103.53]
+  pixel_std:  [58.395, 57.12, 57.375]
+  backbone:
+    name: convnext_tiny
+    weights_path: /mnt/markin/Intranet/dinov3/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
+    freeze_at: 0
+    norm: FrozenBN
+  fpn:
+    in_features: [res2, res3, res4, res5]
+    out_channels: 256
+    norm: ''
+    fuse_type: sum
+  roi_heads:
+    num_classes: 80
+  query_rcnn_head:
+    num_proposals: 300
+    hidden_dim: 256
+    num_heads: 8
+    # Tier 3: train 3 stages, deploy 2 (scaffold). inference_num_stages
+    # truncates at eval/export with zero change to the trained weights.
+    num_stages: 3
+    inference_num_stages: 2
+    query_generator: true
+    dim_feedforward: 2048
+    dim_dynamic: 64
+    pooler_resolution: 7
+    dropout: 0.0
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+    # Tier 2: per-stage IoU floor, length == num_stages (3).
+    cascade_iou_thresholds: [0.0, 0.4, 0.6]
+
+input:
+  min_size_train: [640, 672, 704, 736, 768, 800]
+  max_size_train: 1333
+  min_size_train_sampling: choice
+  min_size_test: 800
+  max_size_test: 1333
+  random_flip: horizontal
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  optimizer_name: AdamW
+  base_lr: 2.5e-5
+  weight_decay: 1.0e-4
+  weight_decay_norm: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+  llrd_enabled: true
+  llrd_decay: 0.8
+
+  lr_scheduler_name: WarmupCosineLR
+  max_iter: 90000
+  steps: [60000, 80000]
+  warmup_iters: 1500
+  warmup_factor: 0.001
+  warmup_method: linear
+
+  # 3 stages costs more activation memory than v1's 2; keep the 2x8 geometry
+  # that fit the 3060 at 2 stages and re-check VRAM headroom on launch. If it
+  # OOMs, drop to ims_per_batch 1 / grad_accum 16 (same effective 16).
+  ims_per_batch: 2
+  grad_accum_steps: 8
+
+  clip_gradients_enabled: true
+  clip_gradients_value: 1.0
+  clip_gradients_type: norm
+  grad_norm_log_enabled: false
+
+  amp_enabled: false
+  amp_dtype: fp16
+
+  checkpoint_period: 5000
+
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2000.0
+
+test:
+  detections_per_image: 100
+  eval_period: 5000
+  precise_bn_enabled: false
+
+dataloader:
+  num_workers: 4
+  aspect_ratio_grouping: true
+  sampler_train: TrainingSampler
+  filter_empty_annotations: true
+
+auto_config:
+  enabled: false

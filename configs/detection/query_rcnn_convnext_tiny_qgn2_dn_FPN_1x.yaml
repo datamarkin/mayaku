@@ -1,0 +1,112 @@
+# QueryRCNN QGN-2 + DENOISING — ConvNeXt-Tiny(DINOv3), COCO 1x.
+#
+# A/B against the v1 QGN-2 run (query_rcnn_convnext_tiny_qgn2_FPN_1x): IDENTICAL
+# recipe — same backbone, 800px, eff. batch 16, AMP off, 90k, from-backbone —
+# except DN-DETR-style box denoising is ON. The single changed variable is DN,
+# so the convergence delta at matched iters vs the v1 curve
+# (5k 16.4 / 10k 29.2 / 15k 34.3 / 20k 36.5 / ... / 50k 43.9) isolates DN's
+# effect. Hypothesis (qgn_program_log): DN helps at 2 stages where the
+# 6-stage cascade's supervision density isn't there to absorb it.
+#
+# DN is training-only (queries dropped at inference) -> zero deployment cost.
+# dn_groups=5 (lighter than the FRCNN reference's 10) because QueryRCNN's
+# per-stage self-attention is O(queries^2); raise if memory allows.
+
+model:
+  meta_architecture: query_rcnn
+  pixel_mean: [123.675, 116.28, 103.53]
+  pixel_std:  [58.395, 57.12, 57.375]
+  backbone:
+    name: convnext_tiny
+    weights_path: /mnt/markin/Intranet/dinov3/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
+    freeze_at: 0
+    norm: FrozenBN
+  fpn:
+    in_features: [res2, res3, res4, res5]
+    out_channels: 256
+    norm: ''
+    fuse_type: sum
+  roi_heads:
+    num_classes: 80
+  query_rcnn_head:
+    num_proposals: 300
+    hidden_dim: 256
+    num_heads: 8
+    num_stages: 2
+    query_generator: true
+    dim_feedforward: 2048
+    dim_dynamic: 64
+    pooler_resolution: 7
+    dropout: 0.0
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+    cascade_iou_thresholds: []
+    # --- the one change vs v1 ---
+    denoising: true
+    dn_groups: 5
+    dn_box_noise_scale: 0.4
+    dn_loss_weight: 1.0
+
+input:
+  min_size_train: [640, 672, 704, 736, 768, 800]
+  max_size_train: 1333
+  min_size_train_sampling: choice
+  min_size_test: 800
+  max_size_test: 1333
+  random_flip: horizontal
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+
+solver:
+  optimizer_name: AdamW
+  base_lr: 2.5e-5
+  weight_decay: 1.0e-4
+  weight_decay_norm: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+  llrd_enabled: true
+  llrd_decay: 0.8
+
+  lr_scheduler_name: WarmupCosineLR
+  max_iter: 90000
+  steps: [60000, 80000]
+  warmup_iters: 1500
+  warmup_factor: 0.001
+  warmup_method: linear
+
+  ims_per_batch: 2
+  grad_accum_steps: 8
+
+  clip_gradients_enabled: true
+  clip_gradients_value: 1.0
+  clip_gradients_type: norm
+  grad_norm_log_enabled: false
+
+  amp_enabled: false
+  amp_dtype: fp16
+
+  checkpoint_period: 5000
+
+  ema_enabled: true
+  ema_decay: 0.9999
+  ema_tau: 2000.0
+
+test:
+  detections_per_image: 100
+  eval_period: 5000
+  precise_bn_enabled: false
+
+dataloader:
+  num_workers: 4
+  aspect_ratio_grouping: true
+  sampler_train: TrainingSampler
+  filter_empty_annotations: true
+
+auto_config:
+  enabled: false

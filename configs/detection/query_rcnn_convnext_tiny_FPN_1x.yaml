@@ -1,13 +1,43 @@
-# QueryRCNN — R50-FPN, balloon fine-tune from converted Sparse R-CNN checkpoint.
+# QueryRCNN — ConvNeXt-Tiny + FPN, COCO 1x from ImageNet-22k.
+#
+# Reference: Faster R-CNN + DINOv3-distilled-tiny + plain AdamW + 1x = 45.02 AP.
+# This config swaps two things relative to that reference:
+#   - Head:     Faster R-CNN  ->  QueryRCNN (Sparse R-CNN-style iterative dynamic head).
+#   - Backbone: DINOv3-distill  ->  ImageNet-22k supervised (convnext_tiny_22k_224_v1.pth).
+# An earlier informal test showed v1-22k was within striking distance of DINOv3
+# on COCO full schedule with Faster R-CNN, so the 22k checkpoint is a fair start.
+#
+# Hyperparameter sourcing:
+#   - Backbone/FPN/aug/EMA/cosine/warmup/clip-type: inherited from the FRCNN baseline.
+#     These transfer cleanly because they are properties of ConvNeXt detection in general.
+#   - base_lr, weight_decay, clip_value: Sparse R-CNN canonical. The DynamicConv/attn head
+#     is LR-sensitive; FRCNN values (1e-4 / 0.05 / 0.1) would over-regularize and over-step
+#     the head. See plan for sweep candidates if the head plateaus.
+#   - llrd_decay 0.7: aggressive layer-wise decay. 22k is supervised pretrain (not distilled),
+#     so the backbone can tolerate sharper decay. If features look frozen, raise to 0.8/0.9.
+#
+# This is the CONTROL run: cascade_iou is OFF. A follow-up run will flip it on with
+# the canonical (0.0, 0.0, 0.4, 0.5, 0.6, 0.7) so the two are directly comparable.
+
 model:
   meta_architecture: query_rcnn
+  pixel_mean: [123.675, 116.28, 103.53]
+  pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: resnet50
-    freeze_at: 2
-  weights: /tmp/sparse_rcnn_r50_300pro_3x_mayaku.pth
+    name: convnext_tiny
+    weights_path: /mnt/markin/Intranet/dinov3/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
+    freeze_at: 0
+    norm: FrozenBN
+  fpn:
+    in_features: [res2, res3, res4, res5]
+    out_channels: 256
+    norm: ''
+    fuse_type: sum
   roi_heads:
-    num_classes: 1
+    # QueryRCNN ignores most roi_heads knobs; only num_classes is read by the factory.
+    num_classes: 80
   query_rcnn_head:
+    # "Full" head — matches published Sparse R-CNN COCO config.
     num_proposals: 300
     hidden_dim: 256
     num_heads: 8
@@ -16,41 +46,90 @@ model:
     dim_dynamic: 64
     pooler_resolution: 7
     dropout: 0.0
+    # Hungarian matcher cost weights (Sparse R-CNN canonical).
     cost_class: 2.0
     cost_bbox: 5.0
     cost_giou: 2.0
+    # Cascade IoU OFF for control run; flip on in follow-up with (0.0,0.0,0.4,0.5,0.6,0.7).
+    cascade_iou_thresholds: []
 
 input:
+  # Multi-scale training (640..800 short side), 1333 long-side cap. From FRCNN baseline.
+  min_size_train: [640, 672, 704, 736, 768, 800]
+  max_size_train: 1333
+  min_size_train_sampling: choice
   min_size_test: 800
   max_size_test: 1333
+  random_flip: horizontal
+  # Color jitter on — the FRCNN baseline used it and it transfers cleanly to QueryRCNN.
+  color_jitter_enabled: true
+  color_jitter_brightness: 0.4
+  color_jitter_contrast: 0.4
+  color_jitter_saturation: 0.7
+  color_jitter_hue: 0.015
+  color_jitter_prob: 0.5
+  # All the heavier augs (mosaic / mixup / copy-paste / randaug) stay off — baseline did
+  # not use them, and turning them on while changing the head is too many variables at once.
 
 solver:
   optimizer_name: AdamW
+  # Sparse R-CNN canonical: 2.5e-5. FRCNN baseline used 1e-4, but the DynamicConv head is
+  # LR-sensitive. With LLRD the backbone gets 2.5e-5 * 0.7^k — gentle on distilled-style features.
   base_lr: 2.5e-5
+  # Sparse R-CNN canonical: 1e-4. FRCNN baseline's 0.05 is 500x this; the builder applies a
+  # single wd to all non-norm params (no head/backbone split), so 0.05 would crush the head.
+  # Backbone is already LLRD-protected, so light WD on it is fine.
   weight_decay: 1.0e-4
   weight_decay_norm: 0.0
   betas: [0.9, 0.999]
   eps: 1.0e-8
 
-  ims_per_batch: 8
-  grad_accum_steps: 2
-  max_iter: 400
-  steps: [300, 360]
-  warmup_iters: 10
-  warmup_factor: 0.01
-  warmup_method: linear
-  lr_scheduler_name: WarmupMultiStepLR
+  # LLRD: 6 layers for ConvNeXt-Tiny. Head + FPN run at full base_lr.
+  # 0.7 is aggressive; raise to 0.8/0.9 if backbone gradients look starved.
+  llrd_enabled: true
+  llrd_decay: 0.8
 
+  lr_scheduler_name: WarmupCosineLR
+  max_iter: 90000
+  # steps is unused by cosine but kept for schema validity (validators require ascending values).
+  steps: [60000, 80000]
+  warmup_iters: 1500
+  warmup_factor: 0.001
+  warmup_method: linear
+
+  # Effective batch 16 (8 imgs/step x 2 accum) — matches FRCNN baseline.
+  ims_per_batch: 4
+  grad_accum_steps: 4
+
+  # Sparse R-CNN canonical grad clip: 1.0 (FRCNN baseline used 0.1; that is tuned for a
+  # different loss landscape). Drop to 0.1 if we see loss spikes / NaNs.
   clip_gradients_enabled: true
   clip_gradients_value: 1.0
   clip_gradients_type: norm
+  grad_norm_log_enabled: false
 
+  # AMP off — match the FRCNN baseline, no extra variance to debug. Ladder if we ever want
+  # it: fp16 -> bf16 -> fp32. The _apply_deltas float() cast handles fp16 box decode safely.
   amp_enabled: false
   amp_dtype: fp16
 
+  checkpoint_period: 5000
+
+  # EMA: tau=2000 with decay=0.9999 reaches ~95% asymptote by ~6k iters — sized for 90k.
   ema_enabled: true
-  ema_decay: 0.999
-  ema_tau: 100.0
+  ema_decay: 0.9999
+  ema_tau: 2000.0
 
 test:
-  detections_per_image: 300
+  detections_per_image: 100
+  eval_period: 5000
+  precise_bn_enabled: false
+
+dataloader:
+  num_workers: 4
+  aspect_ratio_grouping: true
+  sampler_train: TrainingSampler
+  filter_empty_annotations: true
+
+auto_config:
+  enabled: false
