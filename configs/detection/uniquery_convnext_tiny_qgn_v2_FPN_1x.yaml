@@ -1,7 +1,7 @@
-# QueryRCNN QGN v2 — ConvNeXt-Tiny(DINOv3) + FPN + QueryGenerator.
+# UniQuery QGN v2 — ConvNeXt-Tiny(DINOv3) + FPN + UniQueryGenerator.
 # Production-candidate v2. NOT YET QUEUED (prepared 2026-06-07).
 #
-# Relationship to v1 (query_rcnn_convnext_tiny_qgn2_FPN_1x, the 90k run in
+# Relationship to v1 (uniquery_convnext_tiny_qgn2_FPN_1x, the 90k run in
 # flight): v1 is the purist one-variable run (QGN-2, everything else == the
 # 46.68 flagship). v2 layers on the two config-only fixes the per-class
 # analysis pointed at — see qgn_program_log.md, entry 2026-06-07.
@@ -29,7 +29,7 @@
 #   small-object (APs) advantage must NOT regress.
 
 model:
-  meta_architecture: query_rcnn
+  meta_architecture: uniquery
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
@@ -44,7 +44,7 @@ model:
     fuse_type: sum
   roi_heads:
     num_classes: 80
-  query_rcnn_head:
+  uniquery_head:
     num_proposals: 300
     hidden_dim: 256
     num_heads: 8
@@ -52,7 +52,7 @@ model:
     # truncates at eval/export with zero change to the trained weights.
     num_stages: 3
     inference_num_stages: 2
-    query_generator: true
+    uniquery_generator: true
     dim_feedforward: 2048
     dim_dynamic: 64
     pooler_resolution: 7

@@ -1,4 +1,4 @@
-"""Hungarian-matching set prediction loss for QueryRCNN.
+"""Hungarian-matching set prediction loss for UniQuery.
 
 Faithfully follows the original Sparse R-CNN (PeizeSun/SparseR-CNN)
 loss computation: sigmoid focal loss with sum reduction, L1 on

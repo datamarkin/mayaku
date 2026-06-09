@@ -1,8 +1,8 @@
-# QueryRCNN — ConvNeXt-Tiny + FPN, COCO 1x from ImageNet-22k.
+# UniQuery — ConvNeXt-Tiny + FPN, COCO 1x from ImageNet-22k.
 #
 # Reference: Faster R-CNN + DINOv3-distilled-tiny + plain AdamW + 1x = 45.02 AP.
 # This config swaps two things relative to that reference:
-#   - Head:     Faster R-CNN  ->  QueryRCNN (Sparse R-CNN-style iterative dynamic head).
+#   - Head:     Faster R-CNN  ->  UniQuery (Sparse R-CNN-style iterative dynamic head).
 #   - Backbone: DINOv3-distill  ->  ImageNet-22k supervised (convnext_tiny_22k_224_v1.pth).
 # An earlier informal test showed v1-22k was within striking distance of DINOv3
 # on COCO full schedule with Faster R-CNN, so the 22k checkpoint is a fair start.
@@ -20,7 +20,7 @@
 # the canonical (0.0, 0.0, 0.4, 0.5, 0.6, 0.7) so the two are directly comparable.
 
 model:
-  meta_architecture: query_rcnn
+  meta_architecture: uniquery
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
@@ -34,9 +34,9 @@ model:
     norm: ''
     fuse_type: sum
   roi_heads:
-    # QueryRCNN ignores most roi_heads knobs; only num_classes is read by the factory.
+    # UniQuery ignores most roi_heads knobs; only num_classes is read by the factory.
     num_classes: 80
-  query_rcnn_head:
+  uniquery_head:
     # "Full" head — matches published Sparse R-CNN COCO config.
     num_proposals: 300
     hidden_dim: 256
@@ -61,7 +61,7 @@ input:
   min_size_test: 800
   max_size_test: 1333
   random_flip: horizontal
-  # Color jitter on — the FRCNN baseline used it and it transfers cleanly to QueryRCNN.
+  # Color jitter on — the FRCNN baseline used it and it transfers cleanly to UniQuery.
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
   color_jitter_contrast: 0.4

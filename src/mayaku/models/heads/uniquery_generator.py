@@ -1,4 +1,4 @@
-"""Query Generation Network — image-conditioned query init for QueryRCNN.
+"""Query Generation Network — image-conditioned query init for UniQuery.
 
 Follows Featurized Query R-CNN (arXiv 2206.06258): a light anchor-free
 dense head on FPN levels predicts, per location,
@@ -30,10 +30,10 @@ from mayaku.models.losses.set_criterion import (
     paired_generalized_box_iou,
 )
 
-__all__ = ["QueryGenerator", "qgn_loss"]
+__all__ = ["UniQueryGenerator", "qgn_loss"]
 
 
-class QueryGenerator(nn.Module):
+class UniQueryGenerator(nn.Module):
     """Dense scorer over FPN levels emitting top-K featurized queries."""
 
     def __init__(

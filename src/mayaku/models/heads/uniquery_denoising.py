@@ -1,4 +1,4 @@
-"""DN-DETR-style query denoising for QueryRCNN (box-only).
+"""DN-DETR-style query denoising for UniQuery (box-only).
 
 Builds auxiliary queries from noised GT boxes. The head feeds them through
 the same refinement stages — isolated from the matching queries by an

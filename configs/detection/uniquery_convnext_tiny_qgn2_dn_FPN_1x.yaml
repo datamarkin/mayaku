@@ -1,56 +1,59 @@
-# QueryRCNN NANO — ConvNeXt-Femto(DINOv3-distilled) + thin FPN + QGN, 2 stages.
-# Second point on the ~10-15M small-model menu (qgn_program_log.md, 2026-06-07).
+# UniQuery QGN-2 + DENOISING — ConvNeXt-Tiny(DINOv3), COCO 1x.
 #
-# Target: ~12.6M total, params-optimal, more refinement depth than the pico/
-# 1-stage point. Tests the weaker-backbone end of the menu. From-backbone init
-# (h=128 shape mismatch, no warm-start). 640px.
+# A/B against the v1 QGN-2 run (uniquery_convnext_tiny_qgn2_FPN_1x): IDENTICAL
+# recipe — same backbone, 800px, eff. batch 16, AMP off, 90k, from-backbone —
+# except DN-DETR-style box denoising is ON. The single changed variable is DN,
+# so the convergence delta at matched iters vs the v1 curve
+# (5k 16.4 / 10k 29.2 / 15k 34.3 / 20k 36.5 / ... / 50k 43.9) isolates DN's
+# effect. Hypothesis (qgn_program_log): DN helps at 2 stages where the
+# 6-stage cascade's supervision density isn't there to absorb it.
 #
-# Same head shrink as the pico nano (h=128, fpn 128, ffn 1024) but 2 stages,
-# so cascade_iou is meaningful and ON: (0.0, 0.5) — late-stage IoU floor for
-# localization polish (measured +0.34 on coco_4k at h=256).
-# P6/P7: not yet (pending module); large-object AP expected to suffer.
-#
-# Pre-registered expectation [ASSUMED]: a touch below the pico/1-stage point
-# on backbone strength but with more refinement; both ~30-34 AP at 1x. The
-# pair maps two points of the size/AP curve.
+# DN is training-only (queries dropped at inference) -> zero deployment cost.
+# dn_groups=5 (lighter than the FRCNN reference's 10) because UniQuery's
+# per-stage self-attention is O(queries^2); raise if memory allows.
 
 model:
-  meta_architecture: query_rcnn
+  meta_architecture: uniquery
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_femto
-    weights_path: /home/dataserver/Projects/ConvNeXt-v1.5/runs/atto-femto/epoch_094_convnext_femto.pt
+    name: convnext_tiny
+    weights_path: /mnt/markin/Intranet/dinov3/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth
     freeze_at: 0
     norm: FrozenBN
   fpn:
     in_features: [res2, res3, res4, res5]
-    out_channels: 128
+    out_channels: 256
     norm: ''
     fuse_type: sum
   roi_heads:
     num_classes: 80
-  query_rcnn_head:
+  uniquery_head:
     num_proposals: 300
-    hidden_dim: 128
+    hidden_dim: 256
     num_heads: 8
     num_stages: 2
-    query_generator: true
-    dim_feedforward: 1024
+    uniquery_generator: true
+    dim_feedforward: 2048
     dim_dynamic: 64
     pooler_resolution: 7
     dropout: 0.0
     cost_class: 2.0
     cost_bbox: 5.0
     cost_giou: 2.0
-    cascade_iou_thresholds: [0.0, 0.5]
+    cascade_iou_thresholds: []
+    # --- the one change vs v1 ---
+    denoising: true
+    dn_groups: 5
+    dn_box_noise_scale: 0.4
+    dn_loss_weight: 1.0
 
 input:
-  min_size_train: [512, 544, 576, 608, 640]
-  max_size_train: 1067
+  min_size_train: [640, 672, 704, 736, 768, 800]
+  max_size_train: 1333
   min_size_train_sampling: choice
-  min_size_test: 640
-  max_size_test: 1067
+  min_size_test: 800
+  max_size_test: 1333
   random_flip: horizontal
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
@@ -77,8 +80,8 @@ solver:
   warmup_factor: 0.001
   warmup_method: linear
 
-  ims_per_batch: 4
-  grad_accum_steps: 4
+  ims_per_batch: 2
+  grad_accum_steps: 8
 
   clip_gradients_enabled: true
   clip_gradients_value: 1.0

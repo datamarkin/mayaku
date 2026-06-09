@@ -1,4 +1,4 @@
-"""Dynamic instance mask head for QueryRCNN (QueryInst pattern).
+"""Dynamic instance mask head for UniQuery (QueryInst pattern).
 
 Generates per-instance convolution kernels from obj_features and applies
 them to ROI-pooled FPN features. Produces class-agnostic masks.
@@ -10,10 +10,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-__all__ = ["QueryDynamicMaskHead"]
+__all__ = ["UniQueryDynamicMaskHead"]
 
 
-class QueryDynamicMaskHead(nn.Module):
+class UniQueryDynamicMaskHead(nn.Module):
     """Dynamic mask head: spatial conv stack + per-instance kernel from obj_features.
 
     Architecture:
@@ -67,7 +67,7 @@ class QueryDynamicMaskHead(nn.Module):
         """
         Args:
             roi_features: (R, C, P, P) from ROIPooler at pooler_resolution.
-            obj_features: (R, hidden_dim) per-instance embeddings from QueryStage.
+            obj_features: (R, hidden_dim) per-instance embeddings from UniQueryStage.
         Returns:
             mask_logits: (R, 1, mask_resolution, mask_resolution) class-agnostic.
         """

@@ -17,7 +17,7 @@ from mayaku.models.detectors import (
     build_faster_rcnn,
     build_keypoint_rcnn,
     build_mask_rcnn,
-    build_query_rcnn,
+    build_uniquery,
 )
 
 __all__ = ["build_detector"]
@@ -38,6 +38,6 @@ def build_detector(cfg: MayakuConfig, *, backbone_weights: str | None = None) ->
         return build_mask_rcnn(cfg, backbone_weights=backbone_weights)
     if arch == "keypoint_rcnn":
         return build_keypoint_rcnn(cfg, backbone_weights=backbone_weights)
-    if arch == "query_rcnn":
-        return build_query_rcnn(cfg, backbone_weights=backbone_weights)
+    if arch == "uniquery":
+        return build_uniquery(cfg, backbone_weights=backbone_weights)
     raise ValueError(f"unknown meta_architecture {arch!r}")

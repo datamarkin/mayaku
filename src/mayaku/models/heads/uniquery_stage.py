@@ -1,4 +1,4 @@
-"""Single iterative refinement stage for QueryRCNN.
+"""Single iterative refinement stage for UniQuery.
 
 Faithfully follows the original Sparse R-CNN (PeizeSun/SparseR-CNN)
 RCNNHead and DynamicConv architecture: self-attention, dynamic instance
@@ -13,7 +13,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-__all__ = ["DynamicConv", "QueryStage"]
+__all__ = ["DynamicConv", "UniQueryStage"]
 
 _DEFAULT_SCALE_CLAMP = math.log(100000.0 / 16)
 
@@ -78,7 +78,7 @@ class DynamicConv(nn.Module):
         return out
 
 
-class QueryStage(nn.Module):
+class UniQueryStage(nn.Module):
     """One stage of iterative refinement — matches original RCNNHead.
 
     Pipeline: self-attn → DynamicConv → FFN → cls MLP → reg MLP → predictions.

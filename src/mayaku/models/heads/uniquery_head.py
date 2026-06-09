@@ -1,4 +1,4 @@
-"""QueryHead — iterative dynamic refinement head for QueryRCNN.
+"""UniQueryHead — iterative dynamic refinement head for UniQuery.
 
 Matches the original Sparse R-CNN DynamicHead: learned proposal boxes
 in cxcywh (converted to absolute xyxy before each stage), learned
@@ -13,15 +13,15 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor, nn
 
-from mayaku.models.heads.query_denoising import build_dn_groups, dn_attention_mask
-from mayaku.models.heads.query_generator import QueryGenerator
-from mayaku.models.heads.query_stage import QueryStage
+from mayaku.models.heads.uniquery_denoising import build_dn_groups, dn_attention_mask
+from mayaku.models.heads.uniquery_generator import UniQueryGenerator
+from mayaku.models.heads.uniquery_stage import UniQueryStage
 from mayaku.models.poolers import ROIPooler
 
-__all__ = ["QueryHead"]
+__all__ = ["UniQueryHead"]
 
 
-class QueryHead(nn.Module):
+class UniQueryHead(nn.Module):
     """Iterative refinement head with learned proposals.
 
     Proposal boxes are stored as cxcywh (cx,cy=0.5, w,h=1.0 at init)
@@ -43,7 +43,7 @@ class QueryHead(nn.Module):
         pooler_resolution: int = 7,
         pooler_scales: Sequence[float] = (1 / 4, 1 / 8, 1 / 16, 1 / 32),
         pooler_sampling_ratio: int = 0,
-        query_generator: QueryGenerator | None = None,
+        uniquery_generator: UniQueryGenerator | None = None,
         qgn_feature_indices: Sequence[int] = (),
         denoising: bool = False,
         dn_groups: int = 5,
@@ -56,7 +56,7 @@ class QueryHead(nn.Module):
 
         # Optional QGN (Featurized Query R-CNN): image-conditioned queries
         # replace the blind learned embeddings below.
-        self.query_generator = query_generator
+        self.uniquery_generator = uniquery_generator
         self.qgn_feature_indices = tuple(qgn_feature_indices)
 
         # Optional DN-DETR-style denoising (box-only). A single shared content
@@ -68,7 +68,7 @@ class QueryHead(nn.Module):
         if denoising:
             self.dn_query_feat = nn.Embedding(1, hidden_dim)
 
-        if query_generator is None:
+        if uniquery_generator is None:
             # Learned proposals (original init: cx,cy=0.5; w,h=1.0)
             self.init_proposal_features = nn.Embedding(num_proposals, hidden_dim)
             self.init_proposal_boxes = nn.Embedding(num_proposals, 4)
@@ -85,7 +85,7 @@ class QueryHead(nn.Module):
         # Refinement stages (independent params per stage, like original's _get_clones)
         self.head_series = nn.ModuleList(
             [
-                QueryStage(
+                UniQueryStage(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
                     dim_feedforward=dim_feedforward,
@@ -108,7 +108,7 @@ class QueryHead(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         for stage in self.head_series:
-            assert isinstance(stage, QueryStage)
+            assert isinstance(stage, UniQueryStage)
             assert stage.class_logits.bias is not None
             nn.init.constant_(stage.class_logits.bias, self.bias_value)
 
@@ -143,9 +143,9 @@ class QueryHead(nn.Module):
         )  # (B, 4)
 
         qgn_out: dict[str, Tensor] | None = None
-        if self.query_generator is not None:
+        if self.uniquery_generator is not None:
             qgn_feats = [features[i] for i in self.qgn_feature_indices]
-            qgn_out = self.query_generator(
+            qgn_out = self.uniquery_generator(
                 qgn_feats,
                 image_sizes,
                 num_proposals_override=num_proposals_override,

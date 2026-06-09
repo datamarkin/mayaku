@@ -1,4 +1,4 @@
-"""QueryRCNN detector — backbone + FPN + QueryHead (no RPN, no NMS).
+"""UniQuery detector — backbone + FPN + UniQueryHead (no RPN, no NMS).
 
 Follows the original Sparse R-CNN (PeizeSun/SparseR-CNN) architecture:
 absolute xyxy boxes throughout, Faster-RCNN-style delta encoding,
@@ -26,9 +26,9 @@ from mayaku.models.heads.keypoint_head import (
     select_proposals_with_visible_keypoints,
 )
 from mayaku.models.heads.mask_head import mask_rcnn_inference, mask_rcnn_loss
-from mayaku.models.heads.query_generator import QueryGenerator, qgn_loss
-from mayaku.models.heads.query_head import QueryHead
-from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
+from mayaku.models.heads.uniquery_generator import UniQueryGenerator, qgn_loss
+from mayaku.models.heads.uniquery_head import UniQueryHead
+from mayaku.models.heads.uniquery_mask_head import UniQueryDynamicMaskHead
 from mayaku.models.losses.set_criterion import SetCriterion
 from mayaku.models.necks import FPN
 from mayaku.models.poolers import ROIPooler
@@ -36,16 +36,16 @@ from mayaku.structures.boxes import Boxes
 from mayaku.structures.image_list import ImageList
 from mayaku.structures.instances import Instances
 
-__all__ = ["QueryRCNN", "build_query_rcnn"]
+__all__ = ["UniQuery", "build_uniquery"]
 
 
-class QueryRCNN(nn.Module):
+class UniQuery(nn.Module):
     """Set-prediction detector with learned query proposals."""
 
     def __init__(
         self,
         backbone: nn.Module,
-        head: QueryHead,
+        head: UniQueryHead,
         criterion: SetCriterion,
         *,
         pixel_mean: Sequence[float],
@@ -57,7 +57,7 @@ class QueryRCNN(nn.Module):
         detections_per_image: int = 100,
         inference_num_stages: int | None = None,
         inference_num_proposals: int | None = None,
-        mask_head: QueryDynamicMaskHead | None = None,
+        mask_head: UniQueryDynamicMaskHead | None = None,
         mask_pooler: ROIPooler | None = None,
         keypoint_head: nn.Module | None = None,
         keypoint_pooler: ROIPooler | None = None,
@@ -108,13 +108,13 @@ class QueryRCNN(nn.Module):
             dn_out = outputs_list[-1].pop("dn", None)
             loss_dict = self.criterion(outputs_list, targets)
             if qgn_out is not None:
-                assert self.head.query_generator is not None
+                assert self.head.uniquery_generator is not None
                 loss_dict.update(
                     qgn_loss(
                         qgn_out,
                         targets,
                         qgn_out["centers"],
-                        quality_alpha=self.head.query_generator.quality_alpha,
+                        quality_alpha=self.head.uniquery_generator.quality_alpha,
                     )
                 )
             if dn_out is not None:
@@ -432,22 +432,22 @@ def _strip_stage_suffix(key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> QueryRCNN:
-    if cfg.model.meta_architecture != "query_rcnn":
+def build_uniquery(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> UniQuery:
+    if cfg.model.meta_architecture != "uniquery":
         raise ValueError(
-            f"build_query_rcnn requires meta_architecture='query_rcnn'; got "
+            f"build_uniquery requires meta_architecture='uniquery'; got "
             f"{cfg.model.meta_architecture!r}"
         )
 
-    qr_cfg = cfg.model.query_rcnn_head
-    if qr_cfg is None:
-        raise ValueError("query_rcnn requires model.query_rcnn_head config section")
+    uq_cfg = cfg.model.uniquery_head
+    if uq_cfg is None:
+        raise ValueError("uniquery requires model.uniquery_head config section")
 
     bottom_up = build_bottom_up(cfg.model.backbone, weights=backbone_weights)  # type: ignore[arg-type]
 
     # Optional conv-based P6/P7 for large-object coverage (QGN runs P3-P7).
     top_block = None
-    if qr_cfg.fpn_p6p7:
+    if uq_cfg.fpn_p6p7:
         from mayaku.models.necks.fpn import LastLevelP6P7
 
         top_block = LastLevelP6P7(cfg.model.fpn.out_channels, cfg.model.fpn.out_channels)
@@ -469,71 +469,71 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
 
     # Optional QGN (Featurized Query R-CNN): image-conditioned queries.
     # Runs on stride>=8 levels only (the paper found P2 adds cost, no recall).
-    query_generator: QueryGenerator | None = None
+    uniquery_generator: UniQueryGenerator | None = None
     qgn_feature_indices: tuple[int, ...] = ()
-    if qr_cfg.query_generator:
+    if uq_cfg.uniquery_generator:
         strides = [in_shapes[k].stride for k in feature_keys]
         qgn_feature_indices = tuple(i for i, s in enumerate(strides) if s >= 8)
-        query_generator = QueryGenerator(
+        uniquery_generator = UniQueryGenerator(
             in_channels=cfg.model.fpn.out_channels,
-            hidden_dim=qr_cfg.hidden_dim,
-            num_proposals=qr_cfg.num_proposals,
+            hidden_dim=uq_cfg.hidden_dim,
+            num_proposals=uq_cfg.num_proposals,
             strides=tuple(strides[i] for i in qgn_feature_indices),
-            quality_alpha=qr_cfg.qgn_quality_alpha,
+            quality_alpha=uq_cfg.qgn_quality_alpha,
         )
 
-    head = QueryHead(
-        num_proposals=qr_cfg.num_proposals,
-        hidden_dim=qr_cfg.hidden_dim,
-        num_heads=qr_cfg.num_heads,
-        num_stages=qr_cfg.num_stages,
-        dim_feedforward=qr_cfg.dim_feedforward,
-        dim_dynamic=qr_cfg.dim_dynamic,
-        dropout=qr_cfg.dropout,
+    head = UniQueryHead(
+        num_proposals=uq_cfg.num_proposals,
+        hidden_dim=uq_cfg.hidden_dim,
+        num_heads=uq_cfg.num_heads,
+        num_stages=uq_cfg.num_stages,
+        dim_feedforward=uq_cfg.dim_feedforward,
+        dim_dynamic=uq_cfg.dim_dynamic,
+        dropout=uq_cfg.dropout,
         num_classes=num_classes,
-        pooler_resolution=qr_cfg.pooler_resolution,
+        pooler_resolution=uq_cfg.pooler_resolution,
         pooler_scales=pooler_scales,
         pooler_sampling_ratio=0,
-        query_generator=query_generator,
+        uniquery_generator=uniquery_generator,
         qgn_feature_indices=qgn_feature_indices,
-        denoising=qr_cfg.denoising,
-        dn_groups=qr_cfg.dn_groups,
-        dn_box_noise_scale=qr_cfg.dn_box_noise_scale,
+        denoising=uq_cfg.denoising,
+        dn_groups=uq_cfg.dn_groups,
+        dn_box_noise_scale=uq_cfg.dn_box_noise_scale,
     )
 
     criterion = SetCriterion(
         num_classes=num_classes,
-        cost_class=qr_cfg.cost_class,
-        cost_bbox=qr_cfg.cost_bbox,
-        cost_giou=qr_cfg.cost_giou,
-        cascade_iou_thresholds=qr_cfg.cascade_iou_thresholds,
+        cost_class=uq_cfg.cost_class,
+        cost_bbox=uq_cfg.cost_bbox,
+        cost_giou=uq_cfg.cost_giou,
+        cascade_iou_thresholds=uq_cfg.cascade_iou_thresholds,
     )
 
     weight_dict: dict[str, float] = {
-        "loss_ce": qr_cfg.cost_class,
-        "loss_bbox": qr_cfg.cost_bbox,
-        "loss_giou": qr_cfg.cost_giou,
+        "loss_ce": uq_cfg.cost_class,
+        "loss_bbox": uq_cfg.cost_bbox,
+        "loss_giou": uq_cfg.cost_giou,
     }
-    if query_generator is not None:
-        weight_dict["loss_qgn_obj"] = qr_cfg.qgn_obj_weight
-        weight_dict["loss_qgn_giou"] = qr_cfg.qgn_giou_weight
-    if qr_cfg.denoising:
+    if uniquery_generator is not None:
+        weight_dict["loss_qgn_obj"] = uq_cfg.qgn_obj_weight
+        weight_dict["loss_qgn_giou"] = uq_cfg.qgn_giou_weight
+    if uq_cfg.denoising:
         # DN box losses scaled like the matching box losses, times dn_loss_weight.
-        weight_dict["loss_dn_bbox"] = qr_cfg.cost_bbox * qr_cfg.dn_loss_weight
-        weight_dict["loss_dn_giou"] = qr_cfg.cost_giou * qr_cfg.dn_loss_weight
+        weight_dict["loss_dn_bbox"] = uq_cfg.cost_bbox * uq_cfg.dn_loss_weight
+        weight_dict["loss_dn_giou"] = uq_cfg.cost_giou * uq_cfg.dn_loss_weight
 
     # Phase 2: Mask head
-    mask_head: QueryDynamicMaskHead | None = None
+    mask_head: UniQueryDynamicMaskHead | None = None
     mask_pooler: ROIPooler | None = None
-    if cfg.model.query_rcnn_mask is not None:
-        mask_cfg = cfg.model.query_rcnn_mask
+    if cfg.model.uniquery_mask is not None:
+        mask_cfg = cfg.model.uniquery_mask
         mask_pooler = ROIPooler(
             output_size=mask_cfg.pooler_resolution,
             scales=pooler_scales,
             sampling_ratio=0,
         )
-        mask_head = QueryDynamicMaskHead(
-            hidden_dim=qr_cfg.hidden_dim,
+        mask_head = UniQueryDynamicMaskHead(
+            hidden_dim=uq_cfg.hidden_dim,
             conv_dim=mask_cfg.conv_dim,
             num_conv=mask_cfg.num_conv,
             mask_resolution=mask_cfg.mask_resolution,
@@ -544,8 +544,8 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
     # Phase 3: Keypoint head
     keypoint_head: KRCNNConvDeconvUpsampleHead | None = None
     keypoint_pooler: ROIPooler | None = None
-    if cfg.model.query_rcnn_keypoint is not None:
-        kp_cfg = cfg.model.query_rcnn_keypoint
+    if cfg.model.uniquery_keypoint is not None:
+        kp_cfg = cfg.model.uniquery_keypoint
         from mayaku.models.backbones._base import ShapeSpec
 
         keypoint_pooler = ROIPooler(
@@ -559,7 +559,7 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         )
         weight_dict["loss_keypoint"] = kp_cfg.loss_weight
 
-    return QueryRCNN(
+    return UniQuery(
         backbone=fpn,
         head=head,
         criterion=criterion,
@@ -570,8 +570,8 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         feature_keys=feature_keys,
         score_thresh=cfg.model.roi_heads.score_thresh_test,
         detections_per_image=cfg.test.detections_per_image,
-        inference_num_stages=qr_cfg.inference_num_stages,
-        inference_num_proposals=qr_cfg.inference_num_proposals,
+        inference_num_stages=uq_cfg.inference_num_stages,
+        inference_num_proposals=uq_cfg.inference_num_proposals,
         mask_head=mask_head,
         mask_pooler=mask_pooler,
         keypoint_head=keypoint_head,

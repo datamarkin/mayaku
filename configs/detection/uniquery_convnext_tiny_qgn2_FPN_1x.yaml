@@ -1,19 +1,22 @@
-# QueryRCNN QGN-2 + DENOISING — ConvNeXt-Tiny(DINOv3), COCO 1x.
+# UniQuery QGN-2 — ConvNeXt-Tiny(DINOv3) + FPN + UniQueryGenerator, 2 stages, COCO 1x.
 #
-# A/B against the v1 QGN-2 run (query_rcnn_convnext_tiny_qgn2_FPN_1x): IDENTICAL
-# recipe — same backbone, 800px, eff. batch 16, AMP off, 90k, from-backbone —
-# except DN-DETR-style box denoising is ON. The single changed variable is DN,
-# so the convergence delta at matched iters vs the v1 curve
-# (5k 16.4 / 10k 29.2 / 15k 34.3 / 20k 36.5 / ... / 50k 43.9) isolates DN's
-# effect. Hypothesis (qgn_program_log): DN helps at 2 stages where the
-# 6-stage cascade's supervision density isn't there to absorb it.
+# The production-candidate run. Identical recipe to the 46.68-AP flagship
+# (tv_tier3_uniquery_convnext_tiny_coco: 6 blind stages, this same backbone,
+# 800px multi-scale, eff. batch 16, AMP off, 90k) except:
+#   - Head: 6 blind stages -> 2 stages + QGN (Featurized Query R-CNN, 2206.06258).
+#   - Batch geometry: 2x8 instead of 4x4 (same effective 16) — 800px at bs4
+#     does not fit the RTX 3060's 12GB with AMP off.
+# One-variable change vs the flagship: whatever AP comes out is attributable
+# to the head swap alone.
 #
-# DN is training-only (queries dropped at inference) -> zero deployment cost.
-# dn_groups=5 (lighter than the FRCNN reference's 10) because QueryRCNN's
-# per-stage self-attention is O(queries^2); raise if memory allows.
+# Evidence behind the bet (2026-06): coco_4k arms, same warm-started budget —
+#   qgn2 35.07 vs blind2 32.18 vs no-retrain truncation 31.0.
+# Paper reference: 2-stage+QGN 44.6 ~= 6-stage blind 44.5 (R50-3x).
+# Pre-registered expectation for this run: 46-47; below ~45.5 means the QGN
+# implementation loses something at 90k that the 4k subset didn't expose.
 
 model:
-  meta_architecture: query_rcnn
+  meta_architecture: uniquery
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
@@ -27,28 +30,29 @@ model:
     norm: ''
     fuse_type: sum
   roi_heads:
+    # UniQuery ignores most roi_heads knobs; only num_classes is read by the factory.
     num_classes: 80
-  query_rcnn_head:
+  uniquery_head:
     num_proposals: 300
     hidden_dim: 256
     num_heads: 8
+    # The head swap: 2 stages fed by an image-conditioned UniQueryGenerator
+    # (3x3 conv + 1x1 branches on P3-P7) instead of 6 stages from learned
+    # embeddings. QGN loss defaults: quality_alpha 0.8, obj 1.0 / giou 2.0.
     num_stages: 2
-    query_generator: true
+    uniquery_generator: true
     dim_feedforward: 2048
     dim_dynamic: 64
     pooler_resolution: 7
     dropout: 0.0
+    # Hungarian matcher cost weights (Sparse R-CNN canonical).
     cost_class: 2.0
     cost_bbox: 5.0
     cost_giou: 2.0
     cascade_iou_thresholds: []
-    # --- the one change vs v1 ---
-    denoising: true
-    dn_groups: 5
-    dn_box_noise_scale: 0.4
-    dn_loss_weight: 1.0
 
 input:
+  # Multi-scale training (640..800 short side), 1333 long-side cap. From FRCNN baseline.
   min_size_train: [640, 672, 704, 736, 768, 800]
   max_size_train: 1333
   min_size_train_sampling: choice
@@ -75,11 +79,14 @@ solver:
 
   lr_scheduler_name: WarmupCosineLR
   max_iter: 90000
+  # steps is unused by cosine but kept for schema validity.
   steps: [60000, 80000]
   warmup_iters: 1500
   warmup_factor: 0.001
   warmup_method: linear
 
+  # Effective batch 16 (2 imgs/step x 8 accum) — matches the flagship's
+  # effective batch; geometry differs only because of the 12GB card.
   ims_per_batch: 2
   grad_accum_steps: 8
 
@@ -88,6 +95,7 @@ solver:
   clip_gradients_type: norm
   grad_norm_log_enabled: false
 
+  # AMP off — purist comparison against the flagship (also AMP off).
   amp_enabled: false
   amp_dtype: fp16
 

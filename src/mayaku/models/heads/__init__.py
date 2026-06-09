@@ -22,9 +22,9 @@ from mayaku.models.heads.mask_head import (
     mask_rcnn_loss,
     select_foreground_proposals,
 )
-from mayaku.models.heads.query_head import QueryHead
-from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
-from mayaku.models.heads.query_stage import DynamicConv, QueryStage
+from mayaku.models.heads.uniquery_head import UniQueryHead
+from mayaku.models.heads.uniquery_mask_head import UniQueryDynamicMaskHead
+from mayaku.models.heads.uniquery_stage import DynamicConv, UniQueryStage
 
 __all__ = [
     "DynamicConv",
@@ -32,9 +32,9 @@ __all__ = [
     "FastRCNNOutputLayers",
     "KRCNNConvDeconvUpsampleHead",
     "MaskRCNNConvUpsampleHead",
-    "QueryDynamicMaskHead",
-    "QueryHead",
-    "QueryStage",
+    "UniQueryDynamicMaskHead",
+    "UniQueryHead",
+    "UniQueryStage",
     "build_box_head",
     "build_keypoint_head",
     "build_mask_head",

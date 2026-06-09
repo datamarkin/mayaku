@@ -1,4 +1,4 @@
-"""Smoke tests for QueryRCNN detector."""
+"""Smoke tests for UniQuery detector."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from mayaku.config.schemas import MayakuConfig
-from mayaku.models.detectors.query_rcnn import build_query_rcnn
-from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
-from mayaku.models.heads.query_stage import DynamicConv
+from mayaku.models.detectors.uniquery import build_uniquery
+from mayaku.models.heads.uniquery_mask_head import UniQueryDynamicMaskHead
+from mayaku.models.heads.uniquery_stage import DynamicConv
 from mayaku.models.losses.set_criterion import SetCriterion, generalized_box_iou
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.instances import Instances
@@ -18,9 +18,9 @@ from mayaku.structures.masks import PolygonMasks
 def _make_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5) -> MayakuConfig:
     return MayakuConfig(
         model={
-            "meta_architecture": "query_rcnn",
+            "meta_architecture": "uniquery",
             "backbone": {"name": "resnet50"},
-            "query_rcnn_head": {
+            "uniquery_head": {
                 "num_proposals": num_proposals,
                 "num_stages": num_stages,
             },
@@ -34,14 +34,14 @@ def _make_mask_cfg(
 ) -> MayakuConfig:
     return MayakuConfig(
         model={
-            "meta_architecture": "query_rcnn",
+            "meta_architecture": "uniquery",
             "backbone": {"name": "resnet50"},
-            "query_rcnn_head": {
+            "uniquery_head": {
                 "num_proposals": num_proposals,
                 "num_stages": num_stages,
             },
             "roi_heads": {"num_classes": num_classes},
-            "query_rcnn_mask": {},
+            "uniquery_mask": {},
         }
     )
 
@@ -150,10 +150,10 @@ class TestDynamicConv:
         assert out.shape == (20, 256)
 
 
-class TestQueryRCNN:
+class TestUniQuery:
     def test_forward_train(self) -> None:
         cfg = _make_cfg()
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.train()
         batch = _make_batch(batch_size=2)
         losses = model(batch)
@@ -164,7 +164,7 @@ class TestQueryRCNN:
 
     def test_forward_inference(self) -> None:
         cfg = _make_cfg(num_proposals=20)
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.eval()
         with torch.no_grad():
             results = model([{"image": torch.randn(3, 256, 256)}])
@@ -176,7 +176,7 @@ class TestQueryRCNN:
 
     def test_gradient_flow(self) -> None:
         cfg = _make_cfg(num_proposals=5, num_stages=3)
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=1)
         losses = model(batch)
@@ -189,7 +189,7 @@ class TestQueryRCNN:
     def test_loss_balance(self) -> None:
         """Verify weight_dict is applied and losses are balanced."""
         cfg = _make_cfg(num_proposals=50, num_stages=2, num_classes=10)
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=5, num_classes=10)
         losses = model(batch)
@@ -207,29 +207,29 @@ class TestQueryRCNN:
     def test_config_from_yaml_schema(self) -> None:
         cfg = MayakuConfig(
             model={
-                "meta_architecture": "query_rcnn",
-                "query_rcnn_head": {"num_proposals": 300, "num_stages": 6},
+                "meta_architecture": "uniquery",
+                "uniquery_head": {"num_proposals": 300, "num_stages": 6},
             }
         )
-        assert cfg.model.query_rcnn_head is not None
-        assert cfg.model.query_rcnn_head.num_proposals == 300
+        assert cfg.model.uniquery_head is not None
+        assert cfg.model.uniquery_head.num_proposals == 300
 
     def test_config_rejects_invalid_combination(self) -> None:
         with pytest.raises(Exception):
             MayakuConfig(
                 model={
-                    "meta_architecture": "query_rcnn",
+                    "meta_architecture": "uniquery",
                     "mask_on": True,
-                    "query_rcnn_head": {},
+                    "uniquery_head": {},
                 }
             )
 
     def test_cascade_iou_training(self) -> None:
         cfg = MayakuConfig(
             model={
-                "meta_architecture": "query_rcnn",
+                "meta_architecture": "uniquery",
                 "backbone": {"name": "resnet50"},
-                "query_rcnn_head": {
+                "uniquery_head": {
                     "num_proposals": 10,
                     "num_stages": 3,
                     "cascade_iou_thresholds": [0.0, 0.3, 0.5],
@@ -237,7 +237,7 @@ class TestQueryRCNN:
                 "roi_heads": {"num_classes": 5},
             }
         )
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=3)
         losses = model(batch)
@@ -246,7 +246,7 @@ class TestQueryRCNN:
 
     def test_mask_forward_train(self) -> None:
         cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.train()
         batch = _make_batch(batch_size=2, num_gt=2, with_masks=True)
         losses = model(batch)
@@ -258,7 +258,7 @@ class TestQueryRCNN:
 
     def test_mask_forward_inference(self) -> None:
         cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.eval()
         with torch.no_grad():
             results = model([{"image": torch.randn(3, 256, 256)}])
@@ -270,7 +270,7 @@ class TestQueryRCNN:
 
     def test_mask_gradient_flow(self) -> None:
         cfg = _make_mask_cfg(num_proposals=5, num_stages=2, num_classes=5)
-        model = build_query_rcnn(cfg, backbone_weights=None)
+        model = build_uniquery(cfg, backbone_weights=None)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=2, with_masks=True)
         losses = model(batch)
@@ -280,7 +280,7 @@ class TestQueryRCNN:
         assert model.mask_head.kernel_fc.weight.grad.norm() > 0
 
     def test_dynamic_mask_head_shapes(self) -> None:
-        head = QueryDynamicMaskHead(hidden_dim=256, conv_dim=256, num_conv=4)
+        head = UniQueryDynamicMaskHead(hidden_dim=256, conv_dim=256, num_conv=4)
         roi_feats = torch.randn(5, 256, 14, 14)
         obj_feats = torch.randn(5, 256)
         out = head(roi_feats, obj_feats)
@@ -290,8 +290,8 @@ class TestQueryRCNN:
         with pytest.raises(Exception):
             MayakuConfig(
                 model={
-                    "meta_architecture": "query_rcnn",
-                    "query_rcnn_head": {
+                    "meta_architecture": "uniquery",
+                    "uniquery_head": {
                         "num_stages": 6,
                         "cascade_iou_thresholds": [0.0, 0.3],
                     },
@@ -304,21 +304,21 @@ def _make_qgn_cfg(
 ) -> MayakuConfig:
     return MayakuConfig(
         model={
-            "meta_architecture": "query_rcnn",
+            "meta_architecture": "uniquery",
             "backbone": {"name": "resnet50"},
-            "query_rcnn_head": {
+            "uniquery_head": {
                 "num_proposals": num_proposals,
                 "num_stages": num_stages,
-                "query_generator": True,
+                "uniquery_generator": True,
             },
             "roi_heads": {"num_classes": num_classes},
         }
     )
 
 
-class TestQueryGenerator:
+class TestUniQueryGenerator:
     def test_forward_train_loss_keys(self) -> None:
-        model = build_query_rcnn(_make_qgn_cfg())
+        model = build_uniquery(_make_qgn_cfg())
         model.train()
         losses = model(_make_batch(batch_size=2))
         for i in range(2):
@@ -329,7 +329,7 @@ class TestQueryGenerator:
             assert torch.isfinite(v), f"{k} not finite"
 
     def test_forward_inference(self) -> None:
-        model = build_query_rcnn(_make_qgn_cfg())
+        model = build_uniquery(_make_qgn_cfg())
         model.eval()
         with torch.no_grad():
             results = model(_make_batch(batch_size=2))
@@ -339,12 +339,12 @@ class TestQueryGenerator:
             assert inst.has("pred_boxes") and inst.has("scores") and inst.has("pred_classes")
 
     def test_gradient_flow_into_qgn(self) -> None:
-        model = build_query_rcnn(_make_qgn_cfg())
+        model = build_uniquery(_make_qgn_cfg())
         model.train()
         losses = model(_make_batch(batch_size=1))
         total = sum(losses.values())
         total.backward()
-        qgn = model.head.query_generator
+        qgn = model.head.uniquery_generator
         assert qgn.objectness.weight.grad is not None
         assert qgn.objectness.weight.grad.norm() > 0
         # query features feed the stages -> head losses must reach this branch
@@ -354,15 +354,15 @@ class TestQueryGenerator:
         assert qgn.ltrb.weight.grad is not None
 
     def test_no_blind_embeddings_when_qgn(self) -> None:
-        model = build_query_rcnn(_make_qgn_cfg())
+        model = build_uniquery(_make_qgn_cfg())
         assert (
             not hasattr(model.head, "init_proposal_boxes")
             or model.head.init_proposal_boxes is None
-            or model.head.query_generator is not None
+            or model.head.uniquery_generator is not None
         )
 
     def test_stage_truncation_inference(self) -> None:
-        model = build_query_rcnn(_make_qgn_cfg(num_stages=2))
+        model = build_uniquery(_make_qgn_cfg(num_stages=2))
         model.eval()
         model.inference_num_stages = 1
         with torch.no_grad():
@@ -370,7 +370,7 @@ class TestQueryGenerator:
         assert len(results) == 1
 
     def test_empty_targets(self) -> None:
-        model = build_query_rcnn(_make_qgn_cfg())
+        model = build_uniquery(_make_qgn_cfg())
         model.train()
         batch = _make_batch(batch_size=1, num_gt=1)
         inst = batch[0]["instances"]

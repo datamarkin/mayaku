@@ -49,9 +49,6 @@ __all__ = [
     "MayakuConfig",
     "MetaArchitecture",
     "ModelConfig",
-    "QueryRCNNHeadConfig",
-    "QueryRCNNKeypointConfig",
-    "QueryRCNNMaskConfig",
     "ROIBoxHeadConfig",
     "ROIHeadsConfig",
     "ROIKeypointHeadConfig",
@@ -59,6 +56,9 @@ __all__ = [
     "RPNConfig",
     "SolverConfig",
     "TestConfig",
+    "UniQueryHeadConfig",
+    "UniQueryKeypointConfig",
+    "UniQueryMaskConfig",
 ]
 
 BackboneName = Literal[
@@ -77,7 +77,7 @@ BackboneName = Literal[
     "convnext_base",
     "convnext_large",
 ]
-MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn", "query_rcnn"]
+MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn", "uniquery"]
 DeviceSetting = Literal["cpu", "mps", "cuda", "auto"]
 
 
@@ -339,12 +339,12 @@ class ROIHeadsConfig(_BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# QueryRCNN head
+# UniQuery head
 # ---------------------------------------------------------------------------
 
 
-class QueryRCNNHeadConfig(_BaseModel):
-    """QueryRCNN iterative dynamic head configuration.
+class UniQueryHeadConfig(_BaseModel):
+    """UniQuery iterative dynamic head configuration.
 
     Implements a set-prediction detector with learned proposals that
     iteratively refine via self-attention and dynamic convolution. No RPN,
@@ -368,7 +368,7 @@ class QueryRCNNHeadConfig(_BaseModel):
     # QGN (Featurized Query R-CNN, arXiv 2206.06258): image-conditioned
     # query initialization from a light dense scorer on FPN, replacing
     # the blind learned embeddings. Enables strong AP at fewer stages.
-    query_generator: bool = False
+    uniquery_generator: bool = False
     qgn_quality_alpha: Annotated[float, Field(ge=0.0, le=1.0)] = 0.8
     qgn_obj_weight: Annotated[float, Field(gt=0.0)] = 1.0
     qgn_giou_weight: Annotated[float, Field(gt=0.0)] = 2.0
@@ -401,7 +401,7 @@ class QueryRCNNHeadConfig(_BaseModel):
     inference_num_proposals: Annotated[int, Field(gt=0)] | None = None
 
     @model_validator(mode="after")
-    def _check_cascade_iou(self) -> QueryRCNNHeadConfig:
+    def _check_cascade_iou(self) -> UniQueryHeadConfig:
         t = self.cascade_iou_thresholds
         if t and len(t) != self.num_stages:
             raise ValueError(
@@ -426,8 +426,8 @@ class QueryRCNNHeadConfig(_BaseModel):
         return self
 
 
-class QueryRCNNMaskConfig(_BaseModel):
-    """QueryRCNN dynamic mask head (Phase 2 — not yet implemented)."""
+class UniQueryMaskConfig(_BaseModel):
+    """UniQuery dynamic mask head (Phase 2 — not yet implemented)."""
 
     pooler_resolution: Annotated[int, Field(gt=0)] = 14
     mask_resolution: Annotated[int, Field(gt=0)] = 28
@@ -436,8 +436,8 @@ class QueryRCNNMaskConfig(_BaseModel):
     loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
 
 
-class QueryRCNNKeypointConfig(_BaseModel):
-    """QueryRCNN keypoint head (Phase 3 — not yet implemented)."""
+class UniQueryKeypointConfig(_BaseModel):
+    """UniQuery keypoint head (Phase 3 — not yet implemented)."""
 
     pooler_resolution: Annotated[int, Field(gt=0)] = 14
     num_keypoints: Annotated[int, Field(gt=0)] = 17
@@ -480,10 +480,10 @@ class ModelConfig(_BaseModel):
     roi_mask_head: ROIMaskHeadConfig | None = None
     roi_keypoint_head: ROIKeypointHeadConfig | None = None
 
-    # QueryRCNN head configs (only used when meta_architecture == "query_rcnn")
-    query_rcnn_head: QueryRCNNHeadConfig | None = None
-    query_rcnn_mask: QueryRCNNMaskConfig | None = None
-    query_rcnn_keypoint: QueryRCNNKeypointConfig | None = None
+    # UniQuery head configs (only used when meta_architecture == "uniquery")
+    uniquery_head: UniQueryHeadConfig | None = None
+    uniquery_mask: UniQueryMaskConfig | None = None
+    uniquery_keypoint: UniQueryKeypointConfig | None = None
 
     @model_validator(mode="after")
     def _check_consistency(self) -> ModelConfig:
@@ -491,19 +491,19 @@ class ModelConfig(_BaseModel):
         # must agree. We treat meta_architecture as the single source of
         # truth for which heads are required and accept matching booleans
         # as a redundant convenience for callers who forget either side.
-        is_query = self.meta_architecture == "query_rcnn"
+        is_query = self.meta_architecture == "uniquery"
         wants_mask = self.meta_architecture == "mask_rcnn"
         wants_kpt = self.meta_architecture == "keypoint_rcnn"
 
-        # QueryRCNN has its own head configs and doesn't use mask_on/keypoint_on flags
+        # UniQuery has its own head configs and doesn't use mask_on/keypoint_on flags
         if is_query:
             if self.mask_on or self.keypoint_on:
                 raise ValueError(
-                    "query_rcnn uses query_rcnn_mask/query_rcnn_keypoint configs, "
+                    "uniquery uses uniquery_mask/uniquery_keypoint configs, "
                     "not mask_on/keypoint_on flags"
                 )
-            if self.query_rcnn_head is None:
-                raise ValueError("query_rcnn requires query_rcnn_head to be set")
+            if self.uniquery_head is None:
+                raise ValueError("uniquery requires uniquery_head to be set")
             return self
 
         if self.mask_on != wants_mask:
@@ -524,14 +524,12 @@ class ModelConfig(_BaseModel):
             raise ValueError("roi_mask_head is set but meta_architecture is not mask_rcnn")
         if not wants_kpt and self.roi_keypoint_head is not None:
             raise ValueError("roi_keypoint_head is set but meta_architecture is not keypoint_rcnn")
-        if self.query_rcnn_head is not None:
-            raise ValueError("query_rcnn_head is set but meta_architecture is not query_rcnn")
-        if self.query_rcnn_mask is not None:
-            raise ValueError("query_rcnn_mask is only valid with meta_architecture='query_rcnn'")
-        if self.query_rcnn_keypoint is not None:
-            raise ValueError(
-                "query_rcnn_keypoint is only valid with meta_architecture='query_rcnn'"
-            )
+        if self.uniquery_head is not None:
+            raise ValueError("uniquery_head is set but meta_architecture is not uniquery")
+        if self.uniquery_mask is not None:
+            raise ValueError("uniquery_mask is only valid with meta_architecture='uniquery'")
+        if self.uniquery_keypoint is not None:
+            raise ValueError("uniquery_keypoint is only valid with meta_architecture='uniquery'")
         return self
 
     def resolved_device(self) -> DeviceKind:

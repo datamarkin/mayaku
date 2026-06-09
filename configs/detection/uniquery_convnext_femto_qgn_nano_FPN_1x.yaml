@@ -1,33 +1,26 @@
-# QueryRCNN NANO — ConvNeXt-Pico(DINOv3-distilled) + thin FPN + QGN, 1 stage.
-# First point on the ~10-15M small-model menu (qgn_program_log.md, 2026-06-07).
+# UniQuery NANO — ConvNeXt-Femto(DINOv3-distilled) + thin FPN + QGN, 2 stages.
+# Second point on the ~10-15M small-model menu (qgn_program_log.md, 2026-06-07).
 #
-# Target: ~13M total, latency-optimal (shallowest serial chain = 1 RoIAlign,
-# 1 stage) on a backbone strong enough to justify it. From-backbone init
-# (CANNOT warm-start from flagship — h=128 shape mismatch). 640px.
+# Target: ~12.6M total, params-optimal, more refinement depth than the pico/
+# 1-stage point. Tests the weaker-backbone end of the menu. From-backbone init
+# (h=128 shape mismatch, no warm-start). 640px.
 #
-# Head shrink levers applied (vs the h=256 production model):
-#   hidden_dim 256 -> 128   (DynamicConv generator 2h^2d: 8.4M -> 2.1M / stage)
-#   fpn out_channels 256 -> 128
-#   dim_feedforward 2048 -> 1024
-#   num_stages -> 1   (Efficient DETR: 1 layer + dense prior = 44.2 AP @ R50)
-# These are UNMEASURED at this scale — this run is the measurement. h=128
-# capacity is the central open question of the small-model program.
+# Same head shrink as the pico nano (h=128, fpn 128, ffn 1024) but 2 stages,
+# so cascade_iou is meaningful and ON: (0.0, 0.5) — late-stage IoU floor for
+# localization polish (measured +0.34 on coco_4k at h=256).
+# P6/P7: not yet (pending module); large-object AP expected to suffer.
 #
-# cascade_iou: N/A at 1 stage (nothing to cascade) -> empty.
-# P6/P7: not yet (FPN emits P3-P5); pending LastLevelP6P7 module. Large-object
-# AP expected to suffer as in the h=256 run; the P6/P7 pilot addresses it.
-#
-# Pre-registered expectation [ASSUMED]: ~30-34 AP at 1x (PicoDet-class), short
-# of YOLO26n's 40.9 (which costs ~500 epochs). The real product question is
-# transfer (rf100), not COCO rank — see log.
+# Pre-registered expectation [ASSUMED]: a touch below the pico/1-stage point
+# on backbone strength but with more refinement; both ~30-34 AP at 1x. The
+# pair maps two points of the size/AP curve.
 
 model:
-  meta_architecture: query_rcnn
+  meta_architecture: uniquery
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_pico
-    weights_path: /home/dataserver/Projects/mayaku/pico_final_convnext_pico.pt
+    name: convnext_femto
+    weights_path: /home/dataserver/Projects/ConvNeXt-v1.5/runs/atto-femto/epoch_094_convnext_femto.pt
     freeze_at: 0
     norm: FrozenBN
   fpn:
@@ -37,12 +30,12 @@ model:
     fuse_type: sum
   roi_heads:
     num_classes: 80
-  query_rcnn_head:
+  uniquery_head:
     num_proposals: 300
     hidden_dim: 128
     num_heads: 8
-    num_stages: 1
-    query_generator: true
+    num_stages: 2
+    uniquery_generator: true
     dim_feedforward: 1024
     dim_dynamic: 64
     pooler_resolution: 7
@@ -50,7 +43,7 @@ model:
     cost_class: 2.0
     cost_bbox: 5.0
     cost_giou: 2.0
-    cascade_iou_thresholds: []
+    cascade_iou_thresholds: [0.0, 0.5]
 
 input:
   min_size_train: [512, 544, 576, 608, 640]
@@ -84,7 +77,6 @@ solver:
   warmup_factor: 0.001
   warmup_method: linear
 
-  # Small model at 640px -> try 4x4 (eff 16). Falls back to 2x8 if OOM on 12GB.
   ims_per_batch: 4
   grad_accum_steps: 4
 
