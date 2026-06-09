@@ -82,7 +82,8 @@ class LastLevelP6P7(nn.Module):
         self.p7 = nn.Conv2d(out_channels, out_channels, 3, stride=2, padding=1)
         for m in (self.p6, self.p7):
             nn.init.xavier_uniform_(m.weight)
-            nn.init.zeros_(m.bias)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def forward(self, p5: Tensor) -> list[Tensor]:
         p6 = self.p6(p5)
@@ -118,7 +119,7 @@ class FPN(Backbone):
         out_channels: int = 256,
         norm: NormChoice = "",
         fuse_type: FuseType = "sum",
-        top_block: LastLevelMaxPool | None = None,
+        top_block: LastLevelMaxPool | LastLevelP6P7 | None = None,
     ) -> None:
         super().__init__()
         if len(in_features) == 0:

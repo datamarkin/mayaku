@@ -23,7 +23,6 @@ import pytest
 from mayaku.cli.train import run_train
 from mayaku.config import MayakuConfig
 
-
 _FREEZE_WARN_MATCH = "Random-init frozen features"
 
 

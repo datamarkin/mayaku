@@ -60,9 +60,12 @@ class QueryGenerator(nn.Module):
         self.query_feat = nn.Conv2d(in_channels, hidden_dim, 1)
 
         for m in (self.shared[0], self.objectness, self.ltrb, self.query_feat):
+            assert isinstance(m, nn.Conv2d)
             nn.init.normal_(m.weight, std=0.01)
+            assert m.bias is not None
             nn.init.constant_(m.bias, 0.0)
         # focal init: start everything as background
+        assert self.objectness.bias is not None
         nn.init.constant_(self.objectness.bias, -4.59)  # p ~ 0.01
 
     def forward(
@@ -81,11 +84,10 @@ class QueryGenerator(nn.Module):
             pred_boxes (B, L, 4) decoded boxes at every location (for loss)
         """
         k = num_proposals_override or self.num_proposals
-        batch = features[0].shape[0]
         device = features[0].device
 
         obj_all, box_all, feat_all, ctr_all = [], [], [], []
-        for feat, stride in zip(features, self.strides):
+        for feat, stride in zip(features, self.strides, strict=True):
             t = self.shared(feat)
             obj = self.objectness(t)                      # (B,1,H,W)
             ltrb = F.softplus(self.ltrb(t)) * stride       # (B,4,H,W) >= 0, px
@@ -97,9 +99,9 @@ class QueryGenerator(nn.Module):
             cy, cx = torch.meshgrid(ys, xs, indexing="ij")
             centers = torch.stack([cx, cy], dim=-1).view(-1, 2)   # (H*W, 2)
 
-            l, t_, r, b = ltrb.flatten(2).unbind(1)               # each (B, H*W)
+            left, t_, r, b = ltrb.flatten(2).unbind(1)            # each (B, H*W)
             boxes = torch.stack(
-                [centers[None, :, 0] - l, centers[None, :, 1] - t_,
+                [centers[None, :, 0] - left, centers[None, :, 1] - t_,
                  centers[None, :, 0] + r, centers[None, :, 1] + b], dim=-1,
             )                                                      # (B, H*W, 4)
 
@@ -144,7 +146,6 @@ def _quality_match(
 ) -> tuple[Tensor, Tensor]:
     """One-to-one quality matching: Q = obj^(1-a) * IoU^a, candidates
     restricted to locations whose center lies inside the GT box."""
-    m = gt_boxes.shape[0]
     inside = (
         (centers[:, 0][None] > gt_boxes[:, 0][:, None])
         & (centers[:, 0][None] < gt_boxes[:, 2][:, None])
@@ -179,7 +180,6 @@ def qgn_loss(
     """
     obj_logits = qgn_out["obj_logits"].float()   # (B, L)
     pred_boxes = qgn_out["pred_boxes"].float()   # (B, L, 4)
-    device = obj_logits.device
 
     total_obj = obj_logits.new_zeros(())
     total_giou = obj_logits.new_zeros(())

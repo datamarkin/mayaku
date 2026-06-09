@@ -32,6 +32,7 @@ dependencies = [
   "typer>=0.12",
   "pycocotools>=2.0.7",
   "pillow>=10.0",
+  "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
@@ -129,6 +130,7 @@ files = ["src/mayaku"]
 module = [
   "torchvision.*",
   "pycocotools.*",
+  "scipy.*",
   "coremltools.*",
   "openvino.*",
   "onnxruntime.*",

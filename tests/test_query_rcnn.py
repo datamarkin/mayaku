@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
 from mayaku.config.schemas import MayakuConfig
-from mayaku.models.detectors.query_rcnn import QueryRCNN, build_query_rcnn
-from mayaku.models.heads.query_head import QueryHead
+from mayaku.models.detectors.query_rcnn import build_query_rcnn
 from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
-from mayaku.models.heads.query_stage import DynamicConv, QueryStage
+from mayaku.models.heads.query_stage import DynamicConv
 from mayaku.models.losses.set_criterion import SetCriterion, generalized_box_iou
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.instances import Instances
@@ -66,7 +65,6 @@ def _make_batch(
             polygons = []
             for i in range(num_gt):
                 x0, y0, x1, y1 = boxes[i].tolist()
-                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
                 polygons.append([torch.tensor([x0, y0, x1, y0, x1, y1, x0, y1], dtype=torch.float32)])
             instances.gt_masks = PolygonMasks(polygons)
         batch.append({"image": img, "instances": instances})

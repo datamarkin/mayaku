@@ -49,8 +49,8 @@ def build_dn_groups(
         if g == 0:
             continue
         gt = gt.repeat(dn_groups, 1)  # (g*K, 4)
-        img_w = t["image_size_xyxy"][0]
-        img_h = t["image_size_xyxy"][1]
+        img_w = float(t["image_size_xyxy"][0])
+        img_h = float(t["image_size_xyxy"][1])
 
         x1, y1, x2, y2 = gt.unbind(1)
         cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5

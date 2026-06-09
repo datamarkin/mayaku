@@ -13,7 +13,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-__all__ = ["QueryStage", "DynamicConv"]
+__all__ = ["DynamicConv", "QueryStage"]
 
 _DEFAULT_SCALE_CLAMP = math.log(100000.0 / 16)
 
@@ -73,9 +73,9 @@ class DynamicConv(nn.Module):
         features = features.flatten(1)
         features = self.out_layer(features)
         features = self.norm3(features)
-        features = self.activation(features)
+        out: Tensor = self.activation(features)
 
-        return features
+        return out
 
 
 class QueryStage(nn.Module):

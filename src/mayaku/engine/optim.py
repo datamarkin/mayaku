@@ -24,9 +24,11 @@ hook) works for either.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 from collections.abc import Callable, Iterable
+from typing import cast
 
 import torch
 from torch import nn
@@ -227,9 +229,12 @@ def _resolve_llrd_num_layers(model: nn.Module, backbone_prefix: str, family: str
     # via MMDet's ``block_id // 3`` bucketing. Tiny (depth 9) buckets to
     # ``{0, 1, 2}`` → layer_ids ``{3, 4, 5}`` → max_layer_id 6. Small/Base/
     # Large (depth 27) bucket to ``{0..8}`` → layer_ids ``{3..11}`` → 12.
-    # This is mechanical, not a free choice.
+    # This is mechanical, not a free choice. The function is duck-typed on
+    # ``_res_stages`` (tests pass a lightweight stand-in), so narrow with casts
+    # rather than an ``isinstance`` that would reject the stub at runtime.
     backbone = model.get_submodule(backbone_prefix)
-    stage2 = backbone._res_stages["res4"]  # our "res4" carved-name == MMDet's stages.2
+    res_stages = cast("nn.ModuleDict", backbone._res_stages)
+    stage2 = cast("nn.Sequential", res_stages["res4"])  # "res4" == MMDet's stages.2
     n_blocks = len(stage2)
     return 6 if n_blocks <= 9 else 12
 
@@ -369,8 +374,8 @@ def _log_and_assert_llrd_groups(
 
     if is_main_process():
         for g in groups:
-            layer_id = g["layer_id"]
-            names = bucket_names.get((layer_id, g["is_norm_group"]), [])
+            layer_id = cast(int, g["layer_id"])
+            names = bucket_names.get((layer_id, cast(bool, g["is_norm_group"])), [])
             logger.info(
                 "[llrd] group=%s layer_id=%d lr=%.6g wd=%.6g lr_scale=%.6g n_params=%d",
                 g["name"],
@@ -393,9 +398,9 @@ def _log_and_assert_llrd_groups(
     # appear twice — norm vs non-norm — at the same LR, which is fine).
     seen_lrs: dict[int, float] = {}
     for g in groups:
-        seen_lrs.setdefault(g["layer_id"], float(g["lr"]))
+        seen_lrs.setdefault(cast(int, g["layer_id"]), float(cast(float, g["lr"])))
     ordered = sorted(seen_lrs.items())
-    for (lid_a, lr_a), (lid_b, lr_b) in zip(ordered, ordered[1:], strict=False):
+    for (lid_a, lr_a), (lid_b, lr_b) in itertools.pairwise(ordered):
         if lr_b < lr_a - 1e-12:
             raise AssertionError(
                 f"[llrd] LR monotonicity violated: layer_id {lid_a} lr={lr_a} > "

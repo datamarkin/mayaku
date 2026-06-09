@@ -54,15 +54,15 @@ class SetCriterion(nn.Module):
         Returns loss dict with keys: loss_ce_{i}, loss_bbox_{i}, loss_giou_{i}
         for each stage i. The caller applies weight_dict to these.
         """
-        num_boxes = sum(len(t["labels"]) for t in targets)
-        num_boxes = torch.as_tensor(
-            [num_boxes], dtype=torch.float32, device=outputs_list[0]["pred_logits"].device
+        num_boxes_int = sum(len(t["labels"]) for t in targets)
+        num_boxes_t = torch.as_tensor(
+            [num_boxes_int], dtype=torch.float32, device=outputs_list[0]["pred_logits"].device
         )
         # DDP: all-reduce num_boxes across ranks for consistent normalization
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_reduce(num_boxes)
-            num_boxes = num_boxes / torch.distributed.get_world_size()
-        num_boxes = torch.clamp(num_boxes, min=1).item()
+            torch.distributed.all_reduce(num_boxes_t)
+            num_boxes_t = num_boxes_t / torch.distributed.get_world_size()
+        num_boxes = float(torch.clamp(num_boxes_t, min=1).item())
 
         losses: dict[str, Tensor] = {}
         for stage_idx, outputs in enumerate(outputs_list):
@@ -143,7 +143,7 @@ class SetCriterion(nn.Module):
         pred_logits = pred_logits.float()
         pred_boxes = pred_boxes.float()
 
-        batch_size, num_queries = pred_logits.shape[:2]
+        batch_size, _ = pred_logits.shape[:2]
         indices = []
 
         iou_floor = 0.0

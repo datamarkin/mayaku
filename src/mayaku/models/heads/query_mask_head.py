@@ -52,11 +52,15 @@ class QueryDynamicMaskHead(nn.Module):
 
     def _init_weights(self) -> None:
         for conv in self.spatial_convs:
+            assert isinstance(conv, nn.Conv2d)
             nn.init.kaiming_normal_(conv.weight, mode="fan_out", nonlinearity="relu")
+            assert conv.bias is not None
             nn.init.constant_(conv.bias, 0)
         nn.init.xavier_uniform_(self.kernel_fc.weight)
+        assert self.kernel_fc.bias is not None
         nn.init.constant_(self.kernel_fc.bias, 0)
         nn.init.kaiming_normal_(self.upsample.weight, mode="fan_out", nonlinearity="relu")
+        assert self.upsample.bias is not None
         nn.init.constant_(self.upsample.bias, 0)
 
     def forward(self, roi_features: Tensor, obj_features: Tensor) -> Tensor:
@@ -78,5 +82,5 @@ class QueryDynamicMaskHead(nn.Module):
         mask = torch.einsum("rchw,rc->rhw", x.float(), weights) + biases[..., None]
         mask = mask.unsqueeze(1)
 
-        mask = self.upsample(mask)
-        return mask
+        out: Tensor = self.upsample(mask)
+        return out

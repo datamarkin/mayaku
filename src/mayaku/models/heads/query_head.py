@@ -17,7 +17,6 @@ from mayaku.models.heads.query_denoising import build_dn_groups, dn_attention_ma
 from mayaku.models.heads.query_generator import QueryGenerator
 from mayaku.models.heads.query_stage import QueryStage
 from mayaku.models.poolers import ROIPooler
-from mayaku.structures.boxes import Boxes
 
 __all__ = ["QueryHead"]
 
@@ -107,6 +106,8 @@ class QueryHead(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         for stage in self.head_series:
+            assert isinstance(stage, QueryStage)
+            assert stage.class_logits.bias is not None
             nn.init.constant_(stage.class_logits.bias, self.bias_value)
 
     def forward(
@@ -210,7 +211,7 @@ class QueryHead(nn.Module):
 
         results = [
             {"pred_logits": cls, "pred_boxes": box}
-            for cls, box in zip(outputs_class_list, outputs_coord_list)
+            for cls, box in zip(outputs_class_list, outputs_coord_list, strict=True)
         ]
         results[-1]["obj_features"] = proposal_features
         if qgn_out is not None:

@@ -19,13 +19,13 @@ from torch import Tensor, nn
 
 from mayaku.config.schemas import MayakuConfig
 from mayaku.models.backbones import build_bottom_up
-from mayaku.models.heads.mask_head import mask_rcnn_inference, mask_rcnn_loss
 from mayaku.models.heads.keypoint_head import (
     KRCNNConvDeconvUpsampleHead,
     keypoint_rcnn_inference,
     keypoint_rcnn_loss,
     select_proposals_with_visible_keypoints,
 )
+from mayaku.models.heads.mask_head import mask_rcnn_inference, mask_rcnn_loss
 from mayaku.models.heads.query_generator import QueryGenerator, qgn_loss
 from mayaku.models.heads.query_head import QueryHead
 from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
@@ -108,6 +108,7 @@ class QueryRCNN(nn.Module):
             dn_out = outputs_list[-1].pop("dn", None)
             loss_dict = self.criterion(outputs_list, targets)
             if qgn_out is not None:
+                assert self.head.query_generator is not None
                 loss_dict.update(qgn_loss(
                     qgn_out, targets, qgn_out["centers"],
                     quality_alpha=self.head.query_generator.quality_alpha,
@@ -171,8 +172,9 @@ class QueryRCNN(nn.Module):
         fg_instances: list[Instances],
         indices: list[tuple[Tensor, Tensor]],
     ) -> dict[str, Tensor]:
+        assert self.mask_head is not None
         valid_mask = [len(inst) > 0 and inst.has("gt_masks") for inst in fg_instances]
-        valid = [inst for inst, m in zip(fg_instances, valid_mask) if m]
+        valid = [inst for inst, m in zip(fg_instances, valid_mask, strict=True) if m]
         if not valid:
             return {"loss_mask": self.mask_head.kernel_fc.weight.sum() * 0.0}
 
@@ -180,9 +182,10 @@ class QueryRCNN(nn.Module):
         mask_roi_feats = self.mask_pooler(feature_list, [inst.proposal_boxes for inst in valid])
 
         obj_features = last_outputs["obj_features"]  # (1, B*N, d)
-        valid_indices = [idx for idx, m in zip(indices, valid_mask) if m]
+        valid_indices = [idx for idx, m in zip(indices, valid_mask, strict=True) if m]
+        b_n = last_outputs["pred_logits"].shape[:2]
         fg_obj = self._gather_fg_obj_features(
-            obj_features, valid_indices, last_outputs["pred_logits"].shape[:2],
+            obj_features, valid_indices, (int(b_n[0]), int(b_n[1])),
         )
 
         mask_logits = self.mask_head(mask_roi_feats, fg_obj)
@@ -194,6 +197,7 @@ class QueryRCNN(nn.Module):
         feature_list: list[Tensor],
         fg_instances: list[Instances],
     ) -> dict[str, Tensor]:
+        assert self.keypoint_head is not None
         kp_instances = [
             inst for inst in fg_instances
             if len(inst) > 0 and inst.has("gt_keypoints")
@@ -279,6 +283,7 @@ class QueryRCNN(nn.Module):
             return
 
         assert self.mask_pooler is not None
+        assert self.mask_head is not None
         mask_roi_feats = self.mask_pooler(feature_list, [inst.pred_boxes for inst in instances])
 
         obj_features = outputs["obj_features"].squeeze(0)  # (B*N, d)
@@ -304,6 +309,7 @@ class QueryRCNN(nn.Module):
             return
 
         assert self.keypoint_pooler is not None
+        assert self.keypoint_head is not None
         kp_roi_feats = self.keypoint_pooler(feature_list, [inst.pred_boxes for inst in instances])
         kp_logits = self.keypoint_head(kp_roi_feats)
         keypoint_rcnn_inference(kp_logits, instances)
@@ -317,9 +323,10 @@ class QueryRCNN(nn.Module):
         gt_instances: list[Instances],
         image_sizes: list[tuple[int, int]],
     ) -> list[dict[str, Any]]:
+        assert isinstance(self.pixel_mean, Tensor)
         device = self.pixel_mean.device
         targets = []
-        for instances, (h, w) in zip(gt_instances, image_sizes):
+        for instances, (h, w) in zip(gt_instances, image_sizes, strict=True):
             raw_boxes = instances.gt_boxes
             gt_boxes_xyxy = raw_boxes.tensor if isinstance(raw_boxes, Boxes) else raw_boxes
             gt_classes = instances.gt_classes
@@ -371,7 +378,7 @@ class QueryRCNN(nn.Module):
         indices: list[tuple[Tensor, Tensor]],
         batch_proposals_shape: tuple[int, int],
     ) -> Tensor:
-        B, N = batch_proposals_shape
+        _, N = batch_proposals_shape
         obj_flat = obj_features.squeeze(0)  # (B*N, d)
         parts = []
         for b, (src_idx, _) in enumerate(indices):
@@ -382,6 +389,7 @@ class QueryRCNN(nn.Module):
         return torch.cat(parts, dim=0)
 
     def _preprocess_image(self, batched_inputs: Sequence[dict[str, Any]]) -> ImageList:
+        assert isinstance(self.pixel_mean, Tensor)
         device = self.pixel_mean.device
         images = [
             (x["image"].to(device).to(torch.float32) - self.pixel_mean) / self.pixel_std
@@ -423,7 +431,7 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
     if qr_cfg is None:
         raise ValueError("query_rcnn requires model.query_rcnn_head config section")
 
-    bottom_up = build_bottom_up(cfg.model.backbone, weights=backbone_weights)
+    bottom_up = build_bottom_up(cfg.model.backbone, weights=backbone_weights)  # type: ignore[arg-type]
 
     # Optional conv-based P6/P7 for large-object coverage (QGN runs P3-P7).
     top_block = None
@@ -435,7 +443,7 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         bottom_up=bottom_up,
         in_features=cfg.model.fpn.in_features,
         out_channels=cfg.model.fpn.out_channels,
-        norm=cfg.model.fpn.norm,
+        norm=cfg.model.fpn.norm,  # type: ignore[arg-type]
         fuse_type=cfg.model.fpn.fuse_type,
         top_block=top_block,
     )

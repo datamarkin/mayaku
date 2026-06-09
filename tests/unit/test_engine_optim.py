@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import pytest
@@ -345,7 +346,7 @@ def test_layer_id_adapter_rejects_unknown_convnext_param() -> None:
 
 def test_layer_id_adapter_rejects_param_under_res_downs_res2() -> None:
     """``_res_downs.res2`` is Identity in our model — any param there is a contract violation."""
-    with pytest.raises(AssertionError, match="_res_downs.res2 must be parameterless"):
+    with pytest.raises(AssertionError, match=r"_res_downs\.res2 must be parameterless"):
         _layer_id_for_convnext_param("_res_downs.res2.0.weight", num_layers=6)
 
 
@@ -402,7 +403,7 @@ def test_llrd_scale_formula_on_convnext_tiny() -> None:
         )
 
     ordered = sorted(lrs_by_layer.items())
-    for (_a, lr_a), (_b, lr_b) in zip(ordered, ordered[1:], strict=False):
+    for (_a, lr_a), (_b, lr_b) in itertools.pairwise(ordered):
         assert lr_b >= lr_a - 1e-12
 
 
@@ -430,7 +431,7 @@ def test_llrd_composes_with_freeze_at() -> None:
     for g in opt.param_groups:
         lrs_by_layer.setdefault(int(g["layer_id"]), float(g["lr"]))
     ordered = sorted(lrs_by_layer.items())
-    for (_a, lr_a), (_b, lr_b) in zip(ordered, ordered[1:], strict=False):
+    for (_a, lr_a), (_b, lr_b) in itertools.pairwise(ordered):
         assert lr_b >= lr_a - 1e-12
 
 
