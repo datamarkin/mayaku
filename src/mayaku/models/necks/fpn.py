@@ -41,7 +41,7 @@ from mayaku.config.schemas import FPNConfig
 from mayaku.models.backbones._base import Backbone
 from mayaku.models.backbones._frozen_bn import FrozenBatchNorm2d
 
-__all__ = ["FPN", "LastLevelMaxPool", "build_fpn"]
+__all__ = ["FPN", "LastLevelMaxPool", "LastLevelP6P7", "build_fpn"]
 
 NormChoice = Literal["", "BN", "GN", "FrozenBN"]
 FuseType = Literal["sum", "avg"]
@@ -62,6 +62,32 @@ class LastLevelMaxPool(nn.Module):
 
     def forward(self, p5: Tensor) -> list[Tensor]:
         return [F.max_pool2d(p5, kernel_size=1, stride=2, padding=0)]
+
+
+class LastLevelP6P7(nn.Module):
+    """Append conv-based ``p6`` and ``p7`` (RetinaNet/FCOS style).
+
+    ``p6 = conv3x3_s2(p5)``, ``p7 = conv3x3_s2(relu(p6))`` — strides 64
+    and 128. Unlike the max-pool ``p6``, these are learned levels that
+    give large objects a coarse pyramid to be proposed and pooled at,
+    addressing the large-object (APl) deficit of a P3-P5-only head.
+    """
+
+    in_feature: str = "p5"
+    num_levels: int = 2
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.p6 = nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1)
+        self.p7 = nn.Conv2d(out_channels, out_channels, 3, stride=2, padding=1)
+        for m in (self.p6, self.p7):
+            nn.init.xavier_uniform_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def forward(self, p5: Tensor) -> list[Tensor]:
+        p6 = self.p6(p5)
+        p7 = self.p7(F.relu(p6))
+        return [p6, p7]
 
 
 class FPN(Backbone):

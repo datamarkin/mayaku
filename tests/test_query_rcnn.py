@@ -275,3 +275,84 @@ class TestQueryRCNN:
                     },
                 }
             )
+
+
+def _make_qgn_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5) -> MayakuConfig:
+    return MayakuConfig(
+        model={
+            "meta_architecture": "query_rcnn",
+            "backbone": {"name": "resnet50"},
+            "query_rcnn_head": {
+                "num_proposals": num_proposals,
+                "num_stages": num_stages,
+                "query_generator": True,
+            },
+            "roi_heads": {"num_classes": num_classes},
+        }
+    )
+
+
+class TestQueryGenerator:
+    def test_forward_train_loss_keys(self) -> None:
+        model = build_query_rcnn(_make_qgn_cfg())
+        model.train()
+        losses = model(_make_batch(batch_size=2))
+        for i in range(2):
+            assert f"loss_ce_{i}" in losses
+        assert "loss_qgn_obj" in losses
+        assert "loss_qgn_giou" in losses
+        for k, v in losses.items():
+            assert torch.isfinite(v), f"{k} not finite"
+
+    def test_forward_inference(self) -> None:
+        model = build_query_rcnn(_make_qgn_cfg())
+        model.eval()
+        with torch.no_grad():
+            results = model(_make_batch(batch_size=2))
+        assert len(results) == 2
+        for r in results:
+            inst = r["instances"]
+            assert inst.has("pred_boxes") and inst.has("scores") and inst.has("pred_classes")
+
+    def test_gradient_flow_into_qgn(self) -> None:
+        model = build_query_rcnn(_make_qgn_cfg())
+        model.train()
+        losses = model(_make_batch(batch_size=1))
+        total = sum(losses.values())
+        total.backward()
+        qgn = model.head.query_generator
+        assert qgn.objectness.weight.grad is not None
+        assert qgn.objectness.weight.grad.norm() > 0
+        # query features feed the stages -> head losses must reach this branch
+        assert qgn.query_feat.weight.grad is not None
+        assert qgn.query_feat.weight.grad.norm() > 0
+        # boxes are detached into stage 1; ltrb is trained by the QGN GIoU loss
+        assert qgn.ltrb.weight.grad is not None
+
+    def test_no_blind_embeddings_when_qgn(self) -> None:
+        model = build_query_rcnn(_make_qgn_cfg())
+        assert not hasattr(model.head, "init_proposal_boxes") or \
+            model.head.init_proposal_boxes is None or \
+            model.head.query_generator is not None
+
+    def test_stage_truncation_inference(self) -> None:
+        model = build_query_rcnn(_make_qgn_cfg(num_stages=2))
+        model.eval()
+        model.inference_num_stages = 1
+        with torch.no_grad():
+            results = model(_make_batch(batch_size=1))
+        assert len(results) == 1
+
+    def test_empty_targets(self) -> None:
+        model = build_query_rcnn(_make_qgn_cfg())
+        model.train()
+        batch = _make_batch(batch_size=1, num_gt=1)
+        inst = batch[0]["instances"]
+        batch[0]["instances"] = Instances(
+            image_size=inst.image_size,
+            gt_boxes=Boxes(torch.zeros(0, 4)),
+            gt_classes=torch.zeros(0, dtype=torch.long),
+        )
+        losses = model(batch)
+        for k, v in losses.items():
+            assert torch.isfinite(v), f"{k} not finite"

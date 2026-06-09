@@ -147,6 +147,7 @@ class QueryStage(nn.Module):
         bboxes: Tensor,
         pro_features: Tensor,
         pooler: nn.Module,
+        attn_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """
         Args:
@@ -154,6 +155,8 @@ class QueryStage(nn.Module):
             bboxes: (B, N, 4) absolute xyxy proposal boxes.
             pro_features: (1, B*N, hidden_dim) proposal features.
             pooler: ROIPooler module.
+            attn_mask: optional (N, N) bool self-attention mask (True =
+                blocked); used to isolate denoising queries when DN is on.
         Returns:
             class_logits: (B, N, num_classes)
             pred_bboxes: (B, N, 4) refined absolute xyxy
@@ -170,7 +173,9 @@ class QueryStage(nn.Module):
 
         # Self-attention
         pro_features = pro_features.view(B, N, self.hidden_dim).permute(1, 0, 2)  # (N, B, d)
-        pro_features2 = self.self_attn(pro_features, pro_features, value=pro_features)[0]
+        pro_features2 = self.self_attn(
+            pro_features, pro_features, value=pro_features, attn_mask=attn_mask
+        )[0]
         pro_features = pro_features + self.dropout1(pro_features2)
         pro_features = self.norm1(pro_features)
 

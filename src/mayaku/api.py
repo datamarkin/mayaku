@@ -217,13 +217,18 @@ def train(
     if eval_after:
         assert val_json is not None and val_images is not None
         eval_start = time.time()
+        # run_eval feeds the device string to torch.device(), which does
+        # not understand the "auto" sentinel — resolve it here.
+        eval_device = device
+        if eval_device == "auto":
+            eval_device = "cuda" if torch.cuda.is_available() else "cpu"
         metrics = run_eval(
             eval_cfg,
             weights=final_weights,
             coco_gt_json=val_json,
             image_root=val_images,
             output_dir=resolved_output_dir / "eval",
-            device=device,
+            device=eval_device,
         )
         eval_seconds = time.time() - eval_start
         raw_bbox = metrics.get("bbox") if isinstance(metrics, dict) else None

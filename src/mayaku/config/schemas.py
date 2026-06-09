@@ -365,6 +365,29 @@ class QueryRCNNHeadConfig(_BaseModel):
     cost_bbox: Annotated[float, Field(gt=0.0)] = 5.0
     cost_giou: Annotated[float, Field(gt=0.0)] = 2.0
 
+    # QGN (Featurized Query R-CNN, arXiv 2206.06258): image-conditioned
+    # query initialization from a light dense scorer on FPN, replacing
+    # the blind learned embeddings. Enables strong AP at fewer stages.
+    query_generator: bool = False
+    qgn_quality_alpha: Annotated[float, Field(ge=0.0, le=1.0)] = 0.8
+    qgn_obj_weight: Annotated[float, Field(gt=0.0)] = 1.0
+    qgn_giou_weight: Annotated[float, Field(gt=0.0)] = 2.0
+
+    # Add conv-based P6/P7 (strides 64/128) to the FPN so the QGN proposes
+    # and the head pools large objects at a coarse pyramid (the paper's QGN
+    # runs P3-P7). Targets the large-object (APl) deficit of a P3-P5 head.
+    fpn_p6p7: bool = False
+
+    # DN-DETR-style query denoising (box-only): feed noised GT boxes as
+    # auxiliary queries trained to reconstruct the clean GT. Stabilizes the
+    # early Hungarian matching -> faster convergence, most useful at few
+    # stages. Training-only: DN queries are not generated at inference, so
+    # zero deployment/export impact.
+    denoising: bool = False
+    dn_groups: Annotated[int, Field(gt=0)] = 5
+    dn_box_noise_scale: Annotated[float, Field(gt=0.0, le=1.0)] = 0.4
+    dn_loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
+
     # Cascade-IoU: per-stage minimum IoU floor for Hungarian matching.
     # Empty tuple = disabled (vanilla flat matching). When set, length
     # must equal num_stages. Predictions below the floor cannot match a

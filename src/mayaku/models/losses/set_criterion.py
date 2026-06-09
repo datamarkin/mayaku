@@ -100,6 +100,37 @@ class SetCriterion(nn.Module):
             outputs["pred_logits"], outputs["pred_boxes"], targets, stage_idx,
         )
 
+    def denoising_loss(
+        self,
+        dn: dict[str, Tensor],
+        targets: list[dict[str, Tensor]],
+    ) -> dict[str, Tensor]:
+        """Box-only DN loss (L1 + GIoU) with deep supervision.
+
+        Each DN query's target is the clean GT it was noised from — no
+        matching needed. L1 is on image-size-normalized boxes (matching the
+        main box loss); both are normalized by the number of DN queries.
+        Returns ``loss_dn_bbox_{i}`` / ``loss_dn_giou_{i}`` per stage.
+        """
+        tgt = dn["tgt_boxes"].float()  # (B, M, 4)
+        valid = dn["valid"]            # (B, M) bool
+        img = torch.stack(
+            [t["image_size_xyxy"] for t in targets]
+        ).float().unsqueeze(1)  # (B, 1, 4)
+        num_dn = valid.sum().clamp(min=1)     # 0-dim tensor — no host sync
+        vmask = valid.unsqueeze(-1).float()   # (B, M, 1)
+        tgt_valid = tgt[valid]                # (V, 4) — loop-invariant
+
+        losses: dict[str, Tensor] = {}
+        for i, pred in enumerate(dn["pred_boxes"]):
+            pred = pred.float()
+            l1 = F.l1_loss(pred / img, tgt / img, reduction="none") * vmask
+            # Empty valid -> empty gather -> giou sum is a clean 0; no guard needed.
+            giou = paired_generalized_box_iou(pred[valid], tgt_valid)
+            losses[f"loss_dn_bbox_{i}"] = l1.sum() / num_dn
+            losses[f"loss_dn_giou_{i}"] = (1 - giou).sum() / num_dn
+        return losses
+
     @torch.no_grad()
     def _hungarian_match(
         self,

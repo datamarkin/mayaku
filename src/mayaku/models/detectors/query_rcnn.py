@@ -26,6 +26,7 @@ from mayaku.models.heads.keypoint_head import (
     keypoint_rcnn_loss,
     select_proposals_with_visible_keypoints,
 )
+from mayaku.models.heads.query_generator import QueryGenerator, qgn_loss
 from mayaku.models.heads.query_head import QueryHead
 from mayaku.models.heads.query_mask_head import QueryDynamicMaskHead
 from mayaku.models.losses.set_criterion import SetCriterion
@@ -102,8 +103,17 @@ class QueryRCNN(nn.Module):
             gt_instances = [x["instances"].to(self.pixel_mean.device) for x in batched_inputs]
             targets = self._prepare_targets(gt_instances, images.image_sizes)
 
-            outputs_list = self.head(feature_list, images.image_sizes)
+            outputs_list = self.head(feature_list, images.image_sizes, targets=targets)
+            qgn_out = outputs_list[-1].pop("qgn", None)
+            dn_out = outputs_list[-1].pop("dn", None)
             loss_dict = self.criterion(outputs_list, targets)
+            if qgn_out is not None:
+                loss_dict.update(qgn_loss(
+                    qgn_out, targets, qgn_out["centers"],
+                    quality_alpha=self.head.query_generator.quality_alpha,
+                ))
+            if dn_out is not None:
+                loss_dict.update(self.criterion.denoising_loss(dn_out, targets))
 
             if self.mask_on or self.keypoint_on:
                 last = outputs_list[-1]
@@ -415,13 +425,19 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
 
     bottom_up = build_bottom_up(cfg.model.backbone, weights=backbone_weights)
 
+    # Optional conv-based P6/P7 for large-object coverage (QGN runs P3-P7).
+    top_block = None
+    if qr_cfg.fpn_p6p7:
+        from mayaku.models.necks.fpn import LastLevelP6P7
+        top_block = LastLevelP6P7(cfg.model.fpn.out_channels, cfg.model.fpn.out_channels)
+
     fpn = FPN(
         bottom_up=bottom_up,
         in_features=cfg.model.fpn.in_features,
         out_channels=cfg.model.fpn.out_channels,
         norm=cfg.model.fpn.norm,
         fuse_type=cfg.model.fpn.fuse_type,
-        top_block=None,
+        top_block=top_block,
     )
 
     in_shapes = fpn.output_shape()
@@ -429,6 +445,21 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
     pooler_scales = tuple(1.0 / in_shapes[k].stride for k in feature_keys)
 
     num_classes = cfg.model.roi_heads.num_classes
+
+    # Optional QGN (Featurized Query R-CNN): image-conditioned queries.
+    # Runs on stride>=8 levels only (the paper found P2 adds cost, no recall).
+    query_generator: QueryGenerator | None = None
+    qgn_feature_indices: tuple[int, ...] = ()
+    if qr_cfg.query_generator:
+        strides = [in_shapes[k].stride for k in feature_keys]
+        qgn_feature_indices = tuple(i for i, s in enumerate(strides) if s >= 8)
+        query_generator = QueryGenerator(
+            in_channels=cfg.model.fpn.out_channels,
+            hidden_dim=qr_cfg.hidden_dim,
+            num_proposals=qr_cfg.num_proposals,
+            strides=tuple(strides[i] for i in qgn_feature_indices),
+            quality_alpha=qr_cfg.qgn_quality_alpha,
+        )
 
     head = QueryHead(
         num_proposals=qr_cfg.num_proposals,
@@ -442,6 +473,11 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         pooler_resolution=qr_cfg.pooler_resolution,
         pooler_scales=pooler_scales,
         pooler_sampling_ratio=0,
+        query_generator=query_generator,
+        qgn_feature_indices=qgn_feature_indices,
+        denoising=qr_cfg.denoising,
+        dn_groups=qr_cfg.dn_groups,
+        dn_box_noise_scale=qr_cfg.dn_box_noise_scale,
     )
 
     criterion = SetCriterion(
@@ -457,6 +493,13 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
         "loss_bbox": qr_cfg.cost_bbox,
         "loss_giou": qr_cfg.cost_giou,
     }
+    if query_generator is not None:
+        weight_dict["loss_qgn_obj"] = qr_cfg.qgn_obj_weight
+        weight_dict["loss_qgn_giou"] = qr_cfg.qgn_giou_weight
+    if qr_cfg.denoising:
+        # DN box losses scaled like the matching box losses, times dn_loss_weight.
+        weight_dict["loss_dn_bbox"] = qr_cfg.cost_bbox * qr_cfg.dn_loss_weight
+        weight_dict["loss_dn_giou"] = qr_cfg.cost_giou * qr_cfg.dn_loss_weight
 
     # Phase 2: Mask head
     mask_head: QueryDynamicMaskHead | None = None
