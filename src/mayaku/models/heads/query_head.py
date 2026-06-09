@@ -83,18 +83,20 @@ class QueryHead(nn.Module):
         )
 
         # Refinement stages (independent params per stage, like original's _get_clones)
-        self.head_series = nn.ModuleList([
-            QueryStage(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                dim_feedforward=dim_feedforward,
-                dim_dynamic=dim_dynamic,
-                dropout=dropout,
-                num_classes=num_classes,
-                pooler_resolution=pooler_resolution,
-            )
-            for _ in range(num_stages)
-        ])
+        self.head_series = nn.ModuleList(
+            [
+                QueryStage(
+                    hidden_dim=hidden_dim,
+                    num_heads=num_heads,
+                    dim_feedforward=dim_feedforward,
+                    dim_dynamic=dim_dynamic,
+                    dropout=dropout,
+                    num_classes=num_classes,
+                    pooler_resolution=pooler_resolution,
+                )
+                for _ in range(num_stages)
+            ]
+        )
 
         # Focal loss bias init
         prior_prob = 0.01
@@ -136,14 +138,16 @@ class QueryHead(nn.Module):
 
         images_whwh = torch.tensor(
             [[w, h, w, h] for h, w in image_sizes],
-            dtype=torch.float32, device=device,
+            dtype=torch.float32,
+            device=device,
         )  # (B, 4)
 
         qgn_out: dict[str, Tensor] | None = None
         if self.query_generator is not None:
             qgn_feats = [features[i] for i in self.qgn_feature_indices]
             qgn_out = self.query_generator(
-                qgn_feats, image_sizes,
+                qgn_feats,
+                image_sizes,
                 num_proposals_override=num_proposals_override,
             )
             # Boxes are detached into stage 1 (consistent with the
@@ -154,8 +158,7 @@ class QueryHead(nn.Module):
             proposal_features = qgn_out["feats"].reshape(1, batch_size * k, -1)
         else:
             # Convert learned cxcywh proposals to absolute xyxy
-            proposal_boxes_xyxy = _cxcywh_to_xyxy(
-                self.init_proposal_boxes.weight[:num_proposals])
+            proposal_boxes_xyxy = _cxcywh_to_xyxy(self.init_proposal_boxes.weight[:num_proposals])
             bboxes = proposal_boxes_xyxy[None] * images_whwh[:, None, :]  # (B, N, 4)
 
             # Expand proposal features: original uses [None].repeat(1, bs, 1)
@@ -169,17 +172,19 @@ class QueryHead(nn.Module):
         attn_mask: Tensor | None = None
         if self.training and self.denoising and targets is not None:
             dn = build_dn_groups(
-                targets, dn_groups=self.dn_groups,
-                box_noise_scale=self.dn_box_noise_scale, device=device,
+                targets,
+                dn_groups=self.dn_groups,
+                box_noise_scale=self.dn_box_noise_scale,
+                device=device,
             )
             if dn is not None:
                 num_dn = dn["boxes"].shape[1]
                 bboxes = torch.cat([bboxes, dn["boxes"]], dim=1)  # (B, N+M, 4)
                 pf = proposal_features.view(batch_size, num_match, -1)
-                dn_feat = self.dn_query_feat.weight.view(1, 1, -1).expand(
-                    batch_size, num_dn, -1)
+                dn_feat = self.dn_query_feat.weight.view(1, 1, -1).expand(batch_size, num_dn, -1)
                 proposal_features = torch.cat([pf, dn_feat], dim=1).reshape(
-                    1, batch_size * (num_match + num_dn), -1)
+                    1, batch_size * (num_match + num_dn), -1
+                )
                 attn_mask = dn_attention_mask(num_match, num_dn, device)
 
         outputs_class_list = []
@@ -205,9 +210,9 @@ class QueryHead(nn.Module):
         # heads and the criterion only ever see the matching queries.
         if dn is not None:
             total = num_match + num_dn
-            proposal_features = proposal_features.view(
-                batch_size, total, -1)[:, :num_match].reshape(
-                1, batch_size * num_match, -1)
+            proposal_features = proposal_features.view(batch_size, total, -1)[
+                :, :num_match
+            ].reshape(1, batch_size * num_match, -1)
 
         results = [
             {"pred_logits": cls, "pred_boxes": box}
@@ -218,9 +223,9 @@ class QueryHead(nn.Module):
             results[-1]["qgn"] = qgn_out
         if dn is not None:
             results[-1]["dn"] = {
-                "pred_boxes": dn_coord_list,      # list of (B, M, 4) per stage
-                "tgt_boxes": dn["tgt_boxes"],     # (B, M, 4)
-                "valid": dn["valid"],             # (B, M)
+                "pred_boxes": dn_coord_list,  # list of (B, M, 4) per stage
+                "tgt_boxes": dn["tgt_boxes"],  # (B, M, 4)
+                "valid": dn["valid"],  # (B, M)
             }
         return results
 

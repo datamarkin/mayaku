@@ -44,7 +44,7 @@ class DynamicConv(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.activation = nn.ReLU(inplace=True)
 
-        num_output = hidden_dim * pooler_resolution ** 2
+        num_output = hidden_dim * pooler_resolution**2
         self.out_layer = nn.Linear(num_output, hidden_dim)
         self.norm3 = nn.LayerNorm(hidden_dim)
 
@@ -59,8 +59,8 @@ class DynamicConv(nn.Module):
         features = roi_features.permute(1, 0, 2)  # (N*B, P*P, hidden)
         parameters = self.dynamic_layer(pro_features).permute(1, 0, 2)  # (N*B, 1, params)
 
-        param1 = parameters[:, :, :self.num_params].view(-1, self.hidden_dim, self.dim_dynamic)
-        param2 = parameters[:, :, self.num_params:].view(-1, self.dim_dynamic, self.hidden_dim)
+        param1 = parameters[:, :, : self.num_params].view(-1, self.hidden_dim, self.dim_dynamic)
+        param2 = parameters[:, :, self.num_params :].view(-1, self.dim_dynamic, self.hidden_dim)
 
         features = torch.bmm(features, param1)
         features = self.norm1(features)
@@ -108,7 +108,9 @@ class QueryStage(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
 
         # Dynamic instance interaction
-        self.inst_interact = DynamicConv(hidden_dim, dim_dynamic, pooler_resolution=pooler_resolution)
+        self.inst_interact = DynamicConv(
+            hidden_dim, dim_dynamic, pooler_resolution=pooler_resolution
+        )
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(hidden_dim)
 
@@ -122,22 +124,26 @@ class QueryStage(nn.Module):
         # Classification MLP (original: NUM_CLS=1 layers of Linear+LN+ReLU)
         cls_layers: list[nn.Module] = []
         for _ in range(num_cls_layers):
-            cls_layers.extend([
-                nn.Linear(hidden_dim, hidden_dim, bias=False),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(inplace=True),
-            ])
+            cls_layers.extend(
+                [
+                    nn.Linear(hidden_dim, hidden_dim, bias=False),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(inplace=True),
+                ]
+            )
         self.cls_module = nn.ModuleList(cls_layers)
         self.class_logits = nn.Linear(hidden_dim, num_classes)
 
         # Regression MLP (original: NUM_REG=3 layers of Linear+LN+ReLU)
         reg_layers: list[nn.Module] = []
         for _ in range(num_reg_layers):
-            reg_layers.extend([
-                nn.Linear(hidden_dim, hidden_dim, bias=False),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(inplace=True),
-            ])
+            reg_layers.extend(
+                [
+                    nn.Linear(hidden_dim, hidden_dim, bias=False),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(inplace=True),
+                ]
+            )
         self.reg_module = nn.ModuleList(reg_layers)
         self.bboxes_delta = nn.Linear(hidden_dim, 4)
 
@@ -169,7 +175,9 @@ class QueryStage(nn.Module):
         # ROI pooling
         proposal_boxes = [Boxes(bboxes[b]) for b in range(B)]
         roi_features = pooler(features, proposal_boxes)  # (B*N, C, P, P)
-        roi_features = roi_features.view(B * N, self.hidden_dim, -1).permute(2, 0, 1)  # (P*P, B*N, d)
+        roi_features = roi_features.view(B * N, self.hidden_dim, -1).permute(
+            2, 0, 1
+        )  # (P*P, B*N, d)
 
         # Self-attention
         pro_features = pro_features.view(B, N, self.hidden_dim).permute(1, 0, 2)  # (N, B, d)
@@ -180,7 +188,11 @@ class QueryStage(nn.Module):
         pro_features = self.norm1(pro_features)
 
         # Instance interaction (DynamicConv)
-        pro_features = pro_features.view(N, B, self.hidden_dim).permute(1, 0, 2).reshape(1, B * N, self.hidden_dim)
+        pro_features = (
+            pro_features.view(N, B, self.hidden_dim)
+            .permute(1, 0, 2)
+            .reshape(1, B * N, self.hidden_dim)
+        )
         pro_features2 = self.inst_interact(pro_features, roi_features)
         pro_features = pro_features + self.dropout2(pro_features2)
         obj_features = self.norm2(pro_features)

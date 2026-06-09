@@ -97,7 +97,10 @@ class SetCriterion(nn.Module):
     ) -> list[tuple[Tensor, Tensor]]:
         """Run Hungarian matching on a single stage's outputs."""
         return self._hungarian_match(
-            outputs["pred_logits"], outputs["pred_boxes"], targets, stage_idx,
+            outputs["pred_logits"],
+            outputs["pred_boxes"],
+            targets,
+            stage_idx,
         )
 
     def denoising_loss(
@@ -113,13 +116,11 @@ class SetCriterion(nn.Module):
         Returns ``loss_dn_bbox_{i}`` / ``loss_dn_giou_{i}`` per stage.
         """
         tgt = dn["tgt_boxes"].float()  # (B, M, 4)
-        valid = dn["valid"]            # (B, M) bool
-        img = torch.stack(
-            [t["image_size_xyxy"] for t in targets]
-        ).float().unsqueeze(1)  # (B, 1, 4)
-        num_dn = valid.sum().clamp(min=1)     # 0-dim tensor — no host sync
-        vmask = valid.unsqueeze(-1).float()   # (B, M, 1)
-        tgt_valid = tgt[valid]                # (V, 4) — loop-invariant
+        valid = dn["valid"]  # (B, M) bool
+        img = torch.stack([t["image_size_xyxy"] for t in targets]).float().unsqueeze(1)  # (B, 1, 4)
+        num_dn = valid.sum().clamp(min=1)  # 0-dim tensor — no host sync
+        vmask = valid.unsqueeze(-1).float()  # (B, M, 1)
+        tgt_valid = tgt[valid]  # (V, 4) — loop-invariant
 
         losses: dict[str, Tensor] = {}
         for i, pred in enumerate(dn["pred_boxes"]):
@@ -156,15 +157,17 @@ class SetCriterion(nn.Module):
             tgt_boxes_xyxy = targets[b]["boxes_xyxy"]  # absolute xyxy
 
             if tgt_labels.shape[0] == 0:
-                indices.append((
-                    torch.tensor([], dtype=torch.long, device=pred_logits.device),
-                    torch.tensor([], dtype=torch.long, device=pred_logits.device),
-                ))
+                indices.append(
+                    (
+                        torch.tensor([], dtype=torch.long, device=pred_logits.device),
+                        torch.tensor([], dtype=torch.long, device=pred_logits.device),
+                    )
+                )
                 continue
 
             out_prob = pred_logits[b].sigmoid()
             alpha, gamma = self.focal_alpha, self.focal_gamma
-            neg_cost = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
+            neg_cost = (1 - alpha) * (out_prob**gamma) * (-(1 - out_prob + 1e-8).log())
             pos_cost = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
             cost_class = pos_cost[:, tgt_labels] - neg_cost[:, tgt_labels]
 
@@ -188,10 +191,12 @@ class SetCriterion(nn.Module):
                 cost = cost + (iou < iou_floor).float() * 1e6
 
             row_ind, col_ind = linear_sum_assignment(cost.detach().cpu().numpy())
-            indices.append((
-                torch.as_tensor(row_ind, dtype=torch.long, device=pred_logits.device),
-                torch.as_tensor(col_ind, dtype=torch.long, device=pred_logits.device),
-            ))
+            indices.append(
+                (
+                    torch.as_tensor(row_ind, dtype=torch.long, device=pred_logits.device),
+                    torch.as_tensor(col_ind, dtype=torch.long, device=pred_logits.device),
+                )
+            )
         return indices
 
     def _loss_labels(
@@ -205,8 +210,10 @@ class SetCriterion(nn.Module):
         pred_logits = pred_logits.float()
         batch_size, num_queries, num_classes = pred_logits.shape
         target_classes = torch.full(
-            (batch_size, num_queries), num_classes,
-            dtype=torch.long, device=pred_logits.device,
+            (batch_size, num_queries),
+            num_classes,
+            dtype=torch.long,
+            device=pred_logits.device,
         )
         for b, (src_idx, tgt_idx) in enumerate(indices):
             if src_idx.shape[0] > 0:
@@ -222,10 +229,15 @@ class SetCriterion(nn.Module):
         labels[pos_inds, target_classes_flat[pos_inds]] = 1.0
 
         # Focal loss: sum reduction, then / num_boxes
-        loss = sigmoid_focal_loss(
-            src_logits, labels,
-            alpha=self.focal_alpha, gamma=self.focal_gamma,
-        ) / num_boxes
+        loss = (
+            sigmoid_focal_loss(
+                src_logits,
+                labels,
+                alpha=self.focal_alpha,
+                gamma=self.focal_gamma,
+            )
+            / num_boxes
+        )
         return loss
 
     def _loss_boxes(
@@ -272,8 +284,12 @@ class SetCriterion(nn.Module):
 # Focal loss (matches fvcore's sigmoid_focal_loss with reduction="sum")
 # ---------------------------------------------------------------------------
 
+
 def sigmoid_focal_loss(
-    inputs: Tensor, targets: Tensor, alpha: float = 0.25, gamma: float = 2.0,
+    inputs: Tensor,
+    targets: Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
 ) -> Tensor:
     """Sigmoid focal loss — sum over all elements."""
     p = inputs.sigmoid()
@@ -287,6 +303,7 @@ def sigmoid_focal_loss(
 # ---------------------------------------------------------------------------
 # Box utilities
 # ---------------------------------------------------------------------------
+
 
 def paired_generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
     """Element-wise GIoU between paired (N, 4) boxes. Returns (N,)."""

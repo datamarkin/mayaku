@@ -120,9 +120,11 @@ _CUSTOM_BLOCK_SETTINGS: dict[str, list[tuple[int, int | None, int]]] = {
 
 def _build_custom_convnext(name: str) -> tv.ConvNeXt:
     from torchvision.models.convnext import CNBlockConfig
+
     settings = _CUSTOM_BLOCK_SETTINGS[name]
     block_setting = [CNBlockConfig(c_in, c_out, depth) for c_in, c_out, depth in settings]
     return tv.ConvNeXt(block_setting=block_setting, stochastic_depth_prob=0.1)
+
 
 _TORCHVISION_DEFAULT_WEIGHTS: dict[ConvNeXtVariant, tv.WeightsEnum] = {
     "convnext_tiny": tv.ConvNeXt_Tiny_Weights.IMAGENET1K_V1,

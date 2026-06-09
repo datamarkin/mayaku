@@ -29,7 +29,9 @@ def _make_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5
     )
 
 
-def _make_mask_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5) -> MayakuConfig:
+def _make_mask_cfg(
+    num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5
+) -> MayakuConfig:
     return MayakuConfig(
         model={
             "meta_architecture": "query_rcnn",
@@ -45,7 +47,11 @@ def _make_mask_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: in
 
 
 def _make_batch(
-    batch_size: int = 1, h: int = 256, w: int = 256, num_gt: int = 2, num_classes: int = 5,
+    batch_size: int = 1,
+    h: int = 256,
+    w: int = 256,
+    num_gt: int = 2,
+    num_classes: int = 5,
     with_masks: bool = False,
 ) -> list[dict]:
     batch = []
@@ -65,7 +71,9 @@ def _make_batch(
             polygons = []
             for i in range(num_gt):
                 x0, y0, x1, y1 = boxes[i].tolist()
-                polygons.append([torch.tensor([x0, y0, x1, y0, x1, y1, x0, y1], dtype=torch.float32)])
+                polygons.append(
+                    [torch.tensor([x0, y0, x1, y0, x1, y1, x0, y1], dtype=torch.float32)]
+                )
             instances.gt_masks = PolygonMasks(polygons)
         batch.append({"image": img, "instances": instances})
     return batch
@@ -78,28 +86,44 @@ class TestSetCriterion:
             {"pred_logits": torch.randn(1, 10, 5), "pred_boxes": torch.rand(1, 10, 4) * 200}
             for _ in range(3)
         ]
-        targets = [{
-            "labels": torch.tensor([0, 2]),
-            "boxes_xyxy": torch.tensor([[10., 10., 50., 50.], [100., 100., 200., 200.]]),
-            "image_size_xyxy": torch.tensor([256., 256., 256., 256.]),
-            "image_size_xyxy_tgt": torch.tensor([[256., 256., 256., 256.], [256., 256., 256., 256.]]),
-        }]
+        targets = [
+            {
+                "labels": torch.tensor([0, 2]),
+                "boxes_xyxy": torch.tensor(
+                    [[10.0, 10.0, 50.0, 50.0], [100.0, 100.0, 200.0, 200.0]]
+                ),
+                "image_size_xyxy": torch.tensor([256.0, 256.0, 256.0, 256.0]),
+                "image_size_xyxy_tgt": torch.tensor(
+                    [[256.0, 256.0, 256.0, 256.0], [256.0, 256.0, 256.0, 256.0]]
+                ),
+            }
+        ]
         losses = criterion(outputs_list, targets)
-        expected = {"loss_ce_0", "loss_bbox_0", "loss_giou_0",
-                    "loss_ce_1", "loss_bbox_1", "loss_giou_1",
-                    "loss_ce_2", "loss_bbox_2", "loss_giou_2"}
+        expected = {
+            "loss_ce_0",
+            "loss_bbox_0",
+            "loss_giou_0",
+            "loss_ce_1",
+            "loss_bbox_1",
+            "loss_giou_1",
+            "loss_ce_2",
+            "loss_bbox_2",
+            "loss_giou_2",
+        }
         assert set(losses.keys()) == expected
         assert all(v.isfinite() for v in losses.values())
 
     def test_empty_targets(self) -> None:
         criterion = SetCriterion(num_classes=5)
         outputs = [{"pred_logits": torch.randn(1, 10, 5), "pred_boxes": torch.rand(1, 10, 4) * 200}]
-        targets = [{
-            "labels": torch.zeros(0, dtype=torch.long),
-            "boxes_xyxy": torch.zeros(0, 4),
-            "image_size_xyxy": torch.tensor([256., 256., 256., 256.]),
-            "image_size_xyxy_tgt": torch.zeros(0, 4),
-        }]
+        targets = [
+            {
+                "labels": torch.zeros(0, dtype=torch.long),
+                "boxes_xyxy": torch.zeros(0, 4),
+                "image_size_xyxy": torch.tensor([256.0, 256.0, 256.0, 256.0]),
+                "image_size_xyxy_tgt": torch.zeros(0, 4),
+            }
+        ]
         losses = criterion(outputs, targets)
         assert all(v.isfinite() for v in losses.values())
 
@@ -275,7 +299,9 @@ class TestQueryRCNN:
             )
 
 
-def _make_qgn_cfg(num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5) -> MayakuConfig:
+def _make_qgn_cfg(
+    num_proposals: int = 10, num_stages: int = 2, num_classes: int = 5
+) -> MayakuConfig:
     return MayakuConfig(
         model={
             "meta_architecture": "query_rcnn",
@@ -329,9 +355,11 @@ class TestQueryGenerator:
 
     def test_no_blind_embeddings_when_qgn(self) -> None:
         model = build_query_rcnn(_make_qgn_cfg())
-        assert not hasattr(model.head, "init_proposal_boxes") or \
-            model.head.init_proposal_boxes is None or \
-            model.head.query_generator is not None
+        assert (
+            not hasattr(model.head, "init_proposal_boxes")
+            or model.head.init_proposal_boxes is None
+            or model.head.query_generator is not None
+        )
 
     def test_stage_truncation_inference(self) -> None:
         model = build_query_rcnn(_make_qgn_cfg(num_stages=2))

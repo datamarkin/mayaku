@@ -415,7 +415,10 @@ class QueryRCNNHeadConfig(_BaseModel):
                 f"inference_num_stages ({self.inference_num_stages}) cannot exceed "
                 f"num_stages ({self.num_stages})"
             )
-        if self.inference_num_proposals is not None and self.inference_num_proposals > self.num_proposals:
+        if (
+            self.inference_num_proposals is not None
+            and self.inference_num_proposals > self.num_proposals
+        ):
             raise ValueError(
                 f"inference_num_proposals ({self.inference_num_proposals}) cannot exceed "
                 f"num_proposals ({self.num_proposals})"
@@ -526,7 +529,9 @@ class ModelConfig(_BaseModel):
         if self.query_rcnn_mask is not None:
             raise ValueError("query_rcnn_mask is only valid with meta_architecture='query_rcnn'")
         if self.query_rcnn_keypoint is not None:
-            raise ValueError("query_rcnn_keypoint is only valid with meta_architecture='query_rcnn'")
+            raise ValueError(
+                "query_rcnn_keypoint is only valid with meta_architecture='query_rcnn'"
+            )
         return self
 
     def resolved_device(self) -> DeviceKind:

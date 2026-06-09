@@ -158,7 +158,7 @@ def _build_llrd_groups(model: nn.Module, cfg: SolverConfig) -> list[dict[str, ob
         if not p.requires_grad:
             continue
         if name.startswith(backbone_prefix_dot) and backbone_prefix_dot:
-            local = name[len(backbone_prefix_dot):]
+            local = name[len(backbone_prefix_dot) :]
             if family == "convnext":
                 layer_id = _layer_id_for_convnext_param(local, num_layers)
             else:  # family == "resnet"

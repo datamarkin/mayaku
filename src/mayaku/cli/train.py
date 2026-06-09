@@ -200,7 +200,9 @@ def run_train(
     # GC fully (the parser's internal tables are otherwise pinned by
     # the polygon-list references kept in dataset_dicts).
     keep_seg = cfg.model.meta_architecture == "mask_rcnn" or cfg.model.query_rcnn_mask is not None
-    keep_kp = cfg.model.meta_architecture == "keypoint_rcnn" or cfg.model.query_rcnn_keypoint is not None
+    keep_kp = (
+        cfg.model.meta_architecture == "keypoint_rcnn" or cfg.model.query_rcnn_keypoint is not None
+    )
     dataset_dicts_raw = load_coco_json(
         coco_gt_json,
         image_root,
@@ -239,9 +241,7 @@ def run_train(
     # __init__ before ``_apply_freeze``, so it counts as a real init source
     # here even though it isn't fed through the top-level ``weights`` path.
     backbone_initialized = (
-        pretrained_backbone
-        or weights is not None
-        or cfg.model.backbone.weights_path is not None
+        pretrained_backbone or weights is not None or cfg.model.backbone.weights_path is not None
     )
     if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
         warnings.warn(
@@ -352,8 +352,12 @@ def run_train(
         augmentations,
         is_train=True,
         mask_format=cfg.input.mask_format,
-        keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn" or cfg.model.query_rcnn_keypoint is not None,
-        metadata=metadata if cfg.model.meta_architecture in ("keypoint_rcnn",) or cfg.model.query_rcnn_keypoint is not None else None,
+        keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn"
+        or cfg.model.query_rcnn_keypoint is not None,
+        metadata=metadata
+        if cfg.model.meta_architecture in ("keypoint_rcnn",)
+        or cfg.model.query_rcnn_keypoint is not None
+        else None,
         # SerializedList returns a fresh dict on every __getitem__, so
         # the mapper's defensive deepcopy is redundant — and skipping it
         # removes the dominant per-iter source of small-Python-object

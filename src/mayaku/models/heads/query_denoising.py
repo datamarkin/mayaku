@@ -63,17 +63,20 @@ def build_dn_groups(
         bw = (bw * (1.0 + (torch.rand_like(bw) * 2 - 1) * box_noise_scale)).clamp(min=1.0)
         bh = (bh * (1.0 + (torch.rand_like(bh) * 2 - 1) * box_noise_scale)).clamp(min=1.0)
 
-        noised = torch.stack([
-            (cx - bw * 0.5).clamp(0, img_w), (cy - bh * 0.5).clamp(0, img_h),
-            (cx + bw * 0.5).clamp(0, img_w), (cy + bh * 0.5).clamp(0, img_h),
-        ], dim=1)
+        noised = torch.stack(
+            [
+                (cx - bw * 0.5).clamp(0, img_w),
+                (cy - bh * 0.5).clamp(0, img_h),
+                (cx + bw * 0.5).clamp(0, img_w),
+                (cy + bh * 0.5).clamp(0, img_h),
+            ],
+            dim=1,
+        )
 
         # Drop boxes that collapsed to <1px after clipping (off-edge noise):
         # they stay as harmless attention-isolated inputs but are excluded
         # from the loss via valid=False (matches the FRCNN reference's guard).
-        non_degenerate = (
-            (noised[:, 2] - noised[:, 0] > 1.0) & (noised[:, 3] - noised[:, 1] > 1.0)
-        )
+        non_degenerate = (noised[:, 2] - noised[:, 0] > 1.0) & (noised[:, 3] - noised[:, 1] > 1.0)
 
         n = g * dn_groups
         boxes[b, :n] = noised

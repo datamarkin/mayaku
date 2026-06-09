@@ -109,17 +109,24 @@ class QueryRCNN(nn.Module):
             loss_dict = self.criterion(outputs_list, targets)
             if qgn_out is not None:
                 assert self.head.query_generator is not None
-                loss_dict.update(qgn_loss(
-                    qgn_out, targets, qgn_out["centers"],
-                    quality_alpha=self.head.query_generator.quality_alpha,
-                ))
+                loss_dict.update(
+                    qgn_loss(
+                        qgn_out,
+                        targets,
+                        qgn_out["centers"],
+                        quality_alpha=self.head.query_generator.quality_alpha,
+                    )
+                )
             if dn_out is not None:
                 loss_dict.update(self.criterion.denoising_loss(dn_out, targets))
 
             if self.mask_on or self.keypoint_on:
                 last = outputs_list[-1]
                 mask_kp_losses = self._forward_mask_keypoint_train(
-                    feature_list, last, targets, images.image_sizes,
+                    feature_list,
+                    last,
+                    targets,
+                    images.image_sizes,
                 )
                 loss_dict.update(mask_kp_losses)
 
@@ -134,7 +141,8 @@ class QueryRCNN(nn.Module):
             return weighted
 
         outputs_list = self.head(
-            feature_list, images.image_sizes,
+            feature_list,
+            images.image_sizes,
             num_stages_override=self.inference_num_stages,
             num_proposals_override=self.inference_num_proposals,
         )
@@ -158,9 +166,14 @@ class QueryRCNN(nn.Module):
 
         losses: dict[str, Tensor] = {}
         if self.mask_on:
-            losses.update(self._forward_mask_train(
-                feature_list, last_outputs, fg_instances, indices,
-            ))
+            losses.update(
+                self._forward_mask_train(
+                    feature_list,
+                    last_outputs,
+                    fg_instances,
+                    indices,
+                )
+            )
         if self.keypoint_on:
             losses.update(self._forward_keypoint_train(feature_list, fg_instances))
         return losses
@@ -185,7 +198,9 @@ class QueryRCNN(nn.Module):
         valid_indices = [idx for idx, m in zip(indices, valid_mask, strict=True) if m]
         b_n = last_outputs["pred_logits"].shape[:2]
         fg_obj = self._gather_fg_obj_features(
-            obj_features, valid_indices, (int(b_n[0]), int(b_n[1])),
+            obj_features,
+            valid_indices,
+            (int(b_n[0]), int(b_n[1])),
         )
 
         mask_logits = self.mask_head(mask_roi_feats, fg_obj)
@@ -198,10 +213,7 @@ class QueryRCNN(nn.Module):
         fg_instances: list[Instances],
     ) -> dict[str, Tensor]:
         assert self.keypoint_head is not None
-        kp_instances = [
-            inst for inst in fg_instances
-            if len(inst) > 0 and inst.has("gt_keypoints")
-        ]
+        kp_instances = [inst for inst in fg_instances if len(inst) > 0 and inst.has("gt_keypoints")]
         kp_instances, _ = select_proposals_with_visible_keypoints(kp_instances)
         valid = [inst for inst in kp_instances if len(inst) > 0]
         if not valid:
@@ -437,6 +449,7 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
     top_block = None
     if qr_cfg.fpn_p6p7:
         from mayaku.models.necks.fpn import LastLevelP6P7
+
         top_block = LastLevelP6P7(cfg.model.fpn.out_channels, cfg.model.fpn.out_channels)
 
     fpn = FPN(
@@ -534,6 +547,7 @@ def build_query_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) 
     if cfg.model.query_rcnn_keypoint is not None:
         kp_cfg = cfg.model.query_rcnn_keypoint
         from mayaku.models.backbones._base import ShapeSpec
+
         keypoint_pooler = ROIPooler(
             output_size=kp_cfg.pooler_resolution,
             scales=pooler_scales,

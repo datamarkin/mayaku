@@ -241,13 +241,11 @@ class _StubConvNeXtForNumLayers(nn.Module):
 @pytest.mark.parametrize(
     "stage2_blocks,expected_num_layers",
     [
-        (9, 6),    # ConvNeXt-Tiny: buckets {0,1,2} → max_layer_id 6
+        (9, 6),  # ConvNeXt-Tiny: buckets {0,1,2} → max_layer_id 6
         (27, 12),  # ConvNeXt-S/B/L: buckets {0..8} → max_layer_id 12
     ],
 )
-def test_resolve_llrd_num_layers_convnext(
-    stage2_blocks: int, expected_num_layers: int
-) -> None:
+def test_resolve_llrd_num_layers_convnext(stage2_blocks: int, expected_num_layers: int) -> None:
     """``num_layers`` falls out mechanically from stage-2's block count via MMDet's bucketing."""
     model = nn.Sequential(_StubConvNeXtForNumLayers(stage2_blocks))
     assert _resolve_llrd_num_layers(model, "0", "convnext") == expected_num_layers
@@ -315,8 +313,8 @@ _GOLDEN_CASES_BASE: tuple[tuple[str, int], ...] = (
     ("_res_stages.res4.0.block.0.weight", 3),
     ("_res_stages.res4.3.block.0.weight", 4),
     ("_res_stages.res4.6.block.0.weight", 5),
-    ("_res_stages.res4.8.block.0.weight", 5),   # boundary: still bucket 2
-    ("_res_stages.res4.9.block.0.weight", 6),   # boundary: next bucket
+    ("_res_stages.res4.8.block.0.weight", 5),  # boundary: still bucket 2
+    ("_res_stages.res4.9.block.0.weight", 6),  # boundary: next bucket
     ("_res_stages.res4.26.block.0.weight", 11),  # Base stage-2 max
     ("_res_stages.res5.0.block.0.weight", 12),
 )
@@ -333,9 +331,7 @@ def test_layer_id_for_convnext_matches_mmdet_rule(
     """Adapter output must equal the hand-derived MMDet layer_id for every case."""
     for local_name, expected in cases:
         ours = _layer_id_for_convnext_param(local_name, num_layers=num_layers)
-        assert ours == expected, (
-            f"adapter wrong: {local_name!r} → {ours}, expected {expected}"
-        )
+        assert ours == expected, f"adapter wrong: {local_name!r} → {ours}, expected {expected}"
 
 
 def test_layer_id_adapter_rejects_unknown_convnext_param() -> None:
@@ -409,12 +405,8 @@ def test_llrd_scale_formula_on_convnext_tiny() -> None:
 
 def test_llrd_composes_with_freeze_at() -> None:
     """End-to-end: frozen stages contribute zero groups; remaining LRs stay monotonic."""
-    model = nn.ModuleDict(
-        {"backbone": _build_convnext_tiny(freeze_at=2), "head": nn.Linear(8, 4)}
-    )
-    cfg = _solver_cfg(
-        optimizer_name="AdamW", base_lr=1e-4, llrd_enabled=True, llrd_decay=0.7
-    )
+    model = nn.ModuleDict({"backbone": _build_convnext_tiny(freeze_at=2), "head": nn.Linear(8, 4)})
+    cfg = _solver_cfg(optimizer_name="AdamW", base_lr=1e-4, llrd_enabled=True, llrd_decay=0.7)
     opt = build_optimizer(model, cfg)
 
     layer_ids = {int(g["layer_id"]) for g in opt.param_groups}

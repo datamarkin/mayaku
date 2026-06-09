@@ -76,8 +76,8 @@ class QueryDynamicMaskHead(nn.Module):
             x = F.relu(conv(x))
 
         kernel_params = self.kernel_fc(obj_features.float())
-        weights = kernel_params[:, :self.conv_dim]
-        biases = kernel_params[:, self.conv_dim:]
+        weights = kernel_params[:, : self.conv_dim]
+        biases = kernel_params[:, self.conv_dim :]
 
         mask = torch.einsum("rchw,rc->rhw", x.float(), weights) + biases[..., None]
         mask = mask.unsqueeze(1)
