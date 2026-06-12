@@ -24,7 +24,6 @@ from typing import cast
 
 import typer
 
-from mayaku.api import train
 from mayaku.backends.mps import track_mps_fallbacks
 from mayaku.cli.download import render_index, run_download
 from mayaku.cli.eval import run_eval
@@ -99,6 +98,11 @@ def _train(
     ``--images``. Picks the best checkpoint, runs final eval when a val
     split is present, and writes ``metadata.json``.
     """
+    # Deferred: `mayaku.api` imports from `mayaku.cli` (resolve_weights, run_train),
+    # so importing it at module load would create a cycle (api → cli → __main__ → api).
+    # `train` is only needed when this command runs, so import it here.
+    from mayaku.api import train
+
     overrides = {"solver": {"max_iter": max_iter}} if max_iter is not None else None
     # Install the MPS op-fallback tracker at the shell-CLI boundary only;
     # library callers (``mayaku.train`` from Python) manage it themselves.
