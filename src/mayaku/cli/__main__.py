@@ -9,7 +9,7 @@ argument plumbing).
 
 Subcommands:
 
-* ``mayaku train CONFIG --json --images --output [--weights] [--device] [--max-iter] [--val-json --val-images]``
+* ``mayaku train [CONFIG] [--weights] (--data | --json --images) [--val-json --val-images] [--output] [--device] [--max-iter] [--num-gpus]``
 * ``mayaku eval CONFIG --weights --json --images [--output] [--device]``
 * ``mayaku predict CONFIG IMAGE [--weights] [--output] [--device]``
 * ``mayaku export TARGET CONFIG --weights --output``
@@ -20,16 +20,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import typer
 
+from mayaku.api import train
 from mayaku.backends.mps import track_mps_fallbacks
 from mayaku.cli.download import render_index, run_download
 from mayaku.cli.eval import run_eval
 from mayaku.cli.export import run_export
 from mayaku.cli.predict import run_predict
-from mayaku.cli.train import run_train, run_train_worker
-from mayaku.engine import launch, resolve_ddp_device
+from mayaku.config.schemas import DeviceSetting
 from mayaku.utils.download import DEFAULT_MANIFEST_URL, VARIANTS
 
 app = typer.Typer(
@@ -42,103 +43,87 @@ app = typer.Typer(
 
 @app.command("train")
 def _train(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
-    json_path: Path = typer.Option(..., "--json", exists=True, dir_okay=False),
-    images: Path = typer.Option(..., "--images", exists=True, file_okay=False),
-    output: Path = typer.Option(..., "--output", file_okay=False),
-    weights: Path | None = typer.Option(None, "--weights", exists=True, dir_okay=False),
-    pretrained_backbone: bool = typer.Option(
-        False,
-        "--pretrained-backbone",
-        help=(
-            "Initialise the backbone from torchvision's ImageNet pretrained "
-            "weights (DEFAULT). Strongly recommended for fine-tuning — the "
-            "schema's freeze_at=2 default freezes the early stages, which is "
-            "only meaningful when those stages already carry useful features."
-        ),
-    ),
-    device: str | None = typer.Option(None, "--device", help="cpu/mps/cuda; default = auto"),
-    max_iter: int | None = typer.Option(
-        None, "--max-iter", help="Override SolverConfig.max_iter (smoke runs)."
-    ),
-    log_period: int = typer.Option(20, "--log-period", help="Print loss/lr every N iterations."),
-    val_json: Path | None = typer.Option(
+    config: str | None = typer.Argument(
         None,
-        "--val-json",
-        exists=True,
-        dir_okay=False,
+        help="YAML path or bundled config name. Omit when --weights defines the architecture.",
+    ),
+    weights: str | None = typer.Option(
+        None,
+        "--weights",
         help=(
-            "Held-out COCO ground-truth JSON for periodic mid-training "
-            "evaluation. Required when test.eval_period > 0 in the config."
+            "Bundled model name or a .pth path. Defines the architecture when "
+            "CONFIG is omitted, and seeds training (the class-specific head "
+            "re-initialises when the dataset's class count differs)."
         ),
+    ),
+    data: str | None = typer.Option(
+        None,
+        "--data",
+        help="Dataset directory or .yaml descriptor. Alternative to --json/--images.",
+    ),
+    json_path: Path | None = typer.Option(
+        None, "--json", exists=True, dir_okay=False, help="Train COCO JSON (with --images)."
+    ),
+    images: Path | None = typer.Option(
+        None, "--images", exists=True, file_okay=False, help="Train image directory (with --json)."
+    ),
+    val_json: Path | None = typer.Option(
+        None, "--val-json", exists=True, dir_okay=False, help="Val COCO JSON for final eval."
     ),
     val_images: Path | None = typer.Option(
-        None,
-        "--val-images",
-        exists=True,
-        file_okay=False,
-        help="Image directory matching --val-json.",
+        None, "--val-images", exists=True, file_okay=False, help="Val image directory."
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", file_okay=False, help="Run directory. Default ./runs/<config_stem>/."
+    ),
+    device: str = typer.Option("auto", "--device", help="cpu/mps/cuda; default = auto"),
+    max_iter: int | None = typer.Option(
+        None, "--max-iter", help="Override solver.max_iter (smoke runs)."
     ),
     num_gpus: int = typer.Option(
         1,
         "--num-gpus",
         min=1,
         help=(
-            "Number of GPUs to train on (DDP). Default 1 (single-process). "
-            "Values > 1 spawn that many worker processes via "
-            "`mayaku.engine.launch` (NCCL on CUDA/ROCm, gloo elsewhere). "
-            "Multiply `solver.base_lr` by --num-gpus (linear scaling rule) "
-            "in the config when scaling up. MPS is single-device only."
+            "Number of GPUs to train on (DDP). Default 1. Multiply "
+            "`solver.base_lr` by --num-gpus (linear scaling rule) when scaling "
+            "up. MPS is single-device only."
         ),
     ),
 ) -> None:
-    """Train a detector. ``CONFIG`` is a YAML loadable by :func:`load_yaml`."""
-    if num_gpus > 1:
-        try:
-            dev = resolve_ddp_device(device, num_gpus)
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        # MPS fallback tracker is a no-op outside MPS (already rejected
-        # by resolve_ddp_device for multi-GPU), so we skip the context
-        # manager here — `launch` spawns workers and the parent process
-        # does no GPU work.
-        launch(
-            run_train_worker,
-            num_gpus,
-            device=dev,
-            args=(
-                config,
-                json_path,
-                images,
-                output,
-                weights,
-                pretrained_backbone,
-                device,
-                max_iter,
-                log_period,
-                val_json,
-                val_images,
-            ),
-        )
-        return
-    # Install the MPS op-fallback tracker at the shell-CLI boundary
-    # only. Library callers (``run_train`` from Python) are free to
-    # install the tracker themselves or skip it. ``track_mps_fallbacks``
-    # is a no-op when MAYAKU_VERBOSE_MPS=1 or when the device isn't MPS.
+    """Train a detector — the CLI mirror of :func:`mayaku.train`.
+
+    Define the model with ``CONFIG`` (YAML path or bundled name) or
+    ``--weights`` (bundled name or trained .pth). Point at the dataset
+    with ``--data`` (directory or .yaml) or the explicit ``--json`` /
+    ``--images``. Picks the best checkpoint, runs final eval when a val
+    split is present, and writes ``metadata.json``.
+    """
+    overrides = {"solver": {"max_iter": max_iter}} if max_iter is not None else None
+    # Install the MPS op-fallback tracker at the shell-CLI boundary only;
+    # library callers (``mayaku.train`` from Python) manage it themselves.
     with track_mps_fallbacks(label="train"):
-        run_train(
-            config,
-            coco_gt_json=json_path,
-            image_root=images,
-            output_dir=output,
-            weights=weights,
-            pretrained_backbone=pretrained_backbone,
-            device=device,
-            max_iter=max_iter,
-            log_period=log_period,
-            val_json=val_json,
-            val_image_root=val_images,
-        )
+        try:
+            result = train(
+                config=config,
+                weights=weights,
+                data=data,
+                train_json=json_path,
+                train_images=images,
+                val_json=val_json,
+                val_images=val_images,
+                output_dir=output,
+                overrides=overrides,
+                device=cast(DeviceSetting, device),
+                num_gpus=num_gpus,
+            )
+        except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    ap = result["final_box_ap"]
+    if ap is not None:
+        typer.echo(f"box AP: {ap * 100:.2f}")
+    typer.echo(f"final weights: {result['final_weights']}")
 
 
 @app.command("eval")
@@ -333,7 +318,7 @@ def _download(
     cache_dir: Path | None = typer.Option(
         None,
         "--cache-dir",
-        help="Override the cache root (default: $XDG_CACHE_HOME/mayaku/v1/models).",
+        help="Override the cache root (default: <project>/cache/mayaku/v1/models).",
     ),
     manifest_url: str = typer.Option(
         DEFAULT_MANIFEST_URL,

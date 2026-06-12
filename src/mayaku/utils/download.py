@@ -6,9 +6,10 @@ side: given a model name and a target variant, return a local path to a
 verified, ready-to-use artifact.
 
 Cache layout mirrors the URL structure so a wiped cache rehydrates
-identically::
+identically (under ``<project>/cache/`` by default — see
+:func:`_cache_root`)::
 
-    ~/.cache/mayaku/v1/models/<task>/<config_name>.<ext>
+    <project>/cache/mayaku/v1/models/<task>/<config_name>.<ext>
 
 For ``coreml-fp16``: the ``.mlpackage.zip`` is downloaded then extracted
 in place and the resulting ``.mlpackage`` directory is what's returned.
@@ -62,10 +63,31 @@ ManifestEntry = dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+def _project_root() -> Path:
+    """Nearest enclosing project root, walked up from the CWD.
+
+    A "root" is the closest ancestor (including the CWD) that holds a
+    ``pyproject.toml`` or a ``.git``. Falls back to the CWD when no marker
+    is found, so the cache always lands somewhere visible next to where
+    you're working — never in a hidden home directory.
+    """
+    cwd = Path.cwd()
+    for directory in (cwd, *cwd.parents):
+        if (directory / "pyproject.toml").exists() or (directory / ".git").exists():
+            return directory
+    return cwd
+
+
 def _cache_root(version: str = "v1") -> Path:
-    """``$XDG_CACHE_HOME/mayaku/<version>/models`` (or ~/.cache/...)."""
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
+    """Visible cache root: ``<project>/cache/mayaku/<version>/models``.
+
+    Lands under the project root (see :func:`_project_root`) rather than a
+    hidden ``~/.cache`` so downloaded artifacts are easy to find and clear.
+    Set ``MAYAKU_CACHE_DIR`` to override the base directory (e.g. a shared
+    cache on CI); the ``mayaku/<version>/models`` suffix is still appended.
+    """
+    override = os.environ.get("MAYAKU_CACHE_DIR")
+    base = Path(override).expanduser() if override else _project_root() / "cache"
     return base / "mayaku" / version / "models"
 
 

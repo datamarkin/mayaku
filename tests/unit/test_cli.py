@@ -397,6 +397,51 @@ def test_cli_help_lists_every_subcommand() -> None:
         assert cmd in res.stdout
 
 
+def test_cli_train_delegates_to_api(toy_workspace: dict[str, Path], tmp_path: Path) -> None:
+    runner = CliRunner()
+    out = tmp_path / "cli_train_out"
+    res = runner.invoke(
+        app,
+        [
+            "train",
+            str(toy_workspace["cfg"]),
+            "--json",
+            str(toy_workspace["json"]),
+            "--images",
+            str(toy_workspace["images"]),
+            "--output",
+            str(out),
+            "--device",
+            "cpu",
+        ],
+    )
+    assert res.exit_code == 0, res.stdout
+    # metadata.json is written by mayaku.train (the orchestrator), not by
+    # run_train — its presence proves the CLI delegated to the API.
+    assert (out / "train" / "metadata.json").exists()
+    assert "final weights" in res.stdout
+
+
+def test_cli_train_requires_a_model_source(toy_workspace: dict[str, Path], tmp_path: Path) -> None:
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        [
+            "train",
+            "--json",
+            str(toy_workspace["json"]),
+            "--images",
+            str(toy_workspace["images"]),
+            "--output",
+            str(tmp_path / "x"),
+            "--device",
+            "cpu",
+        ],
+    )
+    # No CONFIG and no --weights → clean non-zero exit (BadParameter), not a traceback.
+    assert res.exit_code != 0
+
+
 def test_cli_predict_invokes_run_predict(toy_workspace: dict[str, Path], tmp_path: Path) -> None:
     runner = CliRunner()
     out = tmp_path / "cli_preds.json"
