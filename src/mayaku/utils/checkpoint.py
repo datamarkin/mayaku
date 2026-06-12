@@ -20,6 +20,7 @@ import torch
 __all__ = [
     "git_hash",
     "load_checkpoint_metadata",
+    "load_embedded_config",
     "select_final_weights",
     "strip_num_batches_tracked",
 ]
@@ -101,6 +102,19 @@ def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any] | None:
         if isinstance(sidecar, dict):
             return sidecar
     return None
+
+
+def load_embedded_config(checkpoint_path: Path) -> dict[str, Any] | None:
+    """Return the architecture config embedded in a checkpoint, or ``None``.
+
+    Reads the ``"config"`` block from the self-describing ``"mayaku"``
+    sidecar. ``None`` when the checkpoint has no sidecar or no embedded
+    config. Callers reconstruct a :class:`MayakuConfig` from the result;
+    the sidecar key layout is owned here, not by the caller.
+    """
+    sidecar = load_checkpoint_metadata(checkpoint_path)
+    config = sidecar.get("config") if sidecar else None
+    return config if isinstance(config, dict) else None
 
 
 def git_hash() -> str | None:

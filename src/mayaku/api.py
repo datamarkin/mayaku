@@ -70,20 +70,23 @@ from typing import Any
 
 import torch
 
+from mayaku import configs
+from mayaku.cli._weights import resolve_weights
 from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train, run_train_worker
 from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
 from mayaku.data import resolve_dataset
 from mayaku.engine import launch, resolve_ddp_device
-from mayaku.utils import git_hash, select_final_weights
+from mayaku.utils import git_hash, load_embedded_config, select_final_weights
 
 __all__ = ["train"]
 
 
 def train(
-    config: str | Path | MayakuConfig,
+    config: str | Path | MayakuConfig | None = None,
     *,
+    weights: str | Path | None = None,
     data: str | Path | None = None,
     train_json: Path | None = None,
     train_images: Path | None = None,
@@ -95,6 +98,20 @@ def train(
     num_gpus: int = 1,
 ) -> dict[str, Any]:
     """Train, pick the best checkpoint, optionally run final eval.
+
+    Define the model with either ``config`` or ``weights`` (at least one):
+
+    * ``config`` — a YAML path, a bundled config name (e.g.
+      ``"faster_rcnn_R_50_FPN_3x"``), or a ready :class:`MayakuConfig`.
+      The escape hatch for hand-built or overridden architectures.
+    * ``weights`` — a bundled model name (its architecture config is
+      looked up and its pretrained ``.pth`` fetched) or a trained ``.pth``
+      (its embedded config, written by Task 3, defines the architecture).
+      The weights also seed training; the class-specific head re-inits
+      when the dataset's class count differs. ``config`` wins when both
+      are given. Deriving a config from a ``.pth`` needs a checkpoint
+      produced by this version or later — older ones raise, asking for
+      ``config``. Only full bundled names resolve (no short aliases).
 
     Point the dataset at either ``data`` or the explicit paths, not both:
 
@@ -146,14 +163,11 @@ def train(
     if num_gpus < 1:
         raise ValueError(f"num_gpus must be >= 1; got {num_gpus}")
 
-    # --- Normalize config to MayakuConfig + remember its source -----------
-    if isinstance(config, MayakuConfig):
-        cfg = config
-        config_stem = "mayaku_run"
-    else:
-        config_path = Path(config)
-        cfg = load_yaml(config_path)
-        config_stem = config_path.stem
+    # --- Resolve the model source (config and/or weights) -----------------
+    # ``config`` wins; otherwise the architecture comes from ``weights``
+    # (a bundled name or a trained .pth's embedded config). ``detector_weights``
+    # is the checkpoint to load when ``weights`` was given, else None.
+    cfg, config_stem, detector_weights = _resolve_model_source(config, weights)
 
     # --- Apply overrides --------------------------------------------------
     if overrides:
@@ -174,11 +188,12 @@ def train(
     train_dir = resolved_output_dir / "train"
     train_dir.mkdir(parents=True, exist_ok=True)
 
-    pretrained_backbone = cfg.model.backbone.weights_path is None
-    # Full-model checkpoint (fine-tuning from a trained detector)
-    detector_weights = Path(cfg.model.weights) if cfg.model.weights is not None else None
-    if detector_weights is not None:
-        pretrained_backbone = False
+    # ``weights=`` (resolved above) wins; else fall back to the config's
+    # own ``model.weights`` for the YAML-driven fine-tune path.
+    if detector_weights is None and cfg.model.weights is not None:
+        detector_weights = Path(cfg.model.weights)
+    # Torchvision ImageNet init only when nothing else seeds the weights.
+    pretrained_backbone = cfg.model.backbone.weights_path is None and detector_weights is None
 
     print(f"[mayaku.train] {config_stem} -> {resolved_output_dir}")
 
@@ -317,3 +332,76 @@ def train(
         "eval_seconds": eval_seconds,
         "metadata": metadata,
     }
+
+
+# ---------------------------------------------------------------------------
+# Model-source resolution (config and/or weights)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_model_source(
+    config: str | Path | MayakuConfig | None,
+    weights: str | Path | None,
+) -> tuple[MayakuConfig, str, Path | None]:
+    """Resolve ``(cfg, config_stem, detector_weights)`` from the inputs.
+
+    ``config`` wins when present; otherwise the architecture is derived
+    from ``weights``. ``detector_weights`` is the checkpoint to load when
+    ``weights`` was given (a bundled name's fetched ``.pth`` or the passed
+    ``.pth``), else ``None`` — the caller may still read
+    ``cfg.model.weights``.
+    """
+    if config is not None:
+        cfg, stem = _load_config(config)
+        return cfg, stem, resolve_weights(weights) if weights is not None else None
+    if weights is not None:
+        return _config_from_weights(weights)
+    raise ValueError(
+        "Provide config= (a YAML path, bundled name, or MayakuConfig) or "
+        "weights= (a bundled model name or a trained .pth) so the model "
+        "architecture is defined."
+    )
+
+
+def _load_config(config: str | Path | MayakuConfig) -> tuple[MayakuConfig, str]:
+    """Load an explicit ``config``: object, file path, or bundled name."""
+    if isinstance(config, MayakuConfig):
+        return config, "mayaku_run"
+    path = Path(config)
+    if path.exists():
+        return load_yaml(path), path.stem
+    try:
+        bundled = configs.path(str(config))
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"config {str(config)!r} is neither an existing file nor a bundled config name"
+        ) from None
+    return load_yaml(bundled), bundled.stem
+
+
+def _config_from_weights(weights: str | Path) -> tuple[MayakuConfig, str, Path | None]:
+    """Derive the architecture config from ``weights``.
+
+    A bundled model name resolves to its shipped config (and fetches the
+    pretrained ``.pth``); a trained ``.pth`` supplies its embedded config.
+    """
+    name = str(weights)
+    if not Path(weights).exists():
+        # A bare name: prefer the bundled config + its hosted weights.
+        try:
+            cfg = configs.load(name)
+        except FileNotFoundError:
+            cfg = None
+        if cfg is not None:
+            return cfg, name, resolve_weights(weights)
+
+    weights_path = resolve_weights(weights)
+    assert weights_path is not None  # weights is not None on this path
+    config_dict = load_embedded_config(weights_path)
+    if config_dict is None:
+        raise ValueError(
+            f"{weights_path} has no embedded config (an older or externally "
+            "produced checkpoint). Pass config= explicitly to define the "
+            "architecture."
+        )
+    return MayakuConfig.model_validate(config_dict), weights_path.stem, weights_path

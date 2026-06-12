@@ -144,6 +144,61 @@ def test_train_requires_a_dataset_source(toy_workspace: dict[str, Any], tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Model source: config optional, architecture derivable from weights=
+# ---------------------------------------------------------------------------
+
+
+def test_train_requires_config_or_weights(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Provide config="):
+        train(
+            train_json=toy_workspace["json"],
+            train_images=toy_workspace["images"],
+            output_dir=tmp_path / "run_no_model",
+            device="cpu",
+        )
+
+
+def test_train_derives_config_from_weights(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+    import torch
+
+    # A self-describing checkpoint (Task 3 shape): pure state_dict under
+    # "model", architecture config under the "mayaku" sidecar.
+    state = torch.load(toy_workspace["weights"], map_location="cpu", weights_only=True)
+    ckpt = tmp_path / "embedded.pth"
+    torch.save(
+        {
+            "model": state,
+            "mayaku": {"config": toy_workspace["cfg_obj"].model_dump(mode="json")},
+        },
+        ckpt,
+    )
+
+    out = tmp_path / "run_from_weights"
+    # No config= — the architecture comes purely from the checkpoint.
+    result = train(
+        weights=ckpt,
+        train_json=toy_workspace["json"],
+        train_images=toy_workspace["images"],
+        output_dir=out,
+        device="cpu",
+    )
+    assert result["final_weights"].exists()
+
+
+def test_train_weights_without_embedded_config_raises(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="no embedded config"):
+        train(
+            weights=toy_workspace["weights"],  # a bare state_dict, no sidecar
+            train_json=toy_workspace["json"],
+            train_images=toy_workspace["images"],
+            output_dir=tmp_path / "run_old_ckpt",
+            device="cpu",
+        )
+
+
+# ---------------------------------------------------------------------------
 # `val_json=None` short-circuits all eval
 # ---------------------------------------------------------------------------
 
