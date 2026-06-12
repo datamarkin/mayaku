@@ -40,6 +40,10 @@ class DatasetStats:
     aspect_ratios: tuple[float, ...]
     median_image_short_edge: int
     median_image_long_edge: int
+    # Hygiene counts — boxes/images the analyser skipped, surfaced
+    # instead of silently dropped so a health report can flag bad labels.
+    num_degenerate_boxes: int = 0
+    num_images_without_annotations: int = 0
 
     @property
     def num_boxes(self) -> int:
@@ -97,6 +101,8 @@ def analyze_dataset(
     # Image-level — same semantics as RepeatFactorTrainingSampler so a
     # downstream RFS toggle keys off identical numbers.
     class_image_count: Counter[int] = Counter()
+    num_degenerate = 0
+    num_images_without_annotations = 0
 
     for d in dataset_dicts:
         h = int(d["height"])
@@ -109,8 +115,12 @@ def analyze_dataset(
         new_h, _ = compute_resized_hw(h, w, resize_short_edge, resize_max_edge)
         scale = new_h / h
 
+        annotations = d.get("annotations", ())
+        if not annotations:
+            num_images_without_annotations += 1
+
         seen_classes: set[int] = set()
-        for ann in d.get("annotations", ()):
+        for ann in annotations:
             if ann.get("iscrowd", 0):
                 # Crowd annotations are excluded from detection loss,
                 # so they shouldn't influence anchor design either.
@@ -119,11 +129,13 @@ def analyze_dataset(
             seen_classes.add(cat_id)
             bbox = ann.get("bbox")
             if not bbox or len(bbox) != 4:
+                num_degenerate += 1
                 continue
             # bbox is XYWH_ABS in original pixels.
             bw = float(bbox[2]) * scale
             bh = float(bbox[3]) * scale
             if bw <= 0 or bh <= 0:
+                num_degenerate += 1
                 continue
             sqrt_areas.append((bw * bh) ** 0.5)
             aspect_ratios.append(bw / bh)
@@ -139,4 +151,6 @@ def analyze_dataset(
         aspect_ratios=tuple(aspect_ratios),
         median_image_short_edge=int(statistics.median(short_edges)),
         median_image_long_edge=int(statistics.median(long_edges)),
+        num_degenerate_boxes=num_degenerate,
+        num_images_without_annotations=num_images_without_annotations,
     )
