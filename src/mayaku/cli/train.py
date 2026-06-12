@@ -19,6 +19,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
+from mayaku import __version__
 from mayaku.backends.device import Device
 from mayaku.backends.mps import apply_mps_environment
 from mayaku.cli._factory import build_detector
@@ -71,6 +72,7 @@ from mayaku.tuning import (
     filter_unset,
     walk_leaves,
 )
+from mayaku.utils import git_hash
 
 __all__ = ["run_train", "run_train_worker"]
 
@@ -466,6 +468,20 @@ def run_train(
     # racing on the same path.
     if is_main_process():
         dump_yaml(cfg, output_dir / "config.yaml")
+
+    # Self-describing sidecar embedded in every checkpoint so a trained
+    # .pth reconstructs its architecture + labels without a separate
+    # config or names file. The resolved config carries the architecture
+    # and normalization (pixel mean/std) plus the backbone-coupled solver
+    # settings; class names come from the COCO categories. Kept under a
+    # "mayaku" key so "model" stays a pure state_dict.
+    checkpoint_metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "config": cfg.model_dump(mode="json"),
+        "class_names": list(metadata.thing_classes),
+        "provenance": {"mayaku_version": __version__, "git_hash": git_hash()},
+    }
+
     timer = IterationTimer()
     hooks: list[Any] = [
         timer,
@@ -482,6 +498,7 @@ def run_train(
                 output_dir,
                 cfg.solver.checkpoint_period,
                 optimizer=optimizer,
+                metadata=checkpoint_metadata,
             )
         )
         # LLRD survival check: snapshot per-group LR at named milestones
@@ -514,6 +531,7 @@ def run_train(
                     ema.shadow,
                     output_dir / "ema",
                     cfg.solver.checkpoint_period,
+                    metadata=checkpoint_metadata,
                 )
             )
     if cfg.test.eval_period > 0:

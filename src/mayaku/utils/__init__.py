@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mayaku.utils.checkpoint import (
     git_hash,
+    load_checkpoint_metadata,
     select_final_weights,
     strip_num_batches_tracked,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "download_model",
     "git_hash",
     "list_models",
+    "load_checkpoint_metadata",
     "read_image",
     "select_final_weights",
     "strip_num_batches_tracked",

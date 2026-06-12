@@ -20,7 +20,7 @@ trainer) and runs in registration order.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -200,6 +200,10 @@ class PeriodicCheckpointer(_BaseHook):
             useful).
         save_final: Also save once on ``after_train``, naming the file
             ``model_final.pth``.
+        metadata: Optional self-describing sidecar (resolved config,
+            class names, provenance) written under the ``"mayaku"`` key
+            alongside the weights. ``"model"`` stays a pure state_dict so
+            ``load_state_dict`` interop is unaffected.
     """
 
     def __init__(
@@ -210,6 +214,7 @@ class PeriodicCheckpointer(_BaseHook):
         *,
         optimizer: torch.optim.Optimizer | None = None,
         save_final: bool = True,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         if period <= 0:
             raise ValueError(f"PeriodicCheckpointer period must be > 0; got {period}")
@@ -218,6 +223,7 @@ class PeriodicCheckpointer(_BaseHook):
         self.output_dir = Path(output_dir)
         self.period = period
         self.save_final = save_final
+        self.metadata = metadata
 
     def before_train(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +243,8 @@ class PeriodicCheckpointer(_BaseHook):
         state: dict[str, object] = {"model": self.model.state_dict()}
         if self.optimizer is not None:
             state["optimizer"] = self.optimizer.state_dict()
+        if self.metadata is not None:
+            state["mayaku"] = dict(self.metadata)
         torch.save(state, path)
 
 

@@ -68,6 +68,31 @@ def test_train_returns_result_dict_and_writes_artefacts(
 
 
 # ---------------------------------------------------------------------------
+# The final checkpoint is self-describing (config + class names embedded)
+# ---------------------------------------------------------------------------
+
+
+def test_train_writes_self_describing_checkpoint(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
+    import torch
+
+    out = tmp_path / "run_selfdesc"
+    result = train(
+        config=toy_workspace["cfg"],
+        train_json=toy_workspace["json"],
+        train_images=toy_workspace["images"],
+        output_dir=out,
+        device="cpu",
+    )
+    state = torch.load(result["final_weights"], map_location="cpu", weights_only=False)
+    sidecar = state["mayaku"]
+    assert sidecar["class_names"] == ["thing"]
+    assert sidecar["config"]["model"]["meta_architecture"] == "faster_rcnn"
+    assert "mayaku_version" in sidecar["provenance"]
+
+
+# ---------------------------------------------------------------------------
 # `data=` (directory convention) resolves the splits and trains end-to-end
 # ---------------------------------------------------------------------------
 

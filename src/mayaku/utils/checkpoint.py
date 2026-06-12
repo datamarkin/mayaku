@@ -13,10 +13,16 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import torch
 
-__all__ = ["git_hash", "select_final_weights", "strip_num_batches_tracked"]
+__all__ = [
+    "git_hash",
+    "load_checkpoint_metadata",
+    "select_final_weights",
+    "strip_num_batches_tracked",
+]
 
 
 def select_final_weights(train_dir: Path) -> Path:
@@ -78,6 +84,23 @@ def strip_num_batches_tracked(checkpoint_path: Path) -> None:
         k: v for k, v in state["model"].items() if not k.endswith("num_batches_tracked")
     }
     torch.save(state, checkpoint_path)
+
+
+def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any] | None:
+    """Return the self-describing ``"mayaku"`` sidecar from a checkpoint.
+
+    Checkpoints written by :class:`mayaku.engine.PeriodicCheckpointer`
+    with a ``metadata`` argument carry a ``"mayaku"`` block (resolved
+    config, class names, provenance) next to the weights. Returns that
+    block, or ``None`` for older / externally-produced checkpoints that
+    don't have one.
+    """
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if isinstance(state, dict):
+        sidecar = state.get("mayaku")
+        if isinstance(sidecar, dict):
+            return sidecar
+    return None
 
 
 def git_hash() -> str | None:
