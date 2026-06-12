@@ -74,6 +74,7 @@ from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train, run_train_worker
 from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
+from mayaku.data import resolve_dataset
 from mayaku.engine import launch, resolve_ddp_device
 from mayaku.utils import git_hash, select_final_weights
 
@@ -83,8 +84,9 @@ __all__ = ["train"]
 def train(
     config: str | Path | MayakuConfig,
     *,
-    train_json: Path,
-    train_images: Path,
+    data: str | Path | None = None,
+    train_json: Path | None = None,
+    train_images: Path | None = None,
     val_json: Path | None = None,
     val_images: Path | None = None,
     output_dir: Path | None = None,
@@ -94,6 +96,15 @@ def train(
 ) -> dict[str, Any]:
     """Train, pick the best checkpoint, optionally run final eval.
 
+    Point the dataset at either ``data`` or the explicit paths, not both:
+
+    * ``data`` — a dataset directory or a ``.yaml`` descriptor, resolved
+      by :func:`mayaku.data.resolve_dataset`. ``train`` is required; a
+      ``val`` split, when present, is used for final eval. Class names
+      come from the COCO annotations, not the descriptor.
+    * ``train_json`` + ``train_images`` (+ optional ``val_json`` +
+      ``val_images``) — the explicit form.
+
     See the module docstring for full parameter semantics and the
     auto-detection rules (pretrained-backbone derivation, no-val
     short-circuit, output-dir defaulting). Returns a result dict.
@@ -102,7 +113,27 @@ def train(
     For mid-training eval, pass
     ``overrides={"test": {"eval_period": N}}``.
     """
+    # --- Resolve the dataset source ---------------------------------------
+    if data is not None:
+        if any(p is not None for p in (train_json, train_images, val_json, val_images)):
+            raise ValueError(
+                "Pass either data= or the explicit train_json/train_images"
+                "(/val_json/val_images) paths, not both."
+            )
+        splits = resolve_dataset(data)
+        train_images, train_json = splits["train"]
+        if "val" in splits:
+            val_images, val_json = splits["val"]
+    elif train_json is None or train_images is None:
+        raise ValueError(
+            "Provide data= (a dataset directory or .yaml descriptor) or both "
+            "train_json and train_images."
+        )
+
     # --- Validate inputs early --------------------------------------------
+    # Guaranteed set by the resolution block above (data= populates them,
+    # the explicit path raises if either is missing).
+    assert train_json is not None and train_images is not None
     if not train_json.exists():
         raise FileNotFoundError(f"train_json not found: {train_json}")
     if not train_images.is_dir():

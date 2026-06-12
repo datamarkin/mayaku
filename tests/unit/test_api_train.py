@@ -68,6 +68,57 @@ def test_train_returns_result_dict_and_writes_artefacts(
 
 
 # ---------------------------------------------------------------------------
+# `data=` (directory convention) resolves the splits and trains end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_train_accepts_data_directory(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+    import shutil
+
+    # Lay the toy image + annotations out in the train/ convention.
+    dataset = tmp_path / "dataset"
+    train_dir = dataset / "train"
+    train_dir.mkdir(parents=True)
+    shutil.copy(toy_workspace["image_file"], train_dir / toy_workspace["image_file"].name)
+    shutil.copy(toy_workspace["json"], train_dir / "_annotations.coco.json")
+
+    out = tmp_path / "run_data_dir"
+    result = train(
+        config=toy_workspace["cfg"],
+        data=dataset,
+        output_dir=out,
+        device="cpu",
+    )
+    # train-only layout → no val split → eval skipped, same as omitting val.
+    assert result["final_weights"].exists()
+    assert result["final_box_ap"] is None
+    assert (out / "train" / "metadata.json").exists()
+
+
+def test_train_rejects_data_and_explicit_paths_together(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="not both"):
+        train(
+            config=toy_workspace["cfg"],
+            data=tmp_path,
+            train_json=toy_workspace["json"],
+            train_images=toy_workspace["images"],
+            output_dir=tmp_path / "run_both",
+            device="cpu",
+        )
+
+
+def test_train_requires_a_dataset_source(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Provide data="):
+        train(
+            config=toy_workspace["cfg"],
+            output_dir=tmp_path / "run_neither",
+            device="cpu",
+        )
+
+
+# ---------------------------------------------------------------------------
 # `val_json=None` short-circuits all eval
 # ---------------------------------------------------------------------------
 
