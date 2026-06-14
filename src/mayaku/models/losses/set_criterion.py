@@ -297,7 +297,8 @@ def sigmoid_focal_loss(
     p_t = p * targets + (1 - p) * (1 - targets)
     alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
     loss = alpha_t * (1 - p_t) ** gamma * ce
-    return loss.sum()
+    total: Tensor = loss.sum()
+    return total
 
 
 # ---------------------------------------------------------------------------
