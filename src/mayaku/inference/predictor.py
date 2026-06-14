@@ -247,7 +247,11 @@ class Predictor:
                 "the Predictor."
             )
         instances: Instances = outputs[0]["instances"]
-        if instances.image_size != (h, w):
+        # Masks/keypoints are box-relative and must be pasted to image res even
+        # when boxes need no rescale (UniQuery emits boxes in image coords, so
+        # the size check alone would skip the paste). Mirrors COCOEvaluator.
+        needs_paste = instances.has("pred_masks") or instances.has("pred_keypoints")
+        if instances.image_size != (h, w) or needs_paste:
             instances = detector_postprocess(instances, h, w)
         return instances
 

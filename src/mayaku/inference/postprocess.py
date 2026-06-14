@@ -79,18 +79,22 @@ def detector_postprocess(
     if instances.has("pred_masks"):
         masks = instances.pred_masks
         assert isinstance(masks, torch.Tensor)
-        # The mask head emits (R, 1, M, M) soft masks. Drop the K=1 dim
-        # so ROIMasks sees its expected (N, M, M). Filter to the kept
-        # set before pasting so we don't waste work on collapsed boxes.
-        kept_masks = masks[keep][:, 0]
-        roi_masks = ROIMasks(kept_masks)
-        bitmasks = roi_masks.to_bitmasks(
-            out.pred_boxes.tensor,
-            output_height,
-            output_width,
-            threshold=mask_threshold,
-        )
-        out.pred_masks = bitmasks.tensor
+        kept = masks[keep]
+        if kept.dim() == 4:
+            # The mask head emits (R, 1, M, M) box-relative soft masks.
+            # Drop the K=1 dim so ROIMasks sees its expected (N, M, M),
+            # then paste each onto the image canvas at its box.
+            roi_masks = ROIMasks(kept[:, 0])
+            bitmasks = roi_masks.to_bitmasks(
+                out.pred_boxes.tensor,
+                output_height,
+                output_width,
+                threshold=mask_threshold,
+            )
+            out.pred_masks = bitmasks.tensor
+        else:
+            # Already pasted to the image canvas (R, H, W); pass through.
+            out.pred_masks = kept
 
     if instances.has("pred_keypoints"):
         kp = instances.pred_keypoints

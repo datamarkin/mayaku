@@ -227,7 +227,12 @@ class COCOEvaluator(DatasetEvaluator):
             # Rescale to the original image size when we have it.
             output_h = int(inp.get("height", instances.image_size[0]))
             output_w = int(inp.get("width", instances.image_size[1]))
-            if (output_h, output_w) != instances.image_size:
+            # Masks/keypoints are emitted box-relative (e.g. 28x28 soft masks)
+            # and must be pasted to image resolution in detector_postprocess —
+            # even when boxes need no rescale (UniQuery already outputs boxes in
+            # image coords, so the size check alone would skip the paste).
+            needs_paste = instances.has("pred_masks") or instances.has("pred_keypoints")
+            if (output_h, output_w) != instances.image_size or needs_paste:
                 instances = detector_postprocess(instances, output_h, output_w)
             json_records = list(
                 instances_to_coco_json(
