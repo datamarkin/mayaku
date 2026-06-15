@@ -31,6 +31,7 @@ from mayaku.backends.amp import NullGradScaler, autocast, make_grad_scaler
 from mayaku.backends.device import Device
 from mayaku.engine.callbacks import HookBase
 from mayaku.engine.distributed import get_world_size
+from mayaku.models.losses.set_criterion import SetCriterion
 
 __all__ = ["AMPTrainer", "GradClipType", "SimpleTrainer", "TrainerBase"]
 
@@ -159,6 +160,23 @@ class SimpleTrainer(TrainerBase):
             self._data_iter = iter(self.data_loader)
             return next(self._data_iter)
 
+    def _effective_normalizer(self, micro_batches: Sequence[Any]) -> float | None:
+        """Effective-batch GT box count for box-normalized losses (e.g.
+        UniQuery), or ``None`` for models whose losses don't normalize by box
+        count (those use plain 1/N averaging across micro-batches).
+
+        Summed over *all* gradient-accumulation micro-batches, so accumulation
+        matches a real batch instead of normalizing each micro-batch by its own
+        count. The DDP reduction is the criterion's own
+        :meth:`SetCriterion.reduce_num_boxes` — one source of truth for the
+        convention, so the accumulated path can't drift from the single-batch path.
+        """
+        model = getattr(self.model, "module", self.model)  # unwrap DDP
+        if not getattr(model, "loss_normalized_by_num_boxes", False):
+            return None
+        count = sum(len(x["instances"]) for batch in micro_batches for x in batch)
+        return SetCriterion.reduce_num_boxes(count, next(self.model.parameters()).device)
+
     def _clip_grads(self) -> None:
         """Apply value or norm clipping to trainable params, per
         :attr:`grad_clip_type`. Caller is responsible for unscaling
@@ -236,38 +254,49 @@ class SimpleTrainer(TrainerBase):
             sums[grp] = sums.get(grp, 0.0) + sq
         return {k: v**0.5 for k, v in sums.items() if v > 0.0 or k == "total"}
 
+    def _forward_backward(
+        self, batch: Any, normalizer: float | None, scale: float
+    ) -> Mapping[str, Tensor]:
+        """One micro-batch forward + scaled backward; returns the raw loss dict
+        (unscaled) for metrics. Overridden by :class:`AMPTrainer` to add
+        autocast + the grad scaler. ``num_boxes`` is only passed to models that
+        normalize by box count (others don't accept the kwarg)."""
+        loss_dict: Mapping[str, Tensor] = (
+            self.model(batch, num_boxes=normalizer) if normalizer is not None else self.model(batch)
+        )
+        (_sum_loss(loss_dict) * scale).backward()  # type: ignore[no-untyped-call]
+        return loss_dict
+
+    def _accumulate(self) -> dict[str, float]:
+        """Gradient accumulation over ``grad_accum_steps`` micro-batches, with
+        the loss scaled so the SUMMED gradient equals a real effective batch's:
+          - box-normalized losses (UniQuery): normalize each micro-batch by the
+            EFFECTIVE-batch box count and sum (scale s=1). Per-micro
+            normalization would silently mis-weight and diverge from a real batch.
+          - other (mean-reduced) losses: scale s=1/N so the sum is the mean.
+        Returns the per-key losses already scaled (their sum is the step loss).
+        """
+        micro_batches = [self._next_batch() for _ in range(self.grad_accum_steps)]
+        normalizer = self._effective_normalizer(micro_batches)
+        s = 1.0 if normalizer is not None else 1.0 / self.grad_accum_steps
+        accum: dict[str, float] = {}
+        for batch in micro_batches:
+            loss_dict = self._forward_backward(batch, normalizer, s)
+            for k, v in loss_dict.items():
+                accum[k] = accum.get(k, 0.0) + float(v.detach().item()) * s
+        return accum
+
     def run_step(self) -> None:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        # Gradient accumulation: forward+backward over ``grad_accum_steps``
-        # micro-batches, scaling each loss by 1/N so the SUMMED gradients
-        # equal the gradient of the mean loss across the full effective
-        # batch. ``optimizer.step()`` and grad clipping fire once per
-        # ``run_step`` (i.e. once per effective iteration).
-        accum_total = 0.0
-        accum_dict: dict[str, float] = {}
-        for _ in range(self.grad_accum_steps):
-            batch = self._next_batch()
-            loss_dict = self.model(batch)
-            micro_total = _sum_loss(loss_dict) / self.grad_accum_steps
-            micro_total.backward()  # type: ignore[no-untyped-call]
-            # Track raw (un-scaled) loss values for the metrics record.
-            accum_total += float(micro_total.detach().item()) * self.grad_accum_steps
-            for k, v in loss_dict.items():
-                accum_dict[k] = accum_dict.get(k, 0.0) + float(v.detach().item())
+        accum = self._accumulate()
         # Diagnostic: capture pre-clip per-group grad norms so a divergent
         # run can be localised to a specific head (RPN cls vs ROI cls vs ...).
         grad_norms = self._compute_grad_norms() if self.grad_norm_log_enabled else None
         if self.grad_clip_norm is not None:
             self._clip_grads()
         self.optimizer.step()
-        # Mean across micro-batches for the metrics record.
-        n = self.grad_accum_steps
-        self._record_floats(
-            {k: v / n for k, v in accum_dict.items()},
-            accum_total / n,
-            grad_norms=grad_norms,
-        )
+        self._record_floats(accum, sum(accum.values()), grad_norms=grad_norms)
 
     def _record(self, loss_dict: Mapping[str, Tensor], total: Tensor) -> None:
         self.last_loss = float(total.detach().item())
@@ -368,28 +397,27 @@ class AMPTrainer(SimpleTrainer):
         else:
             self.scaler = NullGradScaler()
 
+    def _forward_backward(
+        self, batch: Any, normalizer: float | None, scale: float
+    ) -> Mapping[str, Tensor]:
+        """Micro-batch forward under autocast + scaler-scaled backward (the only
+        difference from :meth:`SimpleTrainer._forward_backward`)."""
+        with autocast(self.device, dtype=_torch_dtype(self.amp_dtype)):
+            loss_dict: Mapping[str, Tensor] = (
+                self.model(batch, num_boxes=normalizer)
+                if normalizer is not None
+                else self.model(batch)
+            )
+            micro_total = _sum_loss(loss_dict) * scale
+        self.scaler.scale(micro_total).backward()  # type: ignore[no-untyped-call]
+        return loss_dict
+
     def run_step(self) -> None:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        # Same accumulation pattern as :meth:`SimpleTrainer.run_step`,
-        # with ``scaler.scale(...).backward()`` per micro-batch but
-        # ``scaler.unscale_`` / ``scaler.step`` / ``scaler.update``
-        # only once per effective iteration. Unscale fires before grad
-        # clip so the clip threshold is in real-gradient units regardless
-        # of the scaler's loss scale.
-        accum_total = 0.0
-        accum_dict: dict[str, float] = {}
-        for _ in range(self.grad_accum_steps):
-            batch = self._next_batch()
-            with autocast(self.device, dtype=_torch_dtype(self.amp_dtype)):
-                loss_dict = self.model(batch)
-                micro_total = _sum_loss(loss_dict) / self.grad_accum_steps
-            self.scaler.scale(micro_total).backward()  # type: ignore[no-untyped-call]
-            accum_total += float(micro_total.detach().item()) * self.grad_accum_steps
-            for k, v in loss_dict.items():
-                accum_dict[k] = accum_dict.get(k, 0.0) + float(v.detach().item())
-        # Unscale before computing diagnostic norms so the values are in
-        # real-gradient units (matching what the user would see at FP32).
+        accum = self._accumulate()
+        # Unscale before computing diagnostic norms / clipping so values and the
+        # clip threshold are in real-gradient units, regardless of the loss scale.
         if self.grad_clip_norm is not None or self.grad_norm_log_enabled:
             self.scaler.unscale_(self.optimizer)
         grad_norms = self._compute_grad_norms() if self.grad_norm_log_enabled else None
@@ -397,12 +425,7 @@ class AMPTrainer(SimpleTrainer):
             self._clip_grads()
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        n = self.grad_accum_steps
-        self._record_floats(
-            {k: v / n for k, v in accum_dict.items()},
-            accum_total / n,
-            grad_norms=grad_norms,
-        )
+        self._record_floats(accum, sum(accum.values()), grad_norms=grad_norms)
 
 
 # ---------------------------------------------------------------------------

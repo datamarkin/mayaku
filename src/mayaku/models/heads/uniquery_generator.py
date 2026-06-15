@@ -179,18 +179,28 @@ def qgn_loss(
     quality_alpha: float = 0.8,
     focal_alpha: float = 0.25,
     focal_gamma: float = 2.0,
+    num_boxes: float | None = None,
 ) -> dict[str, Tensor]:
     """Focal objectness + GIoU box loss with quality matching.
 
     `centers` is the (L, 2) absolute center grid concatenated across the
     QGN's levels (constant per input resolution; built by the caller).
+
+    ``num_boxes`` is the effective-batch GT count for normalization (same
+    convention as :meth:`SetCriterion.forward`); pass it from the trainer so
+    grad accumulation matches a real batch. ``None`` falls back to this
+    micro-batch's local count.
     """
     obj_logits = qgn_out["obj_logits"].float()  # (B, L)
     pred_boxes = qgn_out["pred_boxes"].float()  # (B, L, 4)
 
     total_obj = obj_logits.new_zeros(())
     total_giou = obj_logits.new_zeros(())
-    num_gt = max(sum(len(t["labels"]) for t in targets), 1)
+    num_gt = (
+        num_boxes
+        if num_boxes is not None
+        else float(max(sum(len(t["labels"]) for t in targets), 1))
+    )
 
     for b, t in enumerate(targets):
         gt = t["boxes_xyxy"].float()

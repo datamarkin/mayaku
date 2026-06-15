@@ -48,21 +48,24 @@ class SetCriterion(nn.Module):
         self,
         outputs_list: list[dict[str, Tensor]],
         targets: list[dict[str, Tensor]],
+        num_boxes: float | None = None,
     ) -> dict[str, Tensor]:
         """Compute raw (unweighted) losses with deep supervision.
 
         Returns loss dict with keys: loss_ce_{i}, loss_bbox_{i}, loss_giou_{i}
         for each stage i. The caller applies weight_dict to these.
+
+        ``num_boxes`` normalises the losses (DETR convention). Pass the
+        *effective-batch* box count — summed over all gradient-accumulation
+        micro-batches and DDP ranks — so the loss scale is invariant to how the
+        batch is split. When ``None`` (the non-accumulating path) it is derived
+        from this call's ``targets``, which is correct only at
+        ``grad_accum_steps == 1``.
         """
-        num_boxes_int = sum(len(t["labels"]) for t in targets)
-        num_boxes_t = torch.as_tensor(
-            [num_boxes_int], dtype=torch.float32, device=outputs_list[0]["pred_logits"].device
-        )
-        # DDP: all-reduce num_boxes across ranks for consistent normalization
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_reduce(num_boxes_t)
-            num_boxes_t = num_boxes_t / torch.distributed.get_world_size()
-        num_boxes = float(torch.clamp(num_boxes_t, min=1).item())
+        if num_boxes is None:
+            num_boxes = self.reduce_num_boxes(
+                sum(len(t["labels"]) for t in targets), outputs_list[0]["pred_logits"].device
+            )
 
         losses: dict[str, Tensor] = {}
         for stage_idx, outputs in enumerate(outputs_list):
@@ -70,6 +73,22 @@ class SetCriterion(nn.Module):
             for k, v in stage_losses.items():
                 losses[f"{k}_{stage_idx}"] = v
         return losses
+
+    @staticmethod
+    def reduce_num_boxes(num_boxes: int, device: torch.device) -> float:
+        """Turn a raw GT box count into the normalizer, DDP-reduced (DETR
+        convention): all-reduce-sum then ÷ world_size → the per-rank-average
+        count over the global batch, clamped ≥ 1.
+
+        The trainer passes the count summed over all grad-accum micro-batches,
+        so the normalizer is the *effective-batch* count and accumulation
+        matches a real batch.
+        """
+        num_boxes_t = torch.as_tensor([float(num_boxes)], dtype=torch.float32, device=device)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(num_boxes_t)
+            num_boxes_t = num_boxes_t / torch.distributed.get_world_size()
+        return float(torch.clamp(num_boxes_t, min=1).item())
 
     def _single_stage_loss(
         self,
@@ -107,6 +126,7 @@ class SetCriterion(nn.Module):
         self,
         dn: dict[str, Tensor],
         targets: list[dict[str, Tensor]],
+        num_boxes: float | None = None,
     ) -> dict[str, Tensor]:
         """Box-only DN loss (L1 + GIoU) with deep supervision.
 
@@ -114,11 +134,25 @@ class SetCriterion(nn.Module):
         matching needed. L1 is on image-size-normalized boxes (matching the
         main box loss); both are normalized by the number of DN queries.
         Returns ``loss_dn_bbox_{i}`` / ``loss_dn_giou_{i}`` per stage.
+
+        ``num_boxes`` is the effective-batch GT count (same as
+        :meth:`forward`). DN queries are a fixed multiple of GT
+        (``num_dn = dn_groups × num_GT``), so the local DN count is rescaled to
+        the effective GT count — making grad accumulation and DDP match a real
+        batch (per-micro ``valid.sum()`` is also never DDP-reduced). ``None``
+        falls back to this micro-batch's own DN count.
         """
         tgt = dn["tgt_boxes"].float()  # (B, M, 4)
         valid = dn["valid"]  # (B, M) bool
         img = torch.stack([t["image_size_xyxy"] for t in targets]).float().unsqueeze(1)  # (B, 1, 4)
-        num_dn = valid.sum().clamp(min=1)  # 0-dim tensor — no host sync
+        # Keep num_dn a 0-dim tensor (no host sync). When num_boxes is given,
+        # scale local DN count by effective_GT / local_GT (= keep dn_groups, swap
+        # the per-micro GT count for the effective one).
+        if num_boxes is None:
+            num_dn = valid.sum().clamp(min=1)
+        else:
+            local_gt = max(sum(len(t["labels"]) for t in targets), 1)
+            num_dn = (valid.sum() * (num_boxes / local_gt)).clamp(min=1)
         vmask = valid.unsqueeze(-1).float()  # (B, M, 1)
         tgt_valid = tgt[valid]  # (V, 4) — loop-invariant
 

@@ -91,8 +91,16 @@ class UniQuery(nn.Module):
     def keypoint_on(self) -> bool:
         return self.keypoint_head is not None
 
+    # Tells the trainer this model's losses are normalised by the GT box count,
+    # so grad accumulation must pass the *effective-batch* count (see forward's
+    # ``num_boxes``) rather than letting each micro-batch normalise by its own.
+    loss_normalized_by_num_boxes = True
+
     def forward(
-        self, batched_inputs: Sequence[dict[str, Any]]
+        self,
+        batched_inputs: Sequence[dict[str, Any]],
+        *,
+        num_boxes: float | None = None,
     ) -> dict[str, Tensor] | list[dict[str, Any]]:
         images = self._preprocess_image(batched_inputs)
         features = self.backbone(images.tensor)
@@ -106,7 +114,7 @@ class UniQuery(nn.Module):
             outputs_list = self.head(feature_list, images.image_sizes, targets=targets)
             qgn_out = outputs_list[-1].pop("qgn", None)
             dn_out = outputs_list[-1].pop("dn", None)
-            loss_dict = self.criterion(outputs_list, targets)
+            loss_dict = self.criterion(outputs_list, targets, num_boxes=num_boxes)
             if qgn_out is not None:
                 assert self.head.uniquery_generator is not None
                 loss_dict.update(
@@ -115,10 +123,13 @@ class UniQuery(nn.Module):
                         targets,
                         qgn_out["centers"],
                         quality_alpha=self.head.uniquery_generator.quality_alpha,
+                        num_boxes=num_boxes,
                     )
                 )
             if dn_out is not None:
-                loss_dict.update(self.criterion.denoising_loss(dn_out, targets))
+                loss_dict.update(
+                    self.criterion.denoising_loss(dn_out, targets, num_boxes=num_boxes)
+                )
 
             if self.mask_on or self.keypoint_on:
                 last = outputs_list[-1]
