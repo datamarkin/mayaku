@@ -77,6 +77,33 @@ class SerializedList(Sequence[T], Generic[T]):
         self._buffer: bytes = b"".join(encoded)
         self._mv = memoryview(self._buffer)
 
+    def to_parts(self) -> tuple[bytes, npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+        """Expose the serialized ``(buffer, sizes, offsets)`` triple for transport.
+
+        The inverse of :meth:`from_buffer`. Keeps the on-the-wire layout
+        owned here so callers that ship a ``SerializedList`` between
+        processes (see :func:`mayaku.data.shared.load_shared_dataset`)
+        don't reach into the private fields.
+        """
+        return self._buffer, self._sizes, self._offsets
+
+    @classmethod
+    def from_buffer(
+        cls,
+        buffer: bytes,
+        sizes: npt.NDArray[np.int64],
+        offsets: npt.NDArray[np.int64],
+    ) -> SerializedList[T]:
+        """Build from an already-serialized ``(buffer, sizes, offsets)`` triple
+        — e.g. read from the file the node's local rank 0 wrote — without
+        re-pickling the items. Inverse of :meth:`to_parts`."""
+        self = cls.__new__(cls)
+        self._sizes = np.asarray(sizes, dtype=np.int64)
+        self._offsets = np.asarray(offsets, dtype=np.int64)
+        self._buffer = buffer
+        self._mv = memoryview(buffer)
+        return self
+
     # ``memoryview`` is not picklable — it's a thin wrapper over a
     # buffer, not a value type. Exclude ``_mv`` from the pickle stream
     # and reconstruct it from ``_buffer`` (which is picklable) on the

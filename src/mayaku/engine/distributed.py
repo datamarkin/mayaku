@@ -51,11 +51,15 @@ __all__ = [
     "all_gather_object",
     "all_reduce_dict",
     "create_ddp_model",
+    "get_local_process_group",
+    "get_local_rank",
+    "get_local_world_size",
     "get_rank",
     "get_world_size",
     "init_from_env_if_needed",
     "is_main_process",
     "launch",
+    "local_broadcast_object",
     "resolve_ddp_device",
     "synchronize",
 ]
@@ -88,17 +92,93 @@ def is_main_process() -> bool:
     return get_rank() == 0
 
 
-def synchronize() -> None:
-    """``dist.barrier()`` — no-op outside a process group."""
+# ---------------------------------------------------------------------------
+# Node-local rank / group (for per-node shared dataset loading)
+# ---------------------------------------------------------------------------
+
+
+def get_local_rank() -> int:
+    """Rank within the local node (``LOCAL_RANK``); 0 when not distributed.
+
+    ``LOCAL_RANK`` is set by ``torchrun`` and by :func:`launch`'s spawn path.
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return 0
+    return int(os.environ.get("LOCAL_RANK", get_rank()))
+
+
+def get_local_world_size() -> int:
+    """Processes on this node (``LOCAL_WORLD_SIZE``); falls back to world size.
+
+    The fallback assumes a single node (the common case for a bare
+    ``dist.init_process_group`` without ``LOCAL_WORLD_SIZE`` exported), which is
+    correct there; ``torchrun`` always exports it for the multi-node case.
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return 1
+    return int(os.environ.get("LOCAL_WORLD_SIZE", get_world_size()))
+
+
+_LOCAL_GROUP: Any = None
+_LOCAL_GROUP_RESOLVED = False
+
+
+def get_local_process_group() -> Any:
+    """Process subgroup of the ranks that share this node, or ``None`` when the
+    node-local group is just the whole world (single node) or undistributed.
+
+    Built once, lazily, by a collective ``new_subgroups`` that *every* rank must
+    reach. Returning ``None`` for the single-node case lets callers fall back to
+    the default (WORLD) group, which is already node-local there.
+    """
+    global _LOCAL_GROUP, _LOCAL_GROUP_RESOLVED
+    if not dist.is_available() or not dist.is_initialized():
+        return None
+    if not _LOCAL_GROUP_RESOLVED:
+        local_size = get_local_world_size()
+        if local_size >= get_world_size():
+            _LOCAL_GROUP = None  # single node: WORLD == node-local
+        else:
+            # Ranks are node-contiguous under torchrun, so consecutive groups of
+            # `local_size` are exactly the per-node sets. Collective on all ranks.
+            _LOCAL_GROUP, _ = dist.new_subgroups(group_size=local_size)  # type: ignore[no-untyped-call]
+        _LOCAL_GROUP_RESOLVED = True
+    return _LOCAL_GROUP
+
+
+def local_broadcast_object(obj: T) -> T:
+    """Broadcast a (small, picklable) object from this node's local rank 0 to
+    all ranks on the node. No-op (returns ``obj``) when undistributed.
+
+    Used to scatter the dataset handle (temp-file path, offsets, metadata) the
+    node's local rank 0 produced after parsing the annotations once.
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return obj
+    group = get_local_process_group()  # None -> default WORLD (single node)
+    src = get_rank() - get_local_rank()  # global rank of this node's local rank 0
+    payload: list[T] = [obj]
+    dist.broadcast_object_list(payload, src=src, group=group)
+    return payload[0]
+
+
+def synchronize(group: Any = None) -> None:
+    """``dist.barrier()`` — no-op outside a process group.
+
+    ``group`` defaults to ``None`` (the WORLD group). Pass a subgroup
+    (e.g. :func:`get_local_process_group`) to barrier only the ranks in
+    that group — used by the per-node shared dataset loader so a node's
+    rank 0 doesn't delete its temp buffer before the node's peers read it.
+    """
     if get_world_size() == 1:
         return
-    if dist.get_backend() == "nccl":
+    if dist.get_backend(group) == "nccl":
         # NCCL needs the device id to avoid pulling streams from the
         # default device (`spec §3.6`).
         local = int(os.environ.get("LOCAL_RANK", get_rank()))
-        dist.barrier(device_ids=[local])
+        dist.barrier(group=group, device_ids=[local])
     else:
-        dist.barrier()
+        dist.barrier(group=group)
 
 
 # ---------------------------------------------------------------------------

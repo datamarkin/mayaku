@@ -13,6 +13,7 @@ indexed by rank so the parent can read the result back.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
@@ -42,6 +43,35 @@ def assert_main_only_writes(out_dir: str) -> None:
     if is_main_process():
         Path(out_dir, "main.txt").write_text("hello")
     Path(out_dir, f"rank_{get_rank()}.ok").touch()
+
+
+def shared_dataset_one_parse(out_dir: str) -> None:
+    """Two ranks share one parse — exercises ``load_shared_dataset``.
+
+    The node's local rank 0 is the only one that should run ``parse_fn``
+    (it drops a per-rank flag so the parent can confirm a single parse);
+    both ranks must come away with byte-identical dataset dicts, the same
+    broadcast metadata, and the same ``derive_fn`` result.
+    """
+    from mayaku.data.shared import load_shared_dataset
+
+    rank = get_rank()
+    expected = [{"image_id": i, "file_name": f"img_{i}.jpg"} for i in range(8)]
+
+    def parse() -> tuple[Any, list[dict[str, Any]]]:
+        Path(out_dir, f"parsed_rank_{rank}.flag").touch()
+        return {"name": "toy", "n": len(expected)}, list(expected)
+
+    def derive(meta: Any, dicts: list[dict[str, Any]]) -> int:
+        return sum(d["image_id"] for d in dicts)
+
+    metadata, serialized, extra = load_shared_dataset(parse_fn=parse, derive_fn=derive)
+
+    assert metadata == {"name": "toy", "n": 8}, (rank, metadata)
+    assert extra == 28, (rank, extra)
+    decoded = [serialized[i] for i in range(len(serialized))]
+    assert decoded == expected, (rank, decoded)
+    Path(out_dir, f"rank_{rank}.ok").touch()
 
 
 # ---------------------------------------------------------------------------

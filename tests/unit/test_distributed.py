@@ -149,6 +149,41 @@ def test_is_main_process_is_only_true_on_rank_zero(tmp_path: Path) -> None:
     assert (tmp_path / "rank_1.ok").exists()
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(not _SPAWN_OK, reason="multiprocessing spawn unavailable")
+def test_shared_dataset_parses_once_and_shares(tmp_path: Path) -> None:
+    """``load_shared_dataset`` parses once per node and broadcasts the rest.
+
+    Two gloo ranks on one (logical) node: only the node's local rank 0
+    should run ``parse_fn``, both ranks must decode identical dataset
+    dicts, and the temp buffer the broadcaster wrote must be cleaned up
+    by the time ``launch`` returns.
+    """
+    import glob
+    import tempfile
+
+    from tests.unit._distributed_workers import shared_dataset_one_parse
+
+    pattern = str(Path(tempfile.gettempdir()) / "mayaku-ds-*.bin")
+    before = set(glob.glob(pattern))
+
+    launch(
+        shared_dataset_one_parse,
+        world_size=2,
+        device=Device(kind="cpu"),
+        args=(str(tmp_path),),
+    )
+
+    # Both ranks finished with identical data (asserted inside the worker).
+    assert (tmp_path / "rank_0.ok").exists()
+    assert (tmp_path / "rank_1.ok").exists()
+    # Exactly one parse, on the node's local rank 0.
+    assert (tmp_path / "parsed_rank_0.flag").exists()
+    assert not (tmp_path / "parsed_rank_1.flag").exists()
+    # Broadcaster's temp buffer was unlinked after the node-local barrier.
+    assert set(glob.glob(pattern)) == before
+
+
 # ---------------------------------------------------------------------------
 # Multi-GPU NCCL — closes the "GPU 1 idle" gap on multi-GPU CUDA hosts
 # ---------------------------------------------------------------------------

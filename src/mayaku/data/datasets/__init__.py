@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
-from mayaku.data.datasets.coco import build_coco_metadata, load_coco_json
+from mayaku.data.datasets.coco import (
+    build_coco_metadata,
+    load_coco_dataset,
+    load_coco_json,
+)
 
-__all__ = ["build_coco_metadata", "load_coco_json"]
+__all__ = ["build_coco_metadata", "load_coco_dataset", "load_coco_json"]

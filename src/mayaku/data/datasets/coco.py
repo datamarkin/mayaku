@@ -31,7 +31,7 @@ from pycocotools.coco import COCO
 from mayaku.data.catalog import Metadata
 from mayaku.structures.boxes import BoxMode
 
-__all__ = ["build_coco_metadata", "load_coco_json"]
+__all__ = ["build_coco_metadata", "load_coco_dataset", "load_coco_json"]
 
 
 def load_coco_json(
@@ -42,6 +42,7 @@ def load_coco_json(
     extra_annotation_keys: Iterable[str] | None = None,
     keep_segmentation: bool = True,
     keep_keypoints: bool = True,
+    coco: COCO | None = None,
 ) -> list[dict[str, Any]]:
     """Parse a COCO-format JSON into standard dataset dicts.
 
@@ -73,7 +74,10 @@ def load_coco_json(
     """
     json_path = str(json_path)
     image_root = Path(image_root)
-    coco = COCO(json_path)
+    # Reuse a caller-provided parse to avoid a second full COCO() over the same
+    # file (see load_coco_dataset, which parses once for metadata + dicts).
+    if coco is None:
+        coco = COCO(json_path)
 
     img_ids = sorted(coco.imgs.keys())
     remap = dict(metadata.thing_dataset_id_to_contiguous_id)
@@ -141,6 +145,7 @@ def build_coco_metadata(
     *,
     keypoint_names: tuple[str, ...] | None = None,
     keypoint_flip_indices: tuple[int, ...] | None = None,
+    coco: COCO | None = None,
 ) -> Metadata:
     """Build :class:`Metadata` from a COCO JSON's category list.
 
@@ -157,7 +162,8 @@ def build_coco_metadata(
     the ``left_X`` / ``right_X`` naming convention. This mirrors
     Detectron2's `data/datasets/coco.py:load_coco_json` behaviour.
     """
-    coco = COCO(str(json_path))
+    if coco is None:
+        coco = COCO(str(json_path))
     cat_ids = sorted(coco.cats.keys())
     remap = {cid: i for i, cid in enumerate(cat_ids)}
     classes = tuple(coco.cats[cid]["name"] for cid in cat_ids)
@@ -175,6 +181,44 @@ def build_coco_metadata(
         keypoint_names=keypoint_names,
         keypoint_flip_indices=keypoint_flip_indices,
     )
+
+
+def load_coco_dataset(
+    name: str,
+    json_path: str | Path,
+    image_root: str | Path,
+    *,
+    keep_segmentation: bool = True,
+    keep_keypoints: bool = True,
+    keypoint_names: tuple[str, ...] | None = None,
+    keypoint_flip_indices: tuple[int, ...] | None = None,
+) -> tuple[Metadata, list[dict[str, Any]]]:
+    """Parse a COCO JSON **once** and return both its :class:`Metadata` and the
+    dataset dicts.
+
+    Equivalent to ``build_coco_metadata`` followed by ``load_coco_json`` but
+    with a single ``COCO()`` parse instead of two — the file is read and the
+    annotation index built only once. For large annotation files this halves
+    the parse time and peak RAM, which matters most under the per-node
+    shared-loading path (only the node's local rank 0 runs this).
+    """
+    coco = COCO(str(json_path))
+    metadata = build_coco_metadata(
+        name,
+        json_path,
+        keypoint_names=keypoint_names,
+        keypoint_flip_indices=keypoint_flip_indices,
+        coco=coco,
+    )
+    dicts = load_coco_json(
+        json_path,
+        image_root,
+        metadata,
+        keep_segmentation=keep_segmentation,
+        keep_keypoints=keep_keypoints,
+        coco=coco,
+    )
+    return metadata, dicts
 
 
 def _derive_flip_indices(names: tuple[str, ...]) -> tuple[int, ...]:

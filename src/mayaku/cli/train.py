@@ -9,7 +9,6 @@ hand off to :class:`SimpleTrainer` (or :class:`AMPTrainer` when
 
 from __future__ import annotations
 
-import gc
 import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -39,10 +38,9 @@ from mayaku.data import (
     RandomFlip,
     RepeatFactorTrainingSampler,
     ResizeShortestEdge,
-    SerializedList,
     TrainingSampler,
-    build_coco_metadata,
-    load_coco_json,
+    load_coco_dataset,
+    load_shared_dataset,
     trivial_batch_collator,
 )
 from mayaku.engine import (
@@ -190,72 +188,10 @@ def run_train(
                 "yaml convention) when training with --pretrained-backbone."
             )
 
-    # Load the dataset BEFORE model construction so auto-config can
-    # analyse the box / class distribution and rewrite anchor sizes,
-    # ROI head class count, schedule, etc. before any weights are
-    # allocated. The same `dataset_dicts_raw` is reused downstream for
-    # RFS repeat factors and the training loop, so this isn't extra work.
-    metadata = build_coco_metadata(name="cli_train", json_path=coco_gt_json)
-    # Drop annotation fields the meta-architecture won't read. For
-    # COCO 2017 train this saves ~3-4 GB of polygon Python objects on
-    # the detection / keypoint paths and lets pycocotools' parsed JSON
-    # GC fully (the parser's internal tables are otherwise pinned by
-    # the polygon-list references kept in dataset_dicts).
-    keep_seg = cfg.model.meta_architecture == "mask_rcnn" or cfg.model.uniquery_mask is not None
-    keep_kp = (
-        cfg.model.meta_architecture == "keypoint_rcnn" or cfg.model.uniquery_keypoint is not None
-    )
-    dataset_dicts_raw = load_coco_json(
-        coco_gt_json,
-        image_root,
-        metadata,
-        keep_segmentation=keep_seg,
-        keep_keypoints=keep_kp,
-    )
-
-    # Dataset-aware auto-config. The recipe layer fills in fine-tune-
-    # relevant fields (anchor sizes/ARs, num_classes, base_lr, schedule,
-    # mosaic / mixup probs, sampler choice) that the user did NOT set
-    # explicitly. Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
-    # ``auto_config.enabled = False`` both short-circuit cleanly with no
-    # overrides.
-    if cfg.auto_config.enabled:
-        stats = analyze_dataset(
-            dataset_dicts_raw,
-            num_classes=len(metadata.thing_classes),
-            resize_short_edge=cfg.input.min_size_test,
-            resize_max_edge=cfg.input.max_size_test,
-        )
-        proposed = derive_overrides(stats, cfg, user_set_paths)
-        actual = filter_unset(proposed, user_set_paths)
-        if actual:
-            cfg = merge_overrides(cfg, actual)
-            _log_auto_config_report(stats, actual, user_set_paths)
-
-    # Surface the most common silent footgun: freezing early backbone stages
-    # at random init (the schema's freeze_at=2 default assumes a pretrained
-    # backbone). Warn here rather than after model construction so the
-    # message lands before the slow torch.load / weight download. Runs
-    # after auto-config so the freeze_at being checked is the one that
-    # will actually train.
-    #
-    # ``cfg.model.backbone.weights_path`` is loaded inside the backbone
-    # __init__ before ``_apply_freeze``, so it counts as a real init source
-    # here even though it isn't fed through the top-level ``weights`` path.
-    backbone_initialized = (
-        pretrained_backbone or weights is not None or cfg.model.backbone.weights_path is not None
-    )
-    if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
-        warnings.warn(
-            f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
-            "is freezing the early stages. Random-init frozen features cannot "
-            "be recovered downstream and training will not converge — your "
-            "model will detect nothing. Pass --pretrained-backbone, or set "
-            "model.backbone.freeze_at=0 in the YAML for true from-scratch "
-            "training.",
-            stacklevel=2,
-        )
-
+    # Bring up the distributed context BEFORE loading the dataset: the
+    # per-node shared loader (below) broadcasts the parsed dataset over the
+    # process group, so the group must already exist. ``dev`` / ``world_size``
+    # / ``rank`` are needed by the model build and sampler that follow too.
     dev = Device.auto() if not device or device == "auto" else Device(kind=device)  # type: ignore[arg-type]
     if dev.kind == "mps":
         apply_mps_environment()
@@ -284,6 +220,100 @@ def run_train(
     if dev.kind == "cuda" and world_size > 1:
         dev = Device(kind="cuda", index=rank)
 
+    # Drop annotation fields the meta-architecture won't read. For
+    # COCO 2017 train this saves ~3-4 GB of polygon Python objects on
+    # the detection / keypoint paths and lets pycocotools' parsed JSON
+    # GC fully (the parser's internal tables are otherwise pinned by
+    # the polygon-list references kept in dataset_dicts).
+    keep_seg = cfg.model.meta_architecture == "mask_rcnn" or cfg.model.uniquery_mask is not None
+    keep_kp = (
+        cfg.model.meta_architecture == "keypoint_rcnn" or cfg.model.uniquery_keypoint is not None
+    )
+
+    # Everything derived from the *raw* dataset dicts — auto-config overrides
+    # and RFS repeat factors — is computed inside ``_derive`` so it runs
+    # exactly once per node (on the node's local rank 0) under the shared
+    # loader, then broadcast to the node's other ranks. Both feed the model
+    # build / sampler below, so they must be identical across ranks.
+    def _derive(meta: Any, dicts: list[dict[str, Any]]) -> dict[str, Any]:
+        # Dataset-aware auto-config. The recipe layer fills in fine-tune-
+        # relevant fields (anchor sizes/ARs, num_classes, base_lr, schedule,
+        # mosaic / mixup probs, sampler choice) that the user did NOT set
+        # explicitly. Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
+        # ``auto_config.enabled = False`` both short-circuit with no overrides.
+        overrides: Mapping[str, Any] | None = None
+        stats: Any = None
+        if cfg.auto_config.enabled:
+            stats = analyze_dataset(
+                dicts,
+                num_classes=len(meta.thing_classes),
+                resize_short_edge=cfg.input.min_size_test,
+                resize_max_edge=cfg.input.max_size_test,
+            )
+            proposed = derive_overrides(stats, cfg, user_set_paths)
+            overrides = filter_unset(proposed, user_set_paths) or None
+        # RFS repeat factors, decided against the *post*-auto-config dataloader
+        # (auto-config may select RepeatFactorTrainingSampler). Computed on
+        # the raw dicts — a SerializedList would unpickle every dict twice —
+        # and ~4 bytes per image, so cheap to broadcast.
+        dataloader = merge_overrides(cfg, overrides).dataloader if overrides else cfg.dataloader
+        rfs: torch.Tensor | None = None
+        if dataloader.sampler_train == "RepeatFactorTrainingSampler":
+            rfs = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
+                dicts, repeat_thresh=dataloader.repeat_threshold
+            )
+        return {"overrides": overrides, "stats": stats, "repeat_factors": rfs}
+
+    # Load the dataset BEFORE model construction so auto-config can rewrite
+    # anchor sizes, ROI head class count, schedule, etc. before any weights
+    # are allocated. Under DDP this parses the annotation JSON **once per
+    # node** (not once per GPU) and shares it across the node's ranks — a
+    # large dataset (e.g. Objects365's 14 GB JSON) would otherwise hold N
+    # copies of the dataset dicts per node and OOM host RAM. The returned
+    # ``dataset_dicts`` is a SerializedList (one contiguous bytes buffer):
+    # ~10× smaller resident-set and no malloc-fragmentation drift over a
+    # long run. Single-GPU and N-servers×1-GPU fall through unchanged.
+    metadata, dataset_dicts, derived = load_shared_dataset(
+        parse_fn=lambda: load_coco_dataset(
+            name="cli_train",
+            json_path=coco_gt_json,
+            image_root=image_root,
+            keep_segmentation=keep_seg,
+            keep_keypoints=keep_kp,
+        ),
+        derive_fn=_derive,
+    )
+    assert derived is not None
+    if derived["overrides"]:
+        cfg = merge_overrides(cfg, derived["overrides"])
+        if is_main_process():
+            _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths)
+    repeat_factors: torch.Tensor | None = derived["repeat_factors"]
+
+    # Surface the most common silent footgun: freezing early backbone stages
+    # at random init (the schema's freeze_at=2 default assumes a pretrained
+    # backbone). Warn here rather than after model construction so the
+    # message lands before the slow torch.load / weight download. Runs
+    # after auto-config so the freeze_at being checked is the one that
+    # will actually train.
+    #
+    # ``cfg.model.backbone.weights_path`` is loaded inside the backbone
+    # __init__ before ``_apply_freeze``, so it counts as a real init source
+    # here even though it isn't fed through the top-level ``weights`` path.
+    backbone_initialized = (
+        pretrained_backbone or weights is not None or cfg.model.backbone.weights_path is not None
+    )
+    if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
+        warnings.warn(
+            f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
+            "is freezing the early stages. Random-init frozen features cannot "
+            "be recovered downstream and training will not converge — your "
+            "model will detect nothing. Pass --pretrained-backbone, or set "
+            "model.backbone.freeze_at=0 in the YAML for true from-scratch "
+            "training.",
+            stacklevel=2,
+        )
+
     model = build_detector(
         cfg,
         backbone_weights="DEFAULT" if pretrained_backbone else None,
@@ -300,24 +330,6 @@ def run_train(
     scheduler = build_lr_scheduler(optimizer, cfg.solver)
     if world_size > 1:
         model = create_ddp_model(model, dev)
-
-    # Compute RFS repeat factors on the *raw* list — SerializedList
-    # would unpickle every dict twice (once now, once at training).
-    # The resulting tensor is ~4 bytes per image, dropped after wrap.
-    repeat_factors: torch.Tensor | None = None
-    if cfg.dataloader.sampler_train == "RepeatFactorTrainingSampler":
-        repeat_factors = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
-            dataset_dicts_raw,
-            repeat_thresh=cfg.dataloader.repeat_threshold,
-        )
-
-    # Pickle the dicts into one bytes buffer. Drops resident-memory
-    # footprint ~10× (one allocation vs millions of small Python
-    # objects) and removes the per-iter malloc-fragmentation source
-    # that otherwise drifts RAM into the tens of GB on long runs.
-    dataset_dicts = SerializedList(dataset_dicts_raw)
-    del dataset_dicts_raw
-    gc.collect()
     augmentations: list[Augmentation] = [
         ResizeShortestEdge(
             cfg.input.min_size_train,
@@ -660,15 +672,21 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
     path doesn't pull in the eval CLI surface (the two are deliberately
     separate console-script entry points).
     """
-    metadata = build_coco_metadata(name="cli_train_eval", json_path=val_json)
-    # Eval mapper drops annotations entirely (is_train=False), so
-    # neither polygons nor keypoints are needed in the loaded dicts.
-    dataset_dicts = load_coco_json(
-        val_json,
-        val_image_root,
-        metadata,
-        keep_segmentation=False,
-        keep_keypoints=False,
+    # Eval mapper drops annotations entirely (is_train=False), so neither
+    # polygons nor keypoints are needed in the loaded dicts. One COCO parse
+    # for both metadata and dicts (load_coco_dataset) instead of two — and
+    # routed through the same per-node shared loader as the train set, so
+    # every rank evaluating the full val split (v1 redundant-eval design)
+    # parses it once per node, not once per GPU. Matters for large eval
+    # sets (LVIS / O365 val); a no-op extra broadcast for COCO's 50 MB.
+    metadata, dataset_dicts, _ = load_shared_dataset(
+        parse_fn=lambda: load_coco_dataset(
+            name="cli_train_eval",
+            json_path=val_json,
+            image_root=val_image_root,
+            keep_segmentation=False,
+            keep_keypoints=False,
+        ),
     )
     mapper = DatasetMapper(
         [ResizeShortestEdge((cfg.input.min_size_test,), max_size=cfg.input.max_size_test)],
@@ -681,7 +699,7 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
     # would hold ~50 GB of float32 image tensors in RAM for the whole
     # training run (5k images × ~10 MB each on COCO val2017). The
     # DataLoader fetches one at a time on demand instead.
-    mapped: Any = _MappedList(SerializedList(dataset_dicts), mapper)
+    mapped: Any = _MappedList(dataset_dicts, mapper)
     sampler = InferenceSampler(len(mapped))
     return DataLoader(
         mapped,
