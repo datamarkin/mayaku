@@ -728,6 +728,15 @@ class TestConfig(_BaseModel):
 
 class DataLoaderConfig(_BaseModel):
     num_workers: Annotated[int, Field(ge=0)] = 4
+    # Batches each worker pre-builds ahead of demand (PyTorch DataLoader
+    # ``prefetch_factor``; total buffered samples = num_workers x this).
+    # The default of 2 buffers only ~one batch, which starves a fast GPU
+    # because AspectRatioGroupedDataset drains ~1.5x batch_size samples per
+    # step (two aspect buckets) — every step empties the buffer and the GPU
+    # waits while workers rebuild it. Raise it (4-6) for small/fast models
+    # on big-image datasets to give the workers runway to stay ahead.
+    # Ignored when ``num_workers == 0`` (no worker processes to prefetch).
+    prefetch_factor: Annotated[int, Field(ge=1)] = 2
     aspect_ratio_grouping: bool = True
     sampler_train: Literal["TrainingSampler", "RepeatFactorTrainingSampler"] = "TrainingSampler"
     filter_empty_annotations: bool = True

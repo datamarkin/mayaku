@@ -418,6 +418,15 @@ def run_train(
             num_replicas=world_size,
             rank=rank,
         )
+    # ``prefetch_factor`` is only a valid DataLoader arg when there are
+    # worker processes (num_workers > 0); passing it with num_workers=0
+    # raises. Buffering num_workers x prefetch_factor samples lets the
+    # workers stay several batches ahead so a fast GPU never waits on the
+    # aspect-ratio grouper to refill (see DataLoaderConfig.prefetch_factor).
+    loader_kwargs: dict[str, Any] = {}
+    if cfg.dataloader.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = cfg.dataloader.prefetch_factor
+        loader_kwargs["persistent_workers"] = True
     dl = DataLoader(
         mapped,
         sampler=sampler,
@@ -425,7 +434,7 @@ def run_train(
         num_workers=cfg.dataloader.num_workers,
         collate_fn=_unwrap_single,
         pin_memory=dev.supports_pin_memory,
-        persistent_workers=cfg.dataloader.num_workers > 0,
+        **loader_kwargs,
     )
     loader: Any = AspectRatioGroupedDataset(dl, batch_size=cfg.solver.ims_per_batch)
 
