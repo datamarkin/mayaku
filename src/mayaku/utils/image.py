@@ -19,6 +19,18 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image, ImageOps
 
+# Disable Pillow's decompression-bomb guard. That limit (~89 Mpix) defends a
+# *web service* against malicious uploads; here we read trusted training/eval
+# images, and large-image datasets (e.g. Objects365 has frames up to ~96 Mpix,
+# satellite/medical sets go higher) legitimately exceed it. Left at the default
+# it floods the logs with DecompressionBombWarning and — above 2x the limit
+# (~179 Mpix) — raises DecompressionBombError, which would crash a dataloader
+# worker and kill a run mid-training. ``None`` removes both; the mapper resizes
+# every image to <=max_size right after decode, so the decoded frame is
+# transient. Setting it here (the canonical read entry point) covers every
+# PIL read in the process, since MAX_IMAGE_PIXELS is a module-global.
+Image.MAX_IMAGE_PIXELS = None
+
 __all__ = ["bgr_to_rgb", "read_image"]
 
 _Uint8RGB = npt.NDArray[np.uint8]
