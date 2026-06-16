@@ -9,6 +9,7 @@ hand off to :class:`SimpleTrainer` (or :class:`AMPTrainer` when
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -88,6 +89,7 @@ def run_train(
     log_period: int = 20,
     val_json: Path | None = None,
     val_image_root: Path | None = None,
+    resume: Path | None = None,
 ) -> None:
     """Train a detector.
 
@@ -96,6 +98,12 @@ def run_train(
     YAML round-trip — useful for Python-side fine-tune scripts that
     patch a base config in code. The resolved config is always
     serialised to ``output_dir/config.yaml`` for reproducibility.
+
+    ``resume`` points at a ``model_iter_*.pth`` checkpoint to continue
+    training from: model weights, optimizer state, LR-schedule position,
+    and (if present) the EMA shadow are restored and training resumes at
+    the checkpoint's iteration. Use the *same* config the checkpoint was
+    trained with. Mutually exclusive with ``weights`` / ``pretrained_backbone``.
     """
     if pretrained_backbone and weights is not None:
         raise ValueError(
@@ -103,6 +111,12 @@ def run_train(
             "first asks for ImageNet-pretrained backbone init, the second "
             "loads a full mayaku checkpoint that already includes whatever "
             "backbone weights it was trained from. Pick one."
+        )
+    if resume is not None and (weights is not None or pretrained_backbone):
+        raise ValueError(
+            "--resume is mutually exclusive with --weights / --pretrained-backbone: "
+            "resume restores the full training state (weights + optimizer + LR "
+            "schedule) from a checkpoint, so there is nothing left to initialise."
         )
 
     # Track which YAML paths the user explicitly set. Auto-config later
@@ -318,16 +332,37 @@ def run_train(
         cfg,
         backbone_weights="DEFAULT" if pretrained_backbone else None,
     ).to(dev.torch)
-    if weights is not None:
+    # ``resume`` restores the exact prior training state; ``weights`` is a
+    # warm-start that re-inits the schedule. They're mutually exclusive
+    # (validated above). ``start_iter`` drives the trainer + LR fast-forward.
+    start_iter = 0
+    resume_ckpt: dict[str, Any] | None = None
+    if resume is not None:
+        resume_ckpt = torch.load(resume, map_location="cpu", weights_only=False)
+        # Same architecture as the checkpoint -> strict load (a key mismatch
+        # means the wrong config, which we want to fail on, not silently drop).
+        model.load_state_dict(resume_ckpt["model"])
+        start_iter = _checkpoint_iteration(resume_ckpt, resume)
+    elif weights is not None:
         state = torch.load(weights, map_location="cpu", weights_only=True)
         if isinstance(state, dict) and "model" in state:
             state = state["model"]
         _load_for_finetune(model, state)
 
     # build_optimizer needs the unwrapped model so its parameter-group
-    # iteration finds the actual modules; DDP wrap happens *after*.
+    # iteration finds the actual modules; DDP wrap happens *after*. The
+    # scheduler captures base LRs from the freshly-built optimizer, so it
+    # must be constructed *before* the resumed optimizer state is loaded.
     optimizer = build_optimizer(model, cfg.solver)
     scheduler = build_lr_scheduler(optimizer, cfg.solver)
+    if resume_ckpt is not None:
+        if "optimizer" in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt["optimizer"])
+        # Replay the schedule to start_iter. It's a pure function of the
+        # iteration (no persisted state), so this reproduces the exact LR
+        # training had there — and overwrites the LRs the optimizer state
+        # just restored, which is what we want.
+        _fast_forward_scheduler(scheduler, start_iter)
     if world_size > 1:
         model = create_ddp_model(model, dev)
     augmentations: list[Augmentation] = [
@@ -544,7 +579,29 @@ def run_train(
         # DDP wrapper would mirror the wrapper's process-group references,
         # which isn't what we want — pass the unwrapped module so the
         # shadow is a clean replica of the actual parameters.
-        ema = ModelEMA(unwrapped_model, decay=cfg.solver.ema_decay, tau=cfg.solver.ema_tau)
+        # ``updates=start_iter`` continues the EMA decay-warmup curve from the
+        # right point on resume (0 for a fresh run). The shadow is then loaded
+        # from the sibling ``ema/`` checkpoint so the averaging history isn't
+        # lost; if it's missing (e.g. EMA was off in the prior run) the shadow
+        # falls back to the restored live weights, which is still correct.
+        ema = ModelEMA(
+            unwrapped_model,
+            decay=cfg.solver.ema_decay,
+            tau=cfg.solver.ema_tau,
+            updates=start_iter,
+        )
+        if resume_ckpt is not None and resume is not None:
+            ema_ckpt_path = resume.parent / "ema" / resume.name
+            if ema_ckpt_path.is_file():
+                ema_state = torch.load(ema_ckpt_path, map_location="cpu", weights_only=False)
+                ema.shadow.load_state_dict(ema_state.get("model", ema_state))
+            else:
+                warnings.warn(
+                    f"--resume: no EMA shadow at {ema_ckpt_path}; the EMA will "
+                    "restart from the resumed live weights. The final EMA AP is "
+                    "unaffected once tau worth of steps have re-accumulated.",
+                    stacklevel=2,
+                )
         hooks.append(EMAHook(ema, unwrapped_model))
         if is_main_process():
             hooks.append(
@@ -569,7 +626,7 @@ def run_train(
         eval_model = ema.shadow if ema is not None else unwrapped_model
         hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
-    trainer.train(start_iter=0, max_iter=cfg.solver.max_iter)
+    trainer.train(start_iter=start_iter, max_iter=cfg.solver.max_iter)
 
 
 def run_train_worker(
@@ -584,6 +641,7 @@ def run_train_worker(
     log_period: int,
     val_json: Path | None,
     val_image_root: Path | None,
+    resume: Path | None = None,
 ) -> None:
     """Positional-arg adapter for :func:`mayaku.engine.launch`.
 
@@ -603,7 +661,44 @@ def run_train_worker(
         log_period=log_period,
         val_json=val_json,
         val_image_root=val_image_root,
+        resume=resume,
     )
+
+
+def _checkpoint_iteration(ckpt: Mapping[str, Any], path: Path) -> int:
+    """Resolve the iteration to resume at from a checkpoint.
+
+    Prefers the ``iteration`` field written by :class:`PeriodicCheckpointer`;
+    falls back to parsing ``model_iter_<N>.pth`` for checkpoints saved before
+    that field existed.
+    """
+    it = ckpt.get("iteration")
+    if isinstance(it, int):
+        return it
+    m = re.search(r"model_iter_(\d+)", path.name)
+    if m is not None:
+        return int(m.group(1))
+    raise ValueError(
+        f"--resume checkpoint {path} carries no 'iteration' field and its name "
+        "doesn't match 'model_iter_<N>.pth', so the resume iteration is unknown. "
+        "Pass a periodic checkpoint (e.g. .../train/model_iter_0060000.pth)."
+    )
+
+
+def _fast_forward_scheduler(scheduler: Any, start_iter: int) -> None:
+    """Advance an LR scheduler to ``start_iter`` and apply that step's LR.
+
+    The schedule is a pure function of the iteration, so setting ``last_epoch``
+    and re-applying reproduces the exact LR training had at ``start_iter`` in
+    O(1). The benign "step before optimizer step" warning is suppressed — this
+    is a deliberate schedule replay on resume, not a real training step.
+    """
+    if start_iter <= 0:
+        return
+    scheduler.last_epoch = start_iter - 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        scheduler.step()
 
 
 def _log_auto_config_report(

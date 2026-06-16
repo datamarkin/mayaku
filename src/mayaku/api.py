@@ -96,6 +96,7 @@ def train(
     overrides: Mapping[str, Any] | None = None,
     device: DeviceSetting = "auto",
     num_gpus: int = 1,
+    resume: str | Path | None = None,
 ) -> dict[str, Any]:
     """Train, pick the best checkpoint, optionally run final eval.
 
@@ -195,6 +196,14 @@ def train(
     # Torchvision ImageNet init only when nothing else seeds the weights.
     pretrained_backbone = cfg.model.backbone.weights_path is None and detector_weights is None
 
+    # Resume restores the full training state from a checkpoint, so it
+    # supersedes any weight init — drop the warm-start sources to satisfy
+    # run_train's mutual-exclusivity check.
+    resume_path = Path(resume) if resume is not None else None
+    if resume_path is not None:
+        detector_weights = None
+        pretrained_backbone = False
+
     print(f"[mayaku.train] {config_stem} -> {resolved_output_dir}")
 
     # --- Train -----------------------------------------------------------
@@ -217,6 +226,7 @@ def train(
             device=device,
             val_json=val_json if forward_val else None,
             val_image_root=val_images if forward_val else None,
+            resume=resume_path,
         )
     else:
         # Multi-GPU DDP: spawn ``num_gpus`` workers via :func:`launch`.
@@ -242,6 +252,7 @@ def train(
                 20,  # log_period default
                 val_json if forward_val else None,
                 val_images if forward_val else None,
+                resume_path,
             ),
         )
     train_seconds = time.time() - train_start

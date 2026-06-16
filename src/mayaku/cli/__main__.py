@@ -89,6 +89,19 @@ def _train(
             "up. MPS is single-device only."
         ),
     ),
+    resume: Path | None = typer.Option(
+        None,
+        "--resume",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help=(
+            "Resume training from a `model_iter_*.pth` checkpoint: restores "
+            "weights + optimizer + LR-schedule position (+ EMA shadow) and "
+            "continues at the checkpoint's iteration. Use the same CONFIG the "
+            "checkpoint was trained with. Mutually exclusive with --weights."
+        ),
+    ),
 ) -> None:
     """Train a detector — the CLI mirror of :func:`mayaku.train`.
 
@@ -120,6 +133,7 @@ def _train(
                 overrides=overrides,
                 device=cast(DeviceSetting, device),
                 num_gpus=num_gpus,
+                resume=resume,
             )
         except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
             raise typer.BadParameter(str(exc)) from exc

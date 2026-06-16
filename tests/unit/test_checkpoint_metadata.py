@@ -8,6 +8,7 @@ directly with a tiny module — no training run needed.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -20,6 +21,9 @@ from mayaku.utils import load_checkpoint_metadata
 def _save_once(model: nn.Module, out: Path, **kwargs: Any) -> Path:
     """Drive the checkpointer through one ``model_final.pth`` write."""
     ckpt = PeriodicCheckpointer(model, out, period=1, **kwargs)
+    # after_train reads trainer.iter for the checkpoint's iteration field;
+    # register_hooks binds this in real runs.
+    ckpt.trainer = SimpleNamespace(iter=0)  # type: ignore[assignment]
     ckpt.before_train()
     ckpt.after_train()
     return out / "model_final.pth"

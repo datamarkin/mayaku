@@ -233,14 +233,20 @@ class PeriodicCheckpointer(_BaseHook):
         # 1-indexed: skip iter 0 (nothing to save), match every multiple.
         it = self.trainer.iter + 1
         if it % self.period == 0:
-            self._save(self.output_dir / f"model_iter_{it:07d}.pth")
+            self._save(self.output_dir / f"model_iter_{it:07d}.pth", iteration=it)
 
     def after_train(self) -> None:
+        assert self.trainer is not None, "trainer reference not bound"
         if self.save_final:
-            self._save(self.output_dir / "model_final.pth")
+            # By after_train the loop has incremented ``iter`` to the completed
+            # count (== max_iter), so unlike after_step there's no +1.
+            self._save(self.output_dir / "model_final.pth", iteration=self.trainer.iter)
 
-    def _save(self, path: Path) -> None:
-        state: dict[str, object] = {"model": self.model.state_dict()}
+    def _save(self, path: Path, *, iteration: int) -> None:
+        # ``iteration`` (completed step count) lets ``mayaku train --resume``
+        # continue the LR schedule and step count from exactly here without
+        # relying on the filename.
+        state: dict[str, object] = {"model": self.model.state_dict(), "iteration": int(iteration)}
         if self.optimizer is not None:
             state["optimizer"] = self.optimizer.state_dict()
         if self.metadata is not None:
