@@ -406,6 +406,13 @@ def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, T
     if is_timm:
         return _remap_timm_convnext_state_dict(state)
 
+    # torchvision-native ConvNeXt (torchvision.models, torch.hub, and
+    # lightly_train exports): the whole network is one "features" Sequential.
+    # The Facebook branch below doesn't recognise that prefix, so dispatch here.
+    is_torchvision = any(k.startswith("features.") for k in state)
+    if is_torchvision:
+        return _remap_torchvision_convnext_state_dict(state)
+
     out: dict[str, Tensor] = {}
     # Block sub-module index inside the torchvision CNBlock.block
     # Sequential: dwconv=0, Permute=1, LayerNorm=2, pwconv1=3, GELU=4,
@@ -519,6 +526,44 @@ def _remap_timm_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tenso
 
         out[key] = value
 
+    return out
+
+
+def _remap_torchvision_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
+    """Rename torchvision-native ConvNeXt keys → Mayaku's internal layout.
+
+    torchvision (and torch.hub / lightly_train exports) lay the whole network
+    out as a single ``features`` Sequential:
+
+        features.0.{0,1}          stem (Conv 4x4 + LayerNorm2d)
+        features.{1,3,5,7}.j...   stages res2..res5 (the CNBlock list)
+        features.{2,4,6}.{0,1}    downsamples before res3 / res4 / res5
+
+    Mayaku carves those into ``stem`` / ``_res_stages.resN`` / ``_res_downs.resN``,
+    but the per-block sub-structure (``block.{0,2,3,5}`` with Linear pointwise,
+    and ``layer_scale`` already shaped ``(C,1,1)``) is *identical* to
+    torchvision's — so only the top-level ``features.{i}`` prefix is rewritten,
+    no per-tensor reshape. ``classifier.*`` (and any other non-``features`` key)
+    passes through for the caller's strict-load filter to drop.
+    """
+    out: dict[str, Tensor] = {}
+    _STAGE_NAMES = {1: "res2", 3: "res3", 5: "res4", 7: "res5"}
+    _DOWN_NAMES = {2: "res3", 4: "res4", 6: "res5"}
+    for key, value in state.items():
+        parts = key.split(".")
+        if parts[0] != "features" or len(parts) < 3:
+            out[key] = value
+            continue
+        fi = int(parts[1])
+        tail = ".".join(parts[2:])
+        if fi == 0:
+            out[f"stem.{tail}"] = value
+        elif fi in _STAGE_NAMES:
+            out[f"_res_stages.{_STAGE_NAMES[fi]}.{tail}"] = value
+        elif fi in _DOWN_NAMES:
+            out[f"_res_downs.{_DOWN_NAMES[fi]}.{tail}"] = value
+        else:
+            out[key] = value
     return out
 
 
