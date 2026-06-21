@@ -14,7 +14,7 @@ import torch
 from torch import Tensor, nn
 
 from mayaku.models.heads.uniquery_denoising import build_dn_groups, dn_attention_mask
-from mayaku.models.heads.uniquery_generator import UniQueryGenerator
+from mayaku.models.heads.uniquery_generator import UniQueryGenerator, image_sizes_to_whwh
 from mayaku.models.heads.uniquery_stage import UniQueryStage
 from mayaku.models.poolers import ROIPooler
 
@@ -117,6 +117,7 @@ class UniQueryHead(nn.Module):
         features: list[Tensor],
         image_sizes: list[tuple[int, int]],
         *,
+        images_whwh: Tensor | None = None,
         num_stages_override: int | None = None,
         num_proposals_override: int | None = None,
         targets: list[dict[str, Tensor]] | None = None,
@@ -136,11 +137,12 @@ class UniQueryHead(nn.Module):
         num_proposals = num_proposals_override or self.num_proposals
         num_stages = num_stages_override or self.num_stages
 
-        images_whwh = torch.tensor(
-            [[w, h, w, h] for h, w in image_sizes],
-            dtype=torch.float32,
-            device=device,
-        )  # (B, 4)
+        # ``images_whwh`` (B, 4) = per-image [W, H, W, H] content size, used to
+        # scale/clamp boxes. Built from Python ints when not supplied — but that
+        # bakes a constant under tracing (bug.md Bug 3: fixed exports then reuse
+        # one image's size for all). Export passes it as a runtime tensor input.
+        if images_whwh is None:
+            images_whwh = image_sizes_to_whwh(image_sizes, device)  # (B, 4)
 
         qgn_out: dict[str, Tensor] | None = None
         if self.uniquery_generator is not None:
@@ -148,6 +150,7 @@ class UniQueryHead(nn.Module):
             qgn_out = self.uniquery_generator(
                 qgn_feats,
                 image_sizes,
+                images_whwh=images_whwh,
                 num_proposals_override=num_proposals_override,
             )
             # Boxes are detached into stage 1 (consistent with the

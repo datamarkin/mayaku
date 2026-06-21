@@ -30,7 +30,21 @@ from mayaku.models.losses.set_criterion import (
     paired_generalized_box_iou,
 )
 
-__all__ = ["UniQueryGenerator", "qgn_loss"]
+__all__ = ["UniQueryGenerator", "image_sizes_to_whwh", "qgn_loss"]
+
+
+def image_sizes_to_whwh(image_sizes: list[tuple[int, int]], device: torch.device) -> Tensor:
+    """``(B, 4)`` per-image ``[W, H, W, H]`` from ``(H, W)`` image sizes.
+
+    Built from Python ints, so it bakes a constant under ``torch.jit.trace``
+    (bug.md Bug 3) — callers that export pass ``images_whwh`` as a runtime
+    tensor input instead of calling this.
+    """
+    return torch.tensor(
+        [[w, h, w, h] for h, w in image_sizes],
+        dtype=torch.float32,
+        device=device,
+    )
 
 
 class UniQueryGenerator(nn.Module):
@@ -73,6 +87,7 @@ class UniQueryGenerator(nn.Module):
         features: list[Tensor],
         image_sizes: list[tuple[int, int]],
         *,
+        images_whwh: Tensor | None = None,
         num_proposals_override: int | None = None,
     ) -> dict[str, Tensor]:
         """features: FPN levels matching self.strides (p3, p4, p5 by default).
@@ -125,12 +140,12 @@ class UniQueryGenerator(nn.Module):
         sel_boxes = pred_boxes.gather(1, topk[..., None].expand(-1, -1, 4))
         sel_feats = pred_feats.gather(1, topk[..., None].expand(-1, -1, pred_feats.shape[-1]))
 
-        # clamp to per-image bounds
-        whwh = torch.tensor(
-            [[w, h, w, h] for h, w in image_sizes],
-            dtype=torch.float32,
-            device=device,
-        )[:, None, :]
+        # clamp to per-image bounds. Built from Python ints when not supplied,
+        # which bakes a constant under tracing (bug.md Bug 3); export passes
+        # ``images_whwh`` as a runtime tensor input.
+        if images_whwh is None:
+            images_whwh = image_sizes_to_whwh(image_sizes, device)
+        whwh = images_whwh[:, None, :]
         sel_boxes = sel_boxes.clamp(min=0)
         sel_boxes = torch.min(sel_boxes, whwh)
 

@@ -249,9 +249,17 @@ class UniQueryStage(nn.Module):
         pred_w = torch.exp(dw) * widths[:, None]
         pred_h = torch.exp(dh) * heights[:, None]
 
-        pred_boxes = torch.zeros_like(deltas)
-        pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * pred_w
-        pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * pred_h
-        pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w
-        pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h
+        # Build via stack+reshape, not strided slice-assignment: the latter
+        # (``pred_boxes[:, 0::4] = ...``) traces to ONNX ``ScatterND`` which
+        # ORT/TensorRT mis-evaluate (bug.md Bug 1). reshape_as is identical and
+        # export-clean on every backend.
+        pred_boxes = torch.stack(
+            [
+                pred_ctr_x - 0.5 * pred_w,
+                pred_ctr_y - 0.5 * pred_h,
+                pred_ctr_x + 0.5 * pred_w,
+                pred_ctr_y + 0.5 * pred_h,
+            ],
+            dim=2,
+        ).reshape_as(deltas)
         return pred_boxes
