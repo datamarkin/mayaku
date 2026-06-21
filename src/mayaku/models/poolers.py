@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from mayaku.backends.ops.roi_align import roi_align
@@ -115,6 +116,15 @@ class ROIPooler(nn.Module):
             canonical_level=self.canonical_level,
         )
 
+        # Inference/export: single-pass tensorised grid_sample pooler — no
+        # per-level loop, no nonzero/scatter (which bakes the trace image's
+        # level map under tracing and emits ScatterND). ~8x faster pooling
+        # and exportable to every backend. Training keeps torchvision
+        # roi_align below (grid_sample has no MPS backward; its fused kernel
+        # is faster for the dense training ROI count).
+        if not self.training:
+            return self._forward_onepass(list(features), pooler_fmt_boxes, levels)
+
         out = features[0].new_zeros((pooler_fmt_boxes.shape[0], channels, ph, pw))
         for level, (scale, feat) in enumerate(zip(self.scales, features, strict=True)):
             mask = levels == level
@@ -131,6 +141,84 @@ class ROIPooler(nn.Module):
                 aligned=True,
             )
             out[inds] = pooled
+        return out
+
+    def _forward_onepass(self, features: list[Tensor], rois: Tensor, levels: Tensor) -> Tensor:
+        """Single-pass multilevel ROIAlign via one ``grid_sample``.
+
+        Pads each FPN level to a common width and concatenates them along
+        height into one canvas; every RoI is routed to its assigned level
+        by a constant y-offset, so a single ``grid_sample`` samples all
+        RoIs from all levels at once. Bilinear math is identical to
+        ROIAlignV2 (sub-bin samples + average); parity vs ``roi_align`` is
+        boundary-pixel-only (mean |Δ| ~1e-2, AP-faithful).
+
+        The sub-bin average is two rank-5 ``ReduceMean``s (see below) — correct
+        on every backend including TensorRT-fp16 and CoreML (bug.md Bug 6).
+        """
+        ph, pw = self.output_size
+        dev, dt = features[0].device, features[0].dtype
+        c = features[0].shape[1]
+        sr = self.sampling_ratio if self.sampling_ratio > 0 else 2
+        ny, nx = ph * sr, pw * sr
+        n_lvl = len(features)
+        w_max = max(f.shape[3] for f in features)
+        heights = [f.shape[2] for f in features]
+        h_tot = sum(heights)
+        yoff = [sum(heights[:i]) for i in range(n_lvl)]
+        batch = features[0].shape[0]
+
+        # Pad every level to w_max and stack along height -> per-image canvas.
+        def _canvas(b: int) -> Tensor:
+            bands = [
+                F.pad(f[b], (0, w_max - f.shape[3])) if f.shape[3] < w_max else f[b]
+                for f in features
+            ]
+            return torch.cat(bands, dim=1).unsqueeze(0)  # (1, C, h_tot, w_max)
+
+        scale_t = torch.as_tensor(self.scales, device=dev, dtype=dt)
+        yoff_t = torch.as_tensor(yoff, device=dev, dtype=dt)
+        iy = (torch.arange(ny, device=dev, dtype=dt) + 0.5) / sr
+        ix = (torch.arange(nx, device=dev, dtype=dt) + 0.5) / sr
+
+        def _pool(boxes: Tensor, lvl: Tensor, canvas: Tensor) -> Tensor:
+            r = boxes.shape[0]
+            sc = scale_t[lvl]  # (R,)
+            coords = boxes.to(dt) * sc[:, None] - 0.5
+            x0, y0, x1, y1 = coords.unbind(1)
+            binh = (y1 - y0) / ph
+            binw = (x1 - x0) / pw
+            sy = y0[:, None] + iy[None, :] * binh[:, None] + yoff_t[lvl][:, None]
+            sx = x0[:, None] + ix[None, :] * binw[:, None]
+            gy = 2.0 * sy / (h_tot - 1) - 1.0
+            gx = 2.0 * sx / (w_max - 1) - 1.0
+            grid = torch.stack(
+                [gx[:, None, :].expand(r, ny, nx), gy[:, :, None].expand(r, ny, nx)],
+                dim=-1,
+            ).reshape(1, r * ny, nx, 2)
+            s = F.grid_sample(
+                canvas, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+            )
+            s = s.reshape(c, r, ny, nx).permute(1, 0, 2, 3)  # (r, c, ny, nx)
+            # Sub-bin average as two rank-5 ReduceMeans (height-sr then width-sr).
+            # NOT avg_pool2d: TensorRT-fp16 miscompiles AveragePool on the tall
+            # grid-sample output to NaN (bug.md Bug 6). NOT a single rank-6
+            # view().mean() either: CoreML caps tensors at rank 5. Two rank-5
+            # ReduceMeans satisfy both and are numerically identical.
+            s = s.reshape(r, c, ph, sr, nx).mean(dim=3)  # (r, c, ph, nx)
+            s = s.reshape(r, c, ph, pw, sr).mean(dim=4)  # (r, c, ph, pw)
+            return s
+
+        # B==1 (export + most inference): one clean pass, no masking.
+        if batch == 1:
+            return _pool(rois[:, 1:], levels, _canvas(0))
+
+        out = features[0].new_zeros((rois.shape[0], c, ph, pw))
+        for b in range(batch):
+            sel = (rois[:, 0].long() == b).nonzero(as_tuple=False).squeeze(1)
+            if sel.numel() == 0:
+                continue
+            out[sel] = _pool(rois[sel, 1:], levels[sel], _canvas(b))
         return out
 
 
