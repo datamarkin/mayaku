@@ -41,6 +41,7 @@ __all__ = [
     "download_model",
     "engine_cache_path",
     "list_models",
+    "list_revisions",
 ]
 
 DEFAULT_MANIFEST_URL = "https://dtmfiles.com/mayaku/v1/models/manifest.json"
@@ -157,6 +158,39 @@ def list_models(*, manifest_url: str = DEFAULT_MANIFEST_URL) -> dict[str, list[s
     return out
 
 
+def _model_entry(manifest: dict[str, Any], name: str) -> ManifestEntry:
+    """Return the manifest entry for ``name`` or raise :class:`DownloadError`."""
+    info = manifest["models"].get(name)
+    if info is None:
+        available = ", ".join(sorted(manifest["models"])) or "(empty manifest)"
+        raise DownloadError(f"model {name!r} not in manifest. Available: {available}")
+    return cast(ManifestEntry, info)
+
+
+def list_revisions(name: str, *, manifest_url: str = DEFAULT_MANIFEST_URL) -> list[str]:
+    """Return the available revision ids for ``name`` (sorted ascending).
+
+    Raises :class:`DownloadError` if ``name`` isn't in the manifest.
+    """
+    info = _model_entry(_fetch_manifest(manifest_url), name)
+    return sorted(info["revisions"])
+
+
+def _select_revision(
+    info: ManifestEntry, revision: str | None, name: str
+) -> tuple[dict[str, Any], str]:
+    """Resolve ``(variants, resolved_revision)`` from a model entry.
+
+    ``revision=None`` selects the ``info["latest"]`` pointer.
+    """
+    revisions = info["revisions"]
+    rev = revision or info["latest"]
+    if rev not in revisions:
+        available = ", ".join(sorted(revisions)) or "(none)"
+        raise DownloadError(f"revision {rev!r} not available for {name!r}. Available: {available}")
+    return revisions[rev]["variants"], rev
+
+
 # ---------------------------------------------------------------------------
 # Download primitives
 # ---------------------------------------------------------------------------
@@ -253,6 +287,7 @@ def download_model(
     name: str,
     target: str = DEFAULT_VARIANT,
     *,
+    revision: str | None = None,
     cache_dir: Path | None = None,
     manifest_url: str = DEFAULT_MANIFEST_URL,
     verify_sha256: bool = True,
@@ -260,8 +295,11 @@ def download_model(
 ) -> Path:
     """Download (if missing) and return the local path to a Mayaku artifact.
 
-    ``name`` is a config name like ``"faster_rcnn_R_50_FPN_3x"``.
-    ``target`` is one of :data:`VARIANTS`.
+    ``name`` is a model name like ``"mayaku-s"`` (or a config name like
+    ``"faster_rcnn_R_50_FPN_3x"``). ``target`` is one of :data:`VARIANTS`.
+    ``revision`` pins a specific published snapshot; ``None`` resolves the
+    manifest's ``latest`` pointer for the model (or the sole artifact set
+    for legacy flat-schema models).
 
     Returns the path the user actually loads:
 
@@ -277,18 +315,15 @@ def download_model(
     cache_root = cache_dir or _cache_root()
     manifest = _fetch_manifest(manifest_url)
     base_url = manifest["base_url"]
-    models = manifest["models"]
-    if name not in models:
-        available = ", ".join(sorted(models)) or "(empty manifest)"
-        raise DownloadError(f"model {name!r} not in manifest. Available: {available}")
-    info = models[name]
-    if target not in info["variants"]:
-        available = ", ".join(sorted(info["variants"]))
+    info = _model_entry(manifest, name)
+    variants, resolved_rev = _select_revision(info, revision, name)
+    if target not in variants:
+        available = ", ".join(sorted(variants))
         raise DownloadError(
-            f"variant {target!r} not available for {name!r}. Available: {available}"
+            f"variant {target!r} not available for {name!r}@{resolved_rev}. Available: {available}"
         )
 
-    variant = info["variants"][target]
+    variant = variants[target]
     primary_rel: str | None = None
     for rel_path, size, sha in _file_entries(variant):
         local = cache_root / rel_path
