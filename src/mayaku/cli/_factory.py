@@ -10,8 +10,12 @@ subcommands and any user script can write
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import torch
 from torch import nn
 
+from mayaku.cli._weights import config_from_weights
 from mayaku.config.schemas import MayakuConfig
 from mayaku.models.detectors import (
     build_faster_rcnn,
@@ -20,7 +24,7 @@ from mayaku.models.detectors import (
     build_uniquery,
 )
 
-__all__ = ["build_detector"]
+__all__ = ["build_detector", "load_detector"]
 
 
 def build_detector(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> nn.Module:
@@ -41,3 +45,22 @@ def build_detector(cfg: MayakuConfig, *, backbone_weights: str | None = None) ->
     if arch == "uniquery":
         return build_uniquery(cfg, backbone_weights=backbone_weights)
     raise ValueError(f"unknown meta_architecture {arch!r}")
+
+
+def load_detector(weights: Path | str) -> tuple[MayakuConfig, nn.Module]:
+    """Build a detector from a self-describing checkpoint and load its weights.
+
+    Reads the architecture from ``weights``' embedded sidecar (or a bundled
+    model name), builds the matching detector, and loads the state. The
+    ``num_batches_tracked`` buffers an EMA shadow accumulates are dropped — the
+    deploy model uses FrozenBatchNorm2d, which has no such entry. Returns
+    ``(cfg, model)``; the caller sets eval mode / device as it needs.
+    """
+    cfg, weights_path, _ = config_from_weights(weights)
+    model = build_detector(cfg)
+    state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    if isinstance(state, dict) and "model" in state:
+        state = state["model"]
+    state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
+    model.load_state_dict(state)
+    return cfg, model

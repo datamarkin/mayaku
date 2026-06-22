@@ -18,9 +18,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from mayaku.backends.mps import apply_mps_environment
-from mayaku.cli._factory import build_detector
-from mayaku.cli._weights import resolve_weights
-from mayaku.config import MayakuConfig, load_yaml
+from mayaku.cli._factory import load_detector
 from mayaku.data import (
     DatasetMapper,
     InferenceSampler,
@@ -56,9 +54,8 @@ class _LazyMappedDataset(Dataset[dict[str, Any]]):
 
 
 def run_eval(
-    config: Path | MayakuConfig,
-    *,
     weights: Path | str,
+    *,
     coco_gt_json: Path,
     image_root: Path,
     output_dir: Path | None = None,
@@ -70,24 +67,11 @@ def run_eval(
 ) -> dict[str, Any]:
     """Run COCO evaluation.
 
-    ``config`` accepts a YAML path or a constructed
-    :class:`MayakuConfig`. Symmetric with :func:`run_train` so
-    Python-side scripts can patch a base config and reuse it for both
-    training and final eval without writing it to disk.
+    ``weights`` is a trained ``.pth`` (or a bundled model name); its embedded
+    sidecar defines the architecture — the same resolved config that produced
+    the checkpoint, so eval matches training without a separate config file.
     """
-    cfg = config if isinstance(config, MayakuConfig) else load_yaml(config)
-    model = build_detector(cfg)
-
-    weights_path = resolve_weights(weights)
-    if weights_path is None:
-        raise ValueError("--weights is required for eval")
-    state = torch.load(weights_path, map_location="cpu", weights_only=True)
-    if isinstance(state, dict) and "model" in state:
-        state = state["model"]
-    # Drop BN's num_batches_tracked buffer — FrozenBatchNorm2d doesn't have
-    # it, but EMA shadows from a BN-trained run do.
-    state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
-    model.load_state_dict(state)
+    cfg, model = load_detector(weights)
     if device is not None:
         if device == "mps":
             apply_mps_environment()

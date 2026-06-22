@@ -48,9 +48,8 @@ def test_build_detector_dispatches_on_meta_architecture() -> None:
 
 def test_run_predict_returns_payload(toy_workspace: dict[str, Path]) -> None:
     payload = run_predict(
-        toy_workspace["cfg"],
+        toy_workspace["weights"],
         toy_workspace["image_file"],
-        weights=toy_workspace["weights"],
     )
     assert payload["image"] == str(toy_workspace["image_file"])
     assert isinstance(payload["instances"], list)
@@ -59,9 +58,8 @@ def test_run_predict_returns_payload(toy_workspace: dict[str, Path]) -> None:
 def test_run_predict_writes_json_file(toy_workspace: dict[str, Path], tmp_path: Path) -> None:
     out = tmp_path / "preds.json"
     run_predict(
-        toy_workspace["cfg"],
+        toy_workspace["weights"],
         toy_workspace["image_file"],
-        weights=toy_workspace["weights"],
         output=out,
     )
     parsed = json.loads(out.read_text())
@@ -70,8 +68,7 @@ def test_run_predict_writes_json_file(toy_workspace: dict[str, Path], tmp_path: 
 
 def test_run_eval_returns_metrics_dict(toy_workspace: dict[str, Path]) -> None:
     metrics = run_eval(
-        toy_workspace["cfg"],
-        weights=toy_workspace["weights"],
+        toy_workspace["weights"],
         coco_gt_json=toy_workspace["json"],
         image_root=toy_workspace["images"],
     )
@@ -243,21 +240,6 @@ def test_run_train_dumps_resolved_config_for_path_input_too(
     assert (out / "config.yaml").exists()
 
 
-def test_run_eval_accepts_mayaku_config_object(
-    toy_workspace: dict[str, Path],
-) -> None:
-    from mayaku.config import load_yaml
-
-    cfg = load_yaml(toy_workspace["cfg"])
-    metrics = run_eval(
-        cfg,  # MayakuConfig, not a Path
-        weights=toy_workspace["weights"],
-        coco_gt_json=toy_workspace["json"],
-        image_root=toy_workspace["images"],
-    )
-    assert isinstance(metrics, dict)
-
-
 def test_run_train_finetune_drops_class_count_mismatched_layers(
     toy_workspace: dict[str, Path],
     tmp_path: Path,
@@ -270,7 +252,10 @@ def test_run_train_finetune_drops_class_count_mismatched_layers(
     # Toy cfg has num_classes=2 → cls_score is [3, 1024], bbox_pred is
     # [8, 1024]. Build a fake "COCO" checkpoint with K=80 shapes so
     # those keys mismatch and must be dropped.
-    real_state = torch.load(toy_workspace["weights"], map_location="cpu", weights_only=True)
+    # The toy checkpoint is self-describing ({"model": ..., "mayaku": ...});
+    # finetune-from-foreign mimics a bare COCO state_dict, so pull the inner
+    # weights out and save them raw.
+    real_state = torch.load(toy_workspace["weights"], map_location="cpu", weights_only=True)["model"]
     fake_coco_state = dict(real_state)
     # Synthesize 81-way / 320-way / 80-way shapes that match the D2 COCO
     # convention; the rest of the keys keep their toy shapes (which match
@@ -354,8 +339,7 @@ def test_run_export_tensorrt_dispatch_lives_on_cuda_only(
         with pytest.raises(ImportError, match=r"(?i)tensorrt"):
             run_export(
                 "tensorrt",
-                toy_workspace["cfg"],
-                weights=toy_workspace["weights"],
+                toy_workspace["weights"],
                 output=tmp_path / "model.engine",
             )
     else:
@@ -366,8 +350,7 @@ def test_run_export_tensorrt_dispatch_lives_on_cuda_only(
         try:
             run_export(
                 "tensorrt",
-                toy_workspace["cfg"],
-                weights=toy_workspace["weights"],
+                toy_workspace["weights"],
                 output=tmp_path / "model.engine",
             )
         except (RuntimeError, OSError):
@@ -378,8 +361,7 @@ def test_run_export_rejects_unknown_target(toy_workspace: dict[str, Path], tmp_p
     with pytest.raises(ValueError, match="unknown export target"):
         run_export(
             "tflite",
-            toy_workspace["cfg"],
-            weights=toy_workspace["weights"],
+            toy_workspace["weights"],
             output=tmp_path / "model.tflite",
         )
 
@@ -449,10 +431,8 @@ def test_cli_predict_invokes_run_predict(toy_workspace: dict[str, Path], tmp_pat
         app,
         [
             "predict",
-            str(toy_workspace["cfg"]),
-            str(toy_workspace["image_file"]),
-            "--weights",
             str(toy_workspace["weights"]),
+            str(toy_workspace["image_file"]),
             "--output",
             str(out),
         ],
@@ -470,10 +450,8 @@ def test_cli_predict_prints_payload_when_no_output(
         app,
         [
             "predict",
-            str(toy_workspace["cfg"]),
-            str(toy_workspace["image_file"]),
-            "--weights",
             str(toy_workspace["weights"]),
+            str(toy_workspace["image_file"]),
         ],
     )
     assert res.exit_code == 0
@@ -494,8 +472,6 @@ def test_cli_export_unknown_target_returns_nonzero(
         [
             "export",
             "tflite",
-            str(toy_workspace["cfg"]),
-            "--weights",
             str(toy_workspace["weights"]),
             "--output",
             str(tmp_path / "m.tflite"),

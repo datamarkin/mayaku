@@ -10,8 +10,7 @@ from pathlib import Path
 
 import torch
 
-from mayaku.cli._factory import build_detector
-from mayaku.config import MayakuConfig, load_yaml
+from mayaku.cli._factory import load_detector
 from mayaku.inference.export import (
     CoreMLExporter,
     ONNXExporter,
@@ -27,9 +26,8 @@ _AVAILABLE_TARGETS: tuple[str, ...] = ("onnx", "coreml", "openvino", "tensorrt")
 
 def run_export(
     target: str,
-    config: Path | MayakuConfig,
+    weights: Path | str,
     *,
-    weights: Path,
     output: Path,
     sample_height: int = 640,
     sample_width: int = 640,
@@ -39,18 +37,14 @@ def run_export(
     """Build the detector, load weights, and dispatch to the per-target
     exporter. Returns the :class:`ExportResult` for downstream use.
 
-    ``config`` accepts a YAML path or a constructed
-    :class:`MayakuConfig` — symmetric with ``run_train``/``run_eval``.
+    ``weights`` is a trained ``.pth`` (or a bundled model name); its embedded
+    sidecar defines the architecture to export.
     """
     if target not in _AVAILABLE_TARGETS:
         raise ValueError(f"unknown export target {target!r}; expected one of {_AVAILABLE_TARGETS}")
 
-    cfg = config if isinstance(config, MayakuConfig) else load_yaml(config)
-    model = build_detector(cfg).eval()
-    state = torch.load(weights, map_location="cpu", weights_only=True)
-    if isinstance(state, dict) and "model" in state:
-        state = state["model"]
-    model.load_state_dict(state)
+    _cfg, model = load_detector(weights)
+    model.eval()
 
     sample = _build_sample(sample_height, sample_width)
 

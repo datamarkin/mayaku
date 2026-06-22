@@ -12,12 +12,17 @@ buffers that won't ``strict=True``-load unless stripped first).
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+if TYPE_CHECKING:
+    from mayaku.config import MayakuConfig
+
 __all__ = [
+    "build_sidecar",
     "git_hash",
     "load_checkpoint_metadata",
     "load_embedded_config",
@@ -115,6 +120,26 @@ def load_embedded_config(checkpoint_path: Path) -> dict[str, Any] | None:
     sidecar = load_checkpoint_metadata(checkpoint_path)
     config = sidecar.get("config") if sidecar else None
     return config if isinstance(config, dict) else None
+
+
+def build_sidecar(
+    cfg: MayakuConfig,
+    class_names: Sequence[str],
+    provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble the self-describing ``"mayaku"`` sidecar embedded in checkpoints.
+
+    The single writer of the sidecar schema, paired with
+    :func:`load_embedded_config` (the reader). Training embeds this block next
+    to the weights so ``predict``/``eval``/``export`` reconstruct the
+    architecture from the checkpoint alone — no separate config file.
+    """
+    return {
+        "schema_version": 1,
+        "config": cfg.model_dump(mode="json"),
+        "class_names": list(class_names),
+        "provenance": dict(provenance) if provenance else {},
+    }
 
 
 def git_hash() -> str | None:

@@ -71,7 +71,7 @@ from mayaku.tuning import (
     filter_unset,
     walk_leaves,
 )
-from mayaku.utils import git_hash
+from mayaku.utils import build_sidecar, git_hash
 
 __all__ = ["run_train", "run_train_worker"]
 
@@ -531,12 +531,11 @@ def run_train(
     # and normalization (pixel mean/std) plus the backbone-coupled solver
     # settings; class names come from the COCO categories. Kept under a
     # "mayaku" key so "model" stays a pure state_dict.
-    checkpoint_metadata: dict[str, Any] = {
-        "schema_version": 1,
-        "config": cfg.model_dump(mode="json"),
-        "class_names": list(metadata.thing_classes),
-        "provenance": {"mayaku_version": __version__, "git_hash": git_hash()},
-    }
+    checkpoint_metadata = build_sidecar(
+        cfg,
+        metadata.thing_classes,
+        provenance={"mayaku_version": __version__, "git_hash": git_hash()},
+    )
 
     timer = IterationTimer()
     hooks: list[Any] = [

@@ -236,21 +236,17 @@ def test_coreml_backbone_values_match_eager_at_export_shape(tmp_path: Path) -> N
 
 def test_cli_run_export_coreml(tmp_path: Path) -> None:
     from mayaku.cli.export import run_export
-    from mayaku.config import dump_yaml
+
+    from ._checkpoint import save_self_describing
 
     cfg = _tiny_cfg()
-    cfg_path = tmp_path / "cfg.yaml"
-    dump_yaml(cfg, cfg_path)
-
     model = build_faster_rcnn(cfg).eval()
-    weights = tmp_path / "model.pth"
-    torch.save(model.state_dict(), weights)
+    weights = save_self_describing(tmp_path / "model.pth", model, cfg)
 
     out = tmp_path / "exported.mlpackage"
     result = run_export(
         "coreml",
-        cfg_path,
-        weights=weights,
+        weights,
         output=out,
         sample_height=96,
         sample_width=96,

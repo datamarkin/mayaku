@@ -132,8 +132,7 @@ def main() -> None:
     final_weights = args.output / "model_final.pth"
     print(f"\nFinal eval on {val_json.name}…")
     metrics = run_eval(
-        cfg,
-        weights=final_weights,
+        final_weights,
         coco_gt_json=val_json,
         image_root=args.val,
         output_dir=args.output / "eval",

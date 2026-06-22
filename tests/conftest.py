@@ -271,9 +271,14 @@ def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
     cfg_path = tmp_path / "cfg.yaml"
     dump_yaml(cfg, cfg_path)
 
+    from tests.unit._checkpoint import save_self_describing
+
     model = build_detector(cfg)
-    weights = tmp_path / "model.pth"
-    torch.save(model.state_dict(), weights)
+    # Self-describing checkpoint: predict/eval/export read the architecture
+    # from this embedded "mayaku" sidecar, not a separate config file.
+    weights = save_self_describing(
+        tmp_path / "model.pth", model, cfg, class_names=("thing", "other")
+    )
 
     return {
         "images": images_dir,

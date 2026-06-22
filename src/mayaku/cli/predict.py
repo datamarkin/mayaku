@@ -1,9 +1,8 @@
 """``mayaku predict`` — run a trained detector on a single image.
 
-Loads ``config.yaml``, builds the right detector, optionally loads a
-trained checkpoint via ``--weights``, runs :class:`Predictor` over
-``image_path`` and prints the per-instance results (or writes them to
-``--output`` as JSON).
+Reads the architecture from the checkpoint's embedded sidecar, builds the
+detector, loads its weights, runs :class:`Predictor` over ``image_path`` and
+prints the per-instance results (or writes them to ``--output`` as JSON).
 """
 
 from __future__ import annotations
@@ -14,9 +13,7 @@ from typing import Any
 
 import torch
 
-from mayaku.cli._factory import build_detector
-from mayaku.cli._weights import resolve_weights
-from mayaku.config import MayakuConfig, load_yaml
+from mayaku.cli._factory import load_detector
 from mayaku.inference import Predictor
 from mayaku.structures.boxes import BoxMode
 from mayaku.structures.instances import Instances
@@ -25,28 +22,20 @@ __all__ = ["run_predict"]
 
 
 def run_predict(
-    config: Path | MayakuConfig,
+    weights: Path | str,
     image_path: Path,
     *,
-    weights: Path | str | None = None,
     output: Path | None = None,
     device: str | None = None,
 ) -> dict[str, Any]:
     """Run inference and return a JSON-friendly dict of detections.
 
-    ``config`` accepts a YAML path or a constructed
-    :class:`MayakuConfig`. The returned dict matches what gets written
-    to ``output`` so the same payload can be inspected
+    ``weights`` is a trained ``.pth`` (or a bundled model name); its embedded
+    sidecar defines the architecture. The returned dict matches what gets
+    written to ``output`` so the same payload can be inspected
     programmatically. Useful in tests.
     """
-    cfg = config if isinstance(config, MayakuConfig) else load_yaml(config)
-    model = build_detector(cfg)
-    weights_path = resolve_weights(weights)
-    if weights_path is not None:
-        state = torch.load(weights_path, map_location="cpu", weights_only=True)
-        if isinstance(state, dict) and "model" in state:
-            state = state["model"]
-        model.load_state_dict(state)
+    cfg, model = load_detector(weights)
     if device is not None:
         model = model.to(torch.device(device))
     predictor = Predictor.from_config(cfg, model)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mayaku.utils.checkpoint import (
+    build_sidecar,
     git_hash,
     load_checkpoint_metadata,
     load_embedded_config,
@@ -25,6 +26,7 @@ __all__ = [
     "VARIANTS",
     "DownloadError",
     "bgr_to_rgb",
+    "build_sidecar",
     "download_model",
     "git_hash",
     "list_models",

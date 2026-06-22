@@ -121,8 +121,7 @@ def main() -> None:
         print(f"CoreML bb    : {args.backbone_mlpackage} ({args.coreml_compute_units})")
 
     metrics = run_eval(
-        args.config,
-        weights=args.weights,
+        args.weights,
         coco_gt_json=coco_gt_json,
         image_root=image_root,
         output_dir=args.output_dir,

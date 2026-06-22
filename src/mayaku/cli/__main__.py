@@ -146,14 +146,13 @@ def _train(
 
 @app.command("eval")
 def _eval(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
-    weights: str = typer.Option(
+    weights: str = typer.Argument(
         ...,
-        "--weights",
         help=(
-            "Path to a .pth checkpoint, OR a bare model name from "
-            "`mayaku download --list` (e.g. `faster_rcnn_R_50_FPN_3x`) — "
-            "names auto-fetch from the hosted manifest on first use."
+            "Trained model: a .pth checkpoint (its embedded sidecar defines the "
+            "architecture), OR a bare model name from `mayaku download --list` "
+            "(e.g. `faster_rcnn_R_50_FPN_3x`) — names auto-fetch from the hosted "
+            "manifest on first use."
         ),
     ),
     json_path: Path = typer.Option(..., "--json", exists=True, dir_okay=False),
@@ -206,8 +205,7 @@ def _eval(
     """Run COCO evaluation; print the per-task metrics dict."""
     with track_mps_fallbacks(label="eval"):
         metrics = run_eval(
-            config,
-            weights=weights,
+            weights,
             coco_gt_json=json_path,
             image_root=images,
             output_dir=output,
@@ -222,37 +220,20 @@ def _eval(
 
 @app.command("predict")
 def _predict(
-    config: str = typer.Argument(
+    weights: str = typer.Argument(
         ...,
         help=(
-            "Path to a YAML config OR a bundled config name like "
-            "`faster_rcnn_R_50_FPN_3x` (see `mayaku download --list` for names)."
+            "Trained model: a .pth checkpoint (its embedded sidecar defines the "
+            "architecture), OR a bare model name from `mayaku download --list` — "
+            "names auto-fetch from the manifest."
         ),
     ),
     image: Path = typer.Argument(..., exists=True, dir_okay=False),
-    weights: str | None = typer.Option(
-        None,
-        "--weights",
-        help=(
-            "Path to a .pth checkpoint, OR a bare model name from "
-            "`mayaku download --list` — names auto-fetch from the manifest."
-        ),
-    ),
     output: Path | None = typer.Option(None, "--output", file_okay=True),
     device: str | None = typer.Option(None, "--device"),
 ) -> None:
     """Run inference on a single image; print or save the detections."""
-    config_path = Path(config)
-    if not config_path.is_file():
-        from mayaku import configs as bundled_configs
-
-        try:
-            config_path = bundled_configs.path(config)
-        except FileNotFoundError as e:
-            raise typer.BadParameter(
-                f"{config!r} is neither a YAML file nor a bundled config name. {e}"
-            ) from e
-    payload = run_predict(config_path, image, weights=weights, output=output, device=device)
+    payload = run_predict(weights, image, output=output, device=device)
     if output is None:
         typer.echo(json.dumps(payload, indent=2))
 
@@ -260,8 +241,14 @@ def _predict(
 @app.command("export")
 def _export(
     target: str = typer.Argument(..., help="onnx / coreml / openvino / tensorrt"),
-    config: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
-    weights: Path = typer.Option(..., "--weights", exists=True, dir_okay=False),
+    weights: str = typer.Argument(
+        ...,
+        help=(
+            "Trained model: a .pth checkpoint (its embedded sidecar defines the "
+            "architecture to export), OR a bare model name from "
+            "`mayaku download --list`."
+        ),
+    ),
     output: Path = typer.Option(..., "--output"),
     sample_height: int = typer.Option(640, "--sample-height"),
     sample_width: int = typer.Option(640, "--sample-width"),
@@ -297,8 +284,7 @@ def _export(
     """
     result = run_export(
         target,
-        config,
-        weights=weights,
+        weights,
         output=output,
         sample_height=sample_height,
         sample_width=sample_width,
