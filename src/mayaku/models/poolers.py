@@ -43,9 +43,10 @@ class ROIPooler(nn.Module):
             ``(1 / stride, ...)`` in the same order the level features
             are passed at forward time. e.g. ``(1/4, 1/8, 1/16, 1/32)``
             for ``p2..p5``.
-        sampling_ratio: Samples-per-output-bin per axis; ``0`` means
-            "use ``ceil(roi_size / output_size)``" (`spec §7.1`, the
-            in-scope default).
+        sampling_ratio: Samples-per-output-bin per axis. ``<= 0`` resolves to a
+            fixed ``2`` (see :attr:`_eff_sampling_ratio`) — *not* torchvision's
+            per-box adaptive ``ceil(roi_size / output_size)``, which the export
+            one-pass can't reproduce. Both train and deploy use the same value.
         canonical_box_size: Anchor box size (in pixels) that maps to
             ``canonical_level``. Default ``224``.
         canonical_level: FPN level (0-based from ``p2``) that
@@ -77,6 +78,20 @@ class ROIPooler(nn.Module):
         self.canonical_box_size = canonical_box_size
         self.canonical_level = canonical_level
         self._min_level, self._max_level = _level_range(self.scales, canonical_level)
+
+    @property
+    def _eff_sampling_ratio(self) -> int:
+        """Samples-per-bin used by **both** the training ``roi_align`` and the
+        inference one-pass — they must agree or trained and deployed features
+        diverge.
+
+        ``sampling_ratio <= 0`` resolves to ``2`` (the deploy default), it is
+        **not** torchvision's per-box adaptive count: the export one-pass
+        ``grid_sample`` samples a fixed grid for every box and cannot vary the
+        count per box, so a single fixed value is the only way to keep the two
+        paths numerically identical.
+        """
+        return self.sampling_ratio if self.sampling_ratio > 0 else 2
 
     def forward(self, features: Sequence[Tensor], box_lists: Sequence[Boxes]) -> Tensor:
         """Pool features for every RoI across every image.
@@ -137,7 +152,7 @@ class ROIPooler(nn.Module):
                 level_boxes,
                 output_size=self.output_size,
                 spatial_scale=scale,
-                sampling_ratio=self.sampling_ratio,
+                sampling_ratio=self._eff_sampling_ratio,
                 aligned=True,
             )
             out[inds] = pooled
@@ -149,9 +164,12 @@ class ROIPooler(nn.Module):
         Pads each FPN level to a common width and concatenates them along
         height into one canvas; every RoI is routed to its assigned level
         by a constant y-offset, so a single ``grid_sample`` samples all
-        RoIs from all levels at once. Bilinear math is identical to
-        ROIAlignV2 (sub-bin samples + average); parity vs ``roi_align`` is
-        boundary-pixel-only (mean |Δ| ~1e-2, AP-faithful).
+        RoIs from all levels at once. Bilinear math is identical to ROIAlignV2
+        (sub-bin samples + average) and matches torchvision ``roi_align`` to
+        ~1e-5 on in-image boxes: out-of-bounds samples are clamped to the
+        level's edge pixel, exactly as torchvision does (the only divergence is
+        for samples >1px outside, where torchvision returns 0 and we clamp — a
+        non-issue for decoded detection boxes).
 
         The sub-bin average is two rank-5 ``ReduceMean``s (see below) — correct
         on every backend including TensorRT-fp16 and CoreML (bug.md Bug 6).
@@ -159,11 +177,12 @@ class ROIPooler(nn.Module):
         ph, pw = self.output_size
         dev, dt = features[0].device, features[0].dtype
         c = features[0].shape[1]
-        sr = self.sampling_ratio if self.sampling_ratio > 0 else 2
+        sr = self._eff_sampling_ratio
         ny, nx = ph * sr, pw * sr
         n_lvl = len(features)
         w_max = max(f.shape[3] for f in features)
         heights = [f.shape[2] for f in features]
+        widths = [f.shape[3] for f in features]
         h_tot = sum(heights)
         yoff = [sum(heights[:i]) for i in range(n_lvl)]
         batch = features[0].shape[0]
@@ -178,6 +197,8 @@ class ROIPooler(nn.Module):
 
         scale_t = torch.as_tensor(self.scales, device=dev, dtype=dt)
         yoff_t = torch.as_tensor(yoff, device=dev, dtype=dt)
+        widths_t = torch.as_tensor(widths, device=dev, dtype=dt)
+        heights_t = torch.as_tensor(heights, device=dev, dtype=dt)
         iy = (torch.arange(ny, device=dev, dtype=dt) + 0.5) / sr
         ix = (torch.arange(nx, device=dev, dtype=dt) + 0.5) / sr
 
@@ -188,8 +209,16 @@ class ROIPooler(nn.Module):
             x0, y0, x1, y1 = coords.unbind(1)
             binh = (y1 - y0) / ph
             binw = (x1 - x0) / pw
-            sy = y0[:, None] + iy[None, :] * binh[:, None] + yoff_t[lvl][:, None]
+            # Sample positions in each box's level-pixel space.
+            sy = y0[:, None] + iy[None, :] * binh[:, None]
             sx = x0[:, None] + ix[None, :] * binw[:, None]
+            # Clamp to the level's real extent so an edge box's out-of-bounds
+            # samples read the border pixel (as torchvision ROIAlign does), not
+            # the zero-pad to w_max or the neighbouring level's band below it.
+            sx = torch.minimum(sx.clamp(min=0.0), widths_t[lvl][:, None] - 1.0)
+            sy = torch.minimum(sy.clamp(min=0.0), heights_t[lvl][:, None] - 1.0)
+            # Route y into this box's level band on the stacked canvas.
+            sy = sy + yoff_t[lvl][:, None]
             gy = 2.0 * sy / (h_tot - 1) - 1.0
             gx = 2.0 * sx / (w_max - 1) - 1.0
             grid = torch.stack(
@@ -197,7 +226,7 @@ class ROIPooler(nn.Module):
                 dim=-1,
             ).reshape(1, r * ny, nx, 2)
             s = F.grid_sample(
-                canvas, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+                canvas, grid, mode="bilinear", padding_mode="border", align_corners=True
             )
             s = s.reshape(c, r, ny, nx).permute(1, 0, 2, 3)  # (r, c, ny, nx)
             # Sub-bin average as two rank-5 ReduceMeans (height-sr then width-sr).

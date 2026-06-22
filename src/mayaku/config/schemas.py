@@ -358,8 +358,10 @@ class UniQueryHeadConfig(_BaseModel):
     dim_feedforward: Annotated[int, Field(gt=0)] = 2048
     dim_dynamic: Annotated[int, Field(gt=0)] = 64
     pooler_resolution: Annotated[int, Field(gt=0)] = 7
-    # 1 = one sample/bin (faster, TensorRT-fp16 safe); 0 = adaptive (ceil(roi/out),
-    # ~2 samples/bin). Real-time tiers (n/s/m) use 1, accuracy tiers (l/xl/xxl) use 0.
+    # Samples per ROI bin. 1 = one sample/bin (faster, TensorRT-fp16 safe);
+    # 0 resolves to a fixed 2 (the export one-pass can't do per-box adaptive, so
+    # train and deploy share this value). Real-time tiers (n/s/m) use 1, accuracy
+    # tiers (l/xl/xxl) use 0 (= 2).
     pooler_sampling_ratio: Annotated[int, Field(ge=0)] = 0
     dropout: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
 
