@@ -580,9 +580,21 @@ class InputConfig(_BaseModel):
     max_size_test: Annotated[int, Field(gt=0)] = 1333
     # Fixed square letterbox size for inference + export (the single static shape
     # every fast path specialises on). Drives the eager Predictor, the export
-    # sample shape, and eval. A flat int for now; aspect-aware sizing and the
-    # ``infer_size % size_divisibility == 0`` validator are a later step.
+    # sample shape, and eval. Must be a multiple of the FPN max stride (32) — see
+    # the validator below. A flat int for now; aspect-aware sizing is a later step.
     infer_size: Annotated[int, Field(gt=0)] = 640
+    # How inference/eval resize an image to the network input:
+    #   "shortest_edge" — variable resize (ResizeShortestEdge), the legacy path.
+    #   "letterbox"     — aspect-preserving resize + pad to infer_size×infer_size,
+    #                     the fixed-size deploy geometry (host un-letterboxes preds).
+    # The mayaku-* family uses "letterbox"; kept switchable as the proven fallback.
+    resize_mode: Literal["shortest_edge", "letterbox"] = "shortest_edge"
+    # Multi-scale letterbox training sizes (resize_mode="letterbox" only); one
+    # square size drawn per iteration. Should *end* at infer_size and jitter
+    # downward — the deploy size is the top of the range, smaller sizes are
+    # scale-down augmentation (better small-object robustness). The
+    # shortest-edge path uses min_size_train instead.
+    train_sizes: tuple[int, ...] = (640,)
     mask_format: Literal["polygon", "bitmask"] = "polygon"
     random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 
@@ -626,6 +638,20 @@ class InputConfig(_BaseModel):
                 "copy_paste_prob > 0 requires mask_format='bitmask' "
                 "(polygon-mask paste requires a lossy raster→polygon round-trip; "
                 "switch the format or disable CopyPaste)."
+            )
+        return self
+
+    # The FPN samples down to stride 32 (res5) for every in-scope backbone, so
+    # the fixed deploy size must tile evenly — else letterbox padding wouldn't be
+    # stride-aligned and the static export shape would be off. (32 is hard-coded
+    # because the config can't see the model's stride; it holds for all current
+    # ResNet/ConvNeXt FPN backbones.)
+    @model_validator(mode="after")
+    def _check_infer_size_stride(self) -> InputConfig:
+        if self.infer_size % 32 != 0:
+            raise ValueError(
+                f"infer_size must be a multiple of 32 (the FPN max stride); got "
+                f"{self.infer_size}. Use e.g. 640, 672, …, 800."
             )
         return self
 

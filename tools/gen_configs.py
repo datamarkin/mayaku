@@ -90,6 +90,11 @@ def render(tier: Tier, task: str) -> str:
     # can't do per-box adaptive sampling, so these are the literal fixed counts
     # both train and deploy use (see ROIPooler._eff_sampling_ratio).
     sr = 1 if tier.realtime else 2
+    # Multi-scale letterbox training: 6 sizes ending at infer_size, stepping down
+    # by 32 (one stride). Deploy size is the top of the range; smaller sizes are
+    # scale-down augmentation. e.g. 640 -> [480…640], 800 -> [640…800].
+    train_sizes = list(range(tier.infer_size - 160, tier.infer_size + 1, 32))
+    train_sizes_yaml = "[" + ", ".join(str(s) for s in train_sizes) + "]"
 
     mask_block = (
         ""
@@ -145,12 +150,9 @@ def render(tier: Tier, task: str) -> str:
         f"{mask_block}"
         "\n"
         "input:\n"
-        "  min_size_train: [640, 672, 704, 736, 768, 800]\n"
-        "  max_size_train: 1333\n"
-        "  min_size_train_sampling: choice\n"
-        "  min_size_test: 800\n"
-        "  max_size_test: 1333\n"
-        f"  infer_size: {tier.infer_size}   # fixed square letterbox for inference + export\n"
+        "  resize_mode: letterbox\n"
+        f"  infer_size: {tier.infer_size}   # single fixed square size for eval + deploy\n"
+        f"  train_sizes: {train_sizes_yaml}   # multi-scale letterbox train; ends at infer_size\n"
         "  random_flip: horizontal\n"
         "  color_jitter_enabled: true\n"
         "  color_jitter_brightness: 0.4\n"
