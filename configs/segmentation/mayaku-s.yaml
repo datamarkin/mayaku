@@ -42,12 +42,9 @@ model:
     loss_weight: 1.0       # real GT masks; lower to 0.5 only for noisy pseudo-masks
 
 input:
-  min_size_train: [640, 672, 704, 736, 768, 800]
-  max_size_train: 1333
-  min_size_train_sampling: choice
-  min_size_test: 800
-  max_size_test: 1333
-  infer_size: 640   # fixed square letterbox for inference + export
+  resize_mode: letterbox
+  infer_size: 640   # single fixed square size for eval + deploy
+  train_sizes: [480, 512, 544, 576, 608, 640]   # multi-scale letterbox train; ends at infer_size
   random_flip: horizontal
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
