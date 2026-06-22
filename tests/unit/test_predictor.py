@@ -226,108 +226,50 @@ def test_predictor_init_puts_model_in_eval_mode(device: torch.device) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_from_pretrained_resolves_bundled_config_and_caches_weights(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """``Predictor.from_pretrained`` should auto-resolve config + weights from a name,
-    then return a usable Predictor without the caller wiring build_detector /
-    torch.load / from_config by hand. This is the unit-level contract — the
-    integration smoke (real weights + real image) is covered by examples/predict.py.
+def test_from_pretrained_builds_from_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``from_pretrained`` resolves a name to its self-describing checkpoint and
+    returns a usable Predictor — the architecture comes from the sidecar, with
+    no bundled-YAML config and no hand-wiring of build_detector / torch.load.
     """
-    import mayaku.config as config_pkg
-    from mayaku import configs as configs_mod
-    from mayaku.cli import _factory, _weights
+    from mayaku.cli import _factory
 
-    # Fake a tiny model so the test stays under a second.
     cfg = _tiny_cfg()
     fake_model = build_faster_rcnn(cfg)
-
-    fake_weights_path = tmp_path / "fake.pth"
-    torch.save(fake_model.state_dict(), fake_weights_path)
-
-    fake_config_path = tmp_path / "fake.yaml"
-    fake_config_path.write_text("dummy")
-
     calls: dict[str, object] = {}
 
-    def fake_configs_path(name: str) -> Path:
-        calls["configs.path"] = name
-        return fake_config_path
+    def fake_load_detector(weights: str | Path) -> tuple[MayakuConfig, torch.nn.Module]:
+        calls["weights"] = weights
+        return cfg, fake_model
 
-    def fake_load_yaml(path: Path) -> MayakuConfig:
-        calls["load_yaml"] = path
-        return cfg
-
-    def fake_resolve_weights(name: str) -> Path:
-        calls["resolve_weights"] = name
-        return fake_weights_path
-
-    def fake_build_detector(c: MayakuConfig) -> torch.nn.Module:
-        calls["build_detector"] = c
-        return fake_model
-
-    monkeypatch.setattr(configs_mod, "path", fake_configs_path)
-    monkeypatch.setattr(config_pkg, "load_yaml", fake_load_yaml)
-    monkeypatch.setattr(_weights, "resolve_weights", fake_resolve_weights)
-    monkeypatch.setattr(_factory, "build_detector", fake_build_detector)
+    monkeypatch.setattr(_factory, "load_detector", fake_load_detector)
 
     p = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x", device="cpu")
 
     assert isinstance(p, Predictor)
-    assert calls["configs.path"] == "faster_rcnn_R_50_FPN_3x"
-    assert calls["resolve_weights"] == "faster_rcnn_R_50_FPN_3x"
-    assert calls["load_yaml"] == fake_config_path
-    # `from_pretrained` must hand the loaded config to the right factory.
-    assert calls["build_detector"] is cfg
-    # Sizes must come from the config (mirrors `from_config`).
+    # The name is the default checkpoint source; its sidecar defines the arch.
+    assert calls["weights"] == "faster_rcnn_R_50_FPN_3x"
     assert p.min_size_test == cfg.input.min_size_test
     assert p.max_size_test == cfg.input.max_size_test
     assert p.model.training is False  # eval-mode invariant
 
 
-def test_from_pretrained_overrides_take_precedence(
+def test_from_pretrained_weights_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When ``weights=`` / ``config=`` are explicit, ``name`` is not used to resolve them."""
-    import mayaku.config as config_pkg
-    from mayaku.cli import _factory, _weights
+    """``weights=`` overrides ``name`` as the checkpoint source."""
+    from mayaku.cli import _factory
 
     cfg = _tiny_cfg()
     fake_model = build_faster_rcnn(cfg)
-
-    fake_weights_path = tmp_path / "explicit.pth"
-    torch.save(fake_model.state_dict(), fake_weights_path)
-
-    fake_config_path = tmp_path / "explicit.yaml"
-    fake_config_path.write_text("dummy")
-
+    explicit = tmp_path / "explicit.pth"
     captured: dict[str, object] = {}
 
-    def fake_load_yaml(path: Path) -> MayakuConfig:
-        captured["load_yaml_path"] = path
-        return cfg
+    def fake_load_detector(weights: str | Path) -> tuple[MayakuConfig, torch.nn.Module]:
+        captured["weights"] = weights
+        return cfg, fake_model
 
-    def fake_resolve_weights(name: str | Path) -> Path:
-        captured["resolve_weights_name"] = name
-        # ``name`` is a Path here because we passed an explicit weights path —
-        # `resolve_weights` is robust to either form.
-        return fake_weights_path
+    monkeypatch.setattr(_factory, "load_detector", fake_load_detector)
 
-    def fake_build_detector(c: MayakuConfig) -> torch.nn.Module:
-        return fake_model
+    Predictor.from_pretrained("ignored_name", weights=explicit, device="cpu")
 
-    monkeypatch.setattr(config_pkg, "load_yaml", fake_load_yaml)
-    monkeypatch.setattr(_weights, "resolve_weights", fake_resolve_weights)
-    monkeypatch.setattr(_factory, "build_detector", fake_build_detector)
-
-    Predictor.from_pretrained(
-        "ignored_name",
-        weights=fake_weights_path,
-        config=fake_config_path,
-        device="cpu",
-    )
-
-    # `load_yaml` must be called with the explicit override path, not a
-    # bundled lookup of "ignored_name".
-    assert captured["load_yaml_path"] == fake_config_path
-    assert captured["resolve_weights_name"] == fake_weights_path
+    assert captured["weights"] == explicit

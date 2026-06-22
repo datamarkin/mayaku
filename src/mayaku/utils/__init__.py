@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from mayaku.utils.checkpoint import (
     build_sidecar,
+    config_from_checkpoint,
     git_hash,
-    load_checkpoint_metadata,
-    load_embedded_config,
+    load_checkpoint,
     select_final_weights,
     strip_num_batches_tracked,
 )
@@ -27,11 +27,11 @@ __all__ = [
     "DownloadError",
     "bgr_to_rgb",
     "build_sidecar",
+    "config_from_checkpoint",
     "download_model",
     "git_hash",
     "list_models",
-    "load_checkpoint_metadata",
-    "load_embedded_config",
+    "load_checkpoint",
     "read_image",
     "select_final_weights",
     "strip_num_batches_tracked",

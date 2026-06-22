@@ -71,14 +71,14 @@ from typing import Any
 import torch
 
 from mayaku import configs
-from mayaku.cli._weights import config_from_weights, resolve_weights
+from mayaku.cli._weights import resolve_weights
 from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train, run_train_worker
 from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
 from mayaku.data import resolve_dataset
 from mayaku.engine import launch, resolve_ddp_device
-from mayaku.utils import git_hash, select_final_weights
+from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
 
 __all__ = ["train"]
 
@@ -362,8 +362,10 @@ def _resolve_model_source(
         cfg, stem = _load_config(config)
         return cfg, stem, resolve_weights(weights) if weights is not None else None
     if weights is not None:
-        cfg, weights_path, stem = config_from_weights(weights)
-        return cfg, stem, weights_path
+        weights_path = resolve_weights(weights)
+        assert weights_path is not None  # weights is not None on this path
+        cfg, _ = config_from_checkpoint(weights_path)
+        return cfg, weights_path.stem, weights_path
     raise ValueError(
         "Provide config= (a YAML path, bundled name, or MayakuConfig) or "
         "weights= (a bundled model name or a trained .pth) so the model "

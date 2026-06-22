@@ -121,7 +121,6 @@ class Predictor:
         name: str,
         *,
         weights: str | Path | None = None,
-        config: str | Path | None = None,
         device: str = "auto",
         target: Target = "pytorch",
         fp16: bool = True,
@@ -131,19 +130,15 @@ class Predictor:
     ) -> Predictor:
         """Build a fully-loaded :class:`Predictor` from a model name in one call.
 
-        This is the high-level zero-config constructor. ``name`` resolves
-        both the bundled YAML config (via :mod:`mayaku.configs`) and the
-        cached weights (via the model manifest). Override either
-        independently with ``weights=`` / ``config=``.
+        This is the high-level zero-config constructor. ``name`` resolves the
+        cached weights via the model manifest; the architecture comes from the
+        checkpoint's embedded sidecar — no separate config file.
 
         Args:
             name: Bundled model name, e.g. ``"faster_rcnn_R_50_FPN_3x"``.
-            weights: Override the weights — accepts a model name (resolved
+            weights: Override the weights source — a model name (resolved
                 via the manifest) or a filesystem path to a ``.pth``.
                 Defaults to ``name``.
-            config: Override the config — accepts a bundled config name
-                (short or qualified ``task/name``) or a filesystem path
-                to a ``.yaml``. Defaults to ``name``.
             device: ``"cpu" | "cuda" | "mps" | "auto"``. Defaults to
                 ``"auto"`` which picks the best available accelerator.
             target: Backbone runtime. ``"pytorch"`` (default) keeps the
@@ -176,35 +171,15 @@ class Predictor:
             ...     pinned_memory=True,
             ... )
         """
-        from mayaku import configs
         from mayaku.backends.device import Device
-        from mayaku.cli._factory import build_detector
-        from mayaku.cli._weights import resolve_weights
-        from mayaku.config import load_yaml
+        from mayaku.cli._factory import load_detector
 
         if device == "auto":
             device = Device.auto().kind
 
-        config_arg: str | Path = config if config is not None else name
-        if isinstance(config_arg, Path) or Path(str(config_arg)).is_file():
-            config_path = Path(str(config_arg))
-        else:
-            config_path = configs.path(str(config_arg))
-        cfg = load_yaml(config_path)
-
-        weights_path = resolve_weights(weights if weights is not None else name)
-        if weights_path is None:
-            raise ValueError(f"Could not resolve weights for {weights or name!r}")
-        state = torch.load(weights_path, map_location="cpu", weights_only=True)
-        if isinstance(state, dict) and "model" in state:
-            state = state["model"]
-        model = build_detector(cfg).eval()
-        # Drop BN's num_batches_tracked buffer — FrozenBatchNorm2d (used by
-        # the inference backbone) doesn't have it, but EMA shadows from a
-        # BN-trained run do, so a strict load would reject them.
-        state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
-        model.load_state_dict(state)
-        model = model.to(torch.device(device))
+        # Architecture + weights both come from the checkpoint's sidecar.
+        cfg, model = load_detector(weights if weights is not None else name)
+        model = model.eval().to(torch.device(device))
 
         _swap_backbone(model, name=name, target=target, fp16=fp16, pinned=pinned)
 

@@ -15,14 +15,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from mayaku.utils.download import DownloadError, download_model
 
-if TYPE_CHECKING:
-    from mayaku.config import MayakuConfig
-
-__all__ = ["config_from_weights", "resolve_weights"]
+__all__ = ["resolve_weights"]
 
 _NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
@@ -59,44 +55,3 @@ def resolve_weights(weights: str | Path | None) -> Path | None:
         "or a bare model name like `faster_rcnn_R_50_FPN_3x` to fetch from "
         "the hosted manifest."
     )
-
-
-def config_from_weights(weights: str | Path) -> tuple[MayakuConfig, Path, str]:
-    """Resolve ``(config, weights_path, stem)`` from a self-describing checkpoint.
-
-    The architecture is read from the model itself, never a separate config file:
-
-    * a bundled model name → its shipped config, plus the fetched ``.pth``;
-    * a trained ``.pth`` → the resolved config embedded in its ``"mayaku"``
-      sidecar (written by training).
-
-    A ``.pth`` with no sidecar (an older or externally-produced checkpoint)
-    raises ``ValueError`` — convert it first. Inference never silently falls
-    back to a hand-passed config; the checkpoint is the single source of truth.
-    """
-    from mayaku import configs
-    from mayaku.config import MayakuConfig
-    from mayaku.utils.checkpoint import load_embedded_config
-
-    name = str(weights)
-    if not Path(weights).exists():
-        # A bare name: prefer the bundled config + its hosted weights.
-        try:
-            cfg = configs.load(name)
-        except FileNotFoundError:
-            cfg = None
-        if cfg is not None:
-            fetched = resolve_weights(weights)
-            assert fetched is not None  # weights is not None on this path
-            return cfg, fetched, name
-
-    weights_path = resolve_weights(weights)
-    assert weights_path is not None  # weights is not None on this path
-    config_dict = load_embedded_config(weights_path)
-    if config_dict is None:
-        raise ValueError(
-            f"{weights_path} has no embedded config (an older or externally "
-            "produced checkpoint). Convert it first — predict/eval/export read "
-            "the architecture from the checkpoint's embedded sidecar."
-        )
-    return MayakuConfig.model_validate(config_dict), weights_path, weights_path.stem

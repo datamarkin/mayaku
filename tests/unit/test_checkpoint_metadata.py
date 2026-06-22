@@ -1,8 +1,8 @@
 """Tests for the self-describing checkpoint sidecar.
 
 The writer (:class:`mayaku.engine.PeriodicCheckpointer` with ``metadata=``)
-and reader (:func:`mayaku.utils.load_checkpoint_metadata`) are exercised
-directly with a tiny module — no training run needed.
+and reader (:func:`mayaku.utils.load_checkpoint`) are exercised directly with
+a tiny module — no training run needed.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import torch
 from torch import nn
 
 from mayaku.engine import PeriodicCheckpointer
-from mayaku.utils import load_checkpoint_metadata
+from mayaku.utils import load_checkpoint
 
 
 def _save_once(model: nn.Module, out: Path, **kwargs: Any) -> Path:
@@ -41,13 +41,13 @@ def test_metadata_written_beside_pure_state_dict(tmp_path: Path) -> None:
     assert set(state["model"]) == set(model.state_dict())
 
 
-def test_load_checkpoint_metadata_roundtrip(tmp_path: Path) -> None:
+def test_load_checkpoint_sidecar_roundtrip(tmp_path: Path) -> None:
     sidecar = {"schema_version": 1, "config": {"model": {"meta_architecture": "faster_rcnn"}}}
     path = _save_once(nn.Linear(2, 2), tmp_path / "run", metadata=sidecar)
-    assert load_checkpoint_metadata(path) == sidecar
+    assert load_checkpoint(path)[0] == sidecar
 
 
-def test_load_checkpoint_metadata_absent_returns_none(tmp_path: Path) -> None:
+def test_load_checkpoint_sidecar_absent_is_none(tmp_path: Path) -> None:
     # No metadata= → no sidecar → reader returns None (old/external checkpoint).
     path = _save_once(nn.Linear(2, 2), tmp_path / "run")
-    assert load_checkpoint_metadata(path) is None
+    assert load_checkpoint(path)[0] is None

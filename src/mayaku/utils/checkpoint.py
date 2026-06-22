@@ -23,9 +23,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "build_sidecar",
+    "config_from_checkpoint",
     "git_hash",
-    "load_checkpoint_metadata",
-    "load_embedded_config",
+    "load_checkpoint",
     "select_final_weights",
     "strip_num_batches_tracked",
 ]
@@ -92,34 +92,47 @@ def strip_num_batches_tracked(checkpoint_path: Path) -> None:
     torch.save(state, checkpoint_path)
 
 
-def load_checkpoint_metadata(checkpoint_path: Path) -> dict[str, Any] | None:
-    """Return the self-describing ``"mayaku"`` sidecar from a checkpoint.
+def load_checkpoint(checkpoint_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Deserialize a checkpoint **once**, returning ``(sidecar, model_state)``.
 
-    Checkpoints written by :class:`mayaku.engine.PeriodicCheckpointer`
-    with a ``metadata`` argument carry a ``"mayaku"`` block (resolved
-    config, class names, provenance) next to the weights. Returns that
-    block, or ``None`` for older / externally-produced checkpoints that
-    don't have one.
+    A single ``torch.load`` for callers that need both the self-describing
+    ``"mayaku"`` sidecar and the weights — reading a large ``.pth`` twice (once
+    for the config, once for the state) is the cost this avoids. ``sidecar`` is
+    ``None`` for checkpoints written without one; ``model_state`` is the
+    ``"model"`` block, or the whole object when it is a bare state_dict.
+
+    ``weights_only=True`` is safe here: the sidecar holds only JSON primitives
+    (``cfg.model_dump(mode="json")`` + names + provenance), which the restricted
+    unpickler allows alongside tensors.
     """
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if isinstance(state, dict):
-        sidecar = state.get("mayaku")
-        if isinstance(sidecar, dict):
-            return sidecar
-    return None
+    obj = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(obj, dict):
+        return None, obj
+    sidecar = obj.get("mayaku")
+    state = obj.get("model", obj)
+    return (sidecar if isinstance(sidecar, dict) else None), state
 
 
-def load_embedded_config(checkpoint_path: Path) -> dict[str, Any] | None:
-    """Return the architecture config embedded in a checkpoint, or ``None``.
+def config_from_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, dict[str, Any]]:
+    """Read ``(config, model_state)`` from a self-describing checkpoint.
 
-    Reads the ``"config"`` block from the self-describing ``"mayaku"``
-    sidecar. ``None`` when the checkpoint has no sidecar or no embedded
-    config. Callers reconstruct a :class:`MayakuConfig` from the result;
-    the sidecar key layout is owned here, not by the caller.
+    One deserialize: the architecture comes from the embedded ``"mayaku"``
+    sidecar (the single source of truth) and the weights from the same load.
+    Raises ``ValueError`` for a checkpoint with no sidecar (an older or
+    externally-produced ``.pth``) — convert it first; there is no fall back to a
+    separate config file.
     """
-    sidecar = load_checkpoint_metadata(checkpoint_path)
+    from mayaku.config import MayakuConfig
+
+    sidecar, state = load_checkpoint(checkpoint_path)
     config = sidecar.get("config") if sidecar else None
-    return config if isinstance(config, dict) else None
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"{checkpoint_path} has no embedded config (an older or externally "
+            "produced checkpoint). Convert it first — predict/eval/export read "
+            "the architecture from the checkpoint's embedded sidecar."
+        )
+    return MayakuConfig.model_validate(config), state
 
 
 def build_sidecar(
@@ -130,7 +143,7 @@ def build_sidecar(
     """Assemble the self-describing ``"mayaku"`` sidecar embedded in checkpoints.
 
     The single writer of the sidecar schema, paired with
-    :func:`load_embedded_config` (the reader). Training embeds this block next
+    :func:`config_from_checkpoint` (the reader). Training embeds this block next
     to the weights so ``predict``/``eval``/``export`` reconstruct the
     architecture from the checkpoint alone — no separate config file.
     """
