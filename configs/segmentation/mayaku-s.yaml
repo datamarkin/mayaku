@@ -8,6 +8,7 @@ model:
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
     name: convnext_nano
+
     weights_path: null
     freeze_at: 0
     norm: FrozenBN
@@ -27,6 +28,7 @@ model:
     dim_feedforward: 512    # 4 x hidden_dim
     dim_dynamic: 32         # hidden_dim / 4
     pooler_resolution: 7
+    pooler_sampling_ratio: 1   # 1 = one sample/bin (faster, TRT-fp16 safe, ~-0.01 AP); 0 = adaptive (2)
     dropout: 0.0
     cost_class: 2.0
     cost_bbox: 5.0
@@ -45,6 +47,7 @@ input:
   min_size_train_sampling: choice
   min_size_test: 800
   max_size_test: 1333
+  infer_size: 640   # fixed square letterbox for inference + export
   random_flip: horizontal
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
