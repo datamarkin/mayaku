@@ -85,7 +85,11 @@ def render(tier: Tier, task: str) -> str:
     hd = tier.hidden_dim
     ff = 4 * hd
     dd = hd // 4
-    sr = 1 if tier.realtime else 0
+    # Real-time tier: 1 sample/ROI bin (skips the sub-bin average → faster, no
+    # ReduceMean op). Accuracy tier: 2 samples/bin. The deploy one-pass pooler
+    # can't do per-box adaptive sampling, so these are the literal fixed counts
+    # both train and deploy use (see ROIPooler._eff_sampling_ratio).
+    sr = 1 if tier.realtime else 2
 
     mask_block = (
         ""
@@ -132,7 +136,7 @@ def render(tier: Tier, task: str) -> str:
         f"    dim_feedforward: {ff}    # 4 x hidden_dim\n"
         f"    dim_dynamic: {dd}         # hidden_dim / 4\n"
         "    pooler_resolution: 7\n"
-        f"    pooler_sampling_ratio: {sr}   # 1 = one sample/bin (faster, TRT-fp16 safe, ~-0.01 AP); 0 = adaptive (2)\n"
+        f"    pooler_sampling_ratio: {sr}   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier\n"
         "    dropout: 0.0\n"
         "    cost_class: 2.0\n"
         "    cost_bbox: 5.0\n"

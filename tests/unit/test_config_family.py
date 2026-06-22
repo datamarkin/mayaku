@@ -53,7 +53,7 @@ def test_derived_invariants_hold(task: str, tier) -> None:
     assert cfg.model.fpn.out_channels == head.hidden_dim == tier.hidden_dim
     assert head.dim_feedforward == 4 * head.hidden_dim
     assert head.dim_dynamic == head.hidden_dim // 4
-    assert head.pooler_sampling_ratio == (1 if tier.realtime else 0)
+    assert head.pooler_sampling_ratio == (1 if tier.realtime else 2)
     assert cfg.input.infer_size == tier.infer_size
     if task == "segmentation":
         assert cfg.model.uniquery_mask.conv_dim == head.hidden_dim
