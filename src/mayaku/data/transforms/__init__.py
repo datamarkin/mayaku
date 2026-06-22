@@ -20,11 +20,17 @@ from mayaku.data.transforms.augmentation import (
     AugInput,
     Augmentation,
     AugmentationList,
+    LetterboxResize,
     RandomFlip,
     ResizeShortestEdge,
 )
 from mayaku.data.transforms.base import Transform, TransformList
-from mayaku.data.transforms.geometry import HFlipTransform, ResizeTransform
+from mayaku.data.transforms.geometry import (
+    HFlipTransform,
+    LetterboxTransform,
+    ResizeTransform,
+    letterbox,
+)
 from mayaku.data.transforms.photometric import (
     AutoContrastTransform,
     BrightnessTransform,
@@ -48,6 +54,8 @@ __all__ = [
     "EqualizeTransform",
     "HFlipTransform",
     "HueShiftTransform",
+    "LetterboxResize",
+    "LetterboxTransform",
     "PosterizeTransform",
     "RandAugment",
     "RandomColorJitter",
@@ -58,4 +66,5 @@ __all__ = [
     "SolarizeTransform",
     "Transform",
     "TransformList",
+    "letterbox",
 ]

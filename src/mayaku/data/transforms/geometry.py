@@ -21,7 +21,7 @@ from PIL import Image
 
 from mayaku.data.transforms.base import Transform
 
-__all__ = ["HFlipTransform", "ResizeTransform"]
+__all__ = ["HFlipTransform", "LetterboxTransform", "ResizeTransform", "letterbox"]
 
 _F32 = npt.NDArray[np.float32]
 
@@ -118,3 +118,109 @@ class HFlipTransform(Transform):
         out = coords.astype(np.float32, copy=True)
         out[:, 0] = self.width - out[:, 0]
         return out
+
+
+class LetterboxTransform(Transform):
+    """Aspect-preserving resize into a fixed ``size × size`` square, **centred**.
+
+    The fixed-shape inference geometry (the deploy keystone). The image is
+    scaled by ``scale = size / max(h, w)`` so the long side becomes ``size``;
+    the short side is padded equally on both sides (the "letterbox" bars) to a
+    ``size × size`` canvas. A single static shape is what every fast path
+    (torch.compile / ONNX / TensorRT / CoreML) specialises on, and a **single
+    uniform scale** (not per-axis) makes the inverse exact.
+
+    Centred padding (not top-left) matches the YOLO-family convention and keeps
+    real content off the canvas edge on all four sides (mild win for border /
+    small objects). The pad offset is recorded so predictions map back exactly:
+    forward ``c → c·scale + pad``; inverse ``c → (c − pad)/scale``.
+
+    ``pad_value`` fills the bars. Pass the dataset pixel mean so the padded
+    region is ≈0 after the model's normalize (neutral); defaults to 0.
+    """
+
+    def __init__(
+        self,
+        h: int,
+        w: int,
+        size: int,
+        *,
+        pad_value: float = 0.0,
+        interp: Image.Resampling = Image.Resampling.BILINEAR,
+    ) -> None:
+        if size <= 0:
+            raise ValueError(f"LetterboxTransform size must be > 0; got {size}")
+        self.h = h
+        self.w = w
+        self.size = size
+        self.scale = size / max(h, w)
+        # Long side → size; clamp against float rounding so the resized image
+        # never exceeds the canvas.
+        self.new_h = min(round(h * self.scale), size)
+        self.new_w = min(round(w * self.scale), size)
+        self.pad_top = (size - self.new_h) // 2
+        self.pad_left = (size - self.new_w) // 2
+        self.pad_value = pad_value
+        self.interp = interp
+
+    def _resized(self, image: npt.NDArray[Any], interp: Image.Resampling) -> npt.NDArray[Any]:
+        return ResizeTransform(self.h, self.w, self.new_h, self.new_w, interp).apply_image(image)
+
+    def _pad(self, resized: npt.NDArray[Any], fill: float) -> npt.NDArray[Any]:
+        if resized.ndim == 2:
+            canvas = np.full((self.size, self.size), fill, dtype=resized.dtype)
+            canvas[self.pad_top : self.pad_top + self.new_h, self.pad_left : self.pad_left + self.new_w] = (
+                resized
+            )
+        else:
+            canvas = np.full((self.size, self.size, resized.shape[2]), fill, dtype=resized.dtype)
+            canvas[
+                self.pad_top : self.pad_top + self.new_h,
+                self.pad_left : self.pad_left + self.new_w,
+                :,
+            ] = resized
+        return canvas
+
+    def apply_image(self, image: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        return self._pad(self._resized(image, self.interp), self.pad_value)
+
+    def apply_segmentation(self, mask: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
+        # Nearest-neighbour for labels; pad with 0 (background), not pad_value.
+        return self._pad(self._resized(mask, Image.Resampling.NEAREST), 0)
+
+    def apply_coords(self, coords: _F32) -> _F32:
+        out = coords.astype(np.float32, copy=True)
+        out[:, 0] = out[:, 0] * self.scale + self.pad_left
+        out[:, 1] = out[:, 1] * self.scale + self.pad_top
+        return out
+
+    def inverse_coords(self, coords: _F32) -> _F32:
+        """Map ``size × size`` letterbox coords back to the original image."""
+        out = coords.astype(np.float32, copy=True)
+        out[:, 0] = (out[:, 0] - self.pad_left) / self.scale
+        out[:, 1] = (out[:, 1] - self.pad_top) / self.scale
+        return out
+
+    def inverse_box(self, boxes: _F32) -> _F32:
+        """Map ``(N, 4)`` xyxy boxes back to the original image (un-letterbox)."""
+        if boxes.size == 0:
+            return boxes.reshape(0, 4).astype(np.float32, copy=False)
+        out = boxes.astype(np.float32, copy=True)
+        out[:, 0::2] = (out[:, 0::2] - self.pad_left) / self.scale
+        out[:, 1::2] = (out[:, 1::2] - self.pad_top) / self.scale
+        return out
+
+
+def letterbox(
+    image: npt.NDArray[Any], size: int, *, pad_value: float = 0.0
+) -> tuple[npt.NDArray[Any], LetterboxTransform]:
+    """Centred-letterbox ``image`` to ``size × size``; return ``(padded, transform)``.
+
+    The geometry is built **once** as a :class:`LetterboxTransform` and reused:
+    the returned transform carries ``scale``/``pad`` so the caller maps
+    predictions back with ``transform.inverse_box(...)``. The eager
+    ``Predictor``, the evaluator, and (later) training all go through this.
+    """
+    h, w = image.shape[:2]
+    transform = LetterboxTransform(h, w, size, pad_value=pad_value)
+    return transform.apply_image(image), transform

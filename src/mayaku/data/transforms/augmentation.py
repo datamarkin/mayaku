@@ -23,7 +23,7 @@ import numpy.typing as npt
 from PIL import Image
 
 from mayaku.data.transforms.base import Transform, TransformList
-from mayaku.data.transforms.geometry import HFlipTransform, ResizeTransform
+from mayaku.data.transforms.geometry import HFlipTransform, LetterboxTransform, ResizeTransform
 
 __all__ = [
     "AugInput",
@@ -101,6 +101,50 @@ class ResizeShortestEdge(Augmentation):
             target = int(self.rng.integers(lo, hi + 1))
         new_h, new_w = compute_resized_hw(h, w, target, self.max_size)
         return ResizeTransform(h, w, new_h, new_w, self.interp)
+
+
+class LetterboxResize(Augmentation):
+    """Aspect-preserving resize into a fixed ``size × size`` square (centred pad).
+
+    The fixed-shape inference/eval/deploy geometry. ``sizes`` is a single int
+    for the one deploy size, or a sequence for multi-scale training — one drawn
+    per call, ``"choice"`` (pick from the list) or ``"range"`` (uniform between
+    the two endpoints), mirroring :class:`ResizeShortestEdge`. ``640`` (the
+    deploy size) belongs in the training set so train geometry == deploy.
+    """
+
+    def __init__(
+        self,
+        sizes: int | Sequence[int],
+        *,
+        sample_style: str = "choice",
+        pad_value: float = 0.0,
+        rng: np.random.Generator | None = None,
+    ) -> None:
+        self.sizes = (sizes,) if isinstance(sizes, int) else tuple(sizes)
+        if not self.sizes:
+            raise ValueError("LetterboxResize requires at least one size")
+        if sample_style not in ("choice", "range"):
+            raise ValueError(f"sample_style must be 'choice' or 'range'; got {sample_style!r}")
+        if sample_style == "range" and len(self.sizes) != 2:
+            raise ValueError(
+                "sample_style='range' requires exactly two sizes (min, max); "
+                f"got length {len(self.sizes)}"
+            )
+        self.sample_style = sample_style
+        self.pad_value = pad_value
+        self.rng = rng if rng is not None else np.random.default_rng()
+
+    def get_transform(self, image: npt.NDArray[Any]) -> LetterboxTransform:
+        h, w = image.shape[:2]
+        if len(self.sizes) == 1:
+            size = self.sizes[0]
+        elif self.sample_style == "choice":
+            size = int(self.rng.choice(self.sizes))
+        else:
+            lo, hi = self.sizes
+            size = int(self.rng.integers(lo, hi + 1))
+        return LetterboxTransform(h, w, size, pad_value=self.pad_value)
 
 
 class RandomFlip(Augmentation):
