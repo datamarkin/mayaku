@@ -358,6 +358,9 @@ class UniQueryHeadConfig(_BaseModel):
     dim_feedforward: Annotated[int, Field(gt=0)] = 2048
     dim_dynamic: Annotated[int, Field(gt=0)] = 64
     pooler_resolution: Annotated[int, Field(gt=0)] = 7
+    # 1 = one sample/bin (faster, TensorRT-fp16 safe); 0 = adaptive (ceil(roi/out),
+    # ~2 samples/bin). Real-time tiers (n/s/m) use 1, accuracy tiers (l/xl/xxl) use 0.
+    pooler_sampling_ratio: Annotated[int, Field(ge=0)] = 0
     dropout: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
 
     # Hungarian matching cost weights
@@ -504,6 +507,12 @@ class ModelConfig(_BaseModel):
                 )
             if self.uniquery_head is None:
                 raise ValueError("uniquery requires uniquery_head to be set")
+            if self.fpn.out_channels != self.uniquery_head.hidden_dim:
+                raise ValueError(
+                    f"fpn.out_channels ({self.fpn.out_channels}) must equal "
+                    f"uniquery_head.hidden_dim ({self.uniquery_head.hidden_dim}): "
+                    "the FPN feeds the head at this width"
+                )
             return self
 
         if self.mask_on != wants_mask:
@@ -567,6 +576,11 @@ class InputConfig(_BaseModel):
     min_size_train_sampling: Literal["choice", "range"] = "choice"
     min_size_test: Annotated[int, Field(gt=0)] = 800
     max_size_test: Annotated[int, Field(gt=0)] = 1333
+    # Fixed square letterbox size for inference + export (the single static shape
+    # every fast path specialises on). Drives the eager Predictor, the export
+    # sample shape, and eval. A flat int for now; aspect-aware sizing and the
+    # ``infer_size % size_divisibility == 0`` validator are a later step.
+    infer_size: Annotated[int, Field(gt=0)] = 640
     mask_format: Literal["polygon", "bitmask"] = "polygon"
     random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 
