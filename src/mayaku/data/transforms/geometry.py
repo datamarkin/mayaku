@@ -167,19 +167,16 @@ class LetterboxTransform(Transform):
         return ResizeTransform(self.h, self.w, self.new_h, self.new_w, interp).apply_image(image)
 
     def _pad(self, resized: npt.NDArray[Any], fill: float) -> npt.NDArray[Any]:
-        if resized.ndim == 2:
-            canvas = np.full((self.size, self.size), fill, dtype=resized.dtype)
-            canvas[self.pad_top : self.pad_top + self.new_h, self.pad_left : self.pad_left + self.new_w] = (
-                resized
-            )
-        else:
-            canvas = np.full((self.size, self.size, resized.shape[2]), fill, dtype=resized.dtype)
-            canvas[
-                self.pad_top : self.pad_top + self.new_h,
-                self.pad_left : self.pad_left + self.new_w,
-                :,
-            ] = resized
-        return canvas
+        # Pad rather than fill-then-overwrite: ``np.pad`` writes only the bars and
+        # copies the content once (the old ``np.full`` filled the whole canvas,
+        # then ~half of it was overwritten). dtype is preserved.
+        pad_width = [
+            (self.pad_top, self.size - self.new_h - self.pad_top),
+            (self.pad_left, self.size - self.new_w - self.pad_left),
+        ]
+        if resized.ndim == 3:
+            pad_width.append((0, 0))  # don't pad the channel axis
+        return np.pad(resized, pad_width, mode="constant", constant_values=fill)
 
     def apply_image(self, image: npt.NDArray[Any]) -> npt.NDArray[Any]:
         return self._pad(self._resized(image, self.interp), self.pad_value)
