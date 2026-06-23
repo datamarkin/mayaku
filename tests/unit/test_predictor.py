@@ -253,9 +253,7 @@ def test_from_pretrained_builds_from_sidecar(monkeypatch: pytest.MonkeyPatch) ->
     assert p.model.training is False  # eval-mode invariant
 
 
-def test_from_pretrained_weights_override(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_from_pretrained_weights_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``weights=`` overrides ``name`` as the checkpoint source."""
     from mayaku.cli import _factory
 

@@ -77,7 +77,9 @@ def load_detector(weights: Path | str) -> tuple[MayakuConfig, nn.Module]:
     dropped — the deploy model uses FrozenBatchNorm2d, which has no such entry.
     Returns ``(cfg, model)``; the caller sets eval mode / device as it needs.
     """
-    cfg, state = config_from_checkpoint(resolve_weights(weights))
+    weights_path = resolve_weights(weights)
+    assert weights_path is not None  # resolve_weights only returns None for None input
+    cfg, state = config_from_checkpoint(weights_path)
     model = build_detector(cfg)
     state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
     model.load_state_dict(state)

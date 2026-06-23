@@ -255,7 +255,9 @@ def test_run_train_finetune_drops_class_count_mismatched_layers(
     # The toy checkpoint is self-describing ({"model": ..., "mayaku": ...});
     # finetune-from-foreign mimics a bare COCO state_dict, so pull the inner
     # weights out and save them raw.
-    real_state = torch.load(toy_workspace["weights"], map_location="cpu", weights_only=True)["model"]
+    real_state = torch.load(toy_workspace["weights"], map_location="cpu", weights_only=True)[
+        "model"
+    ]
     fake_coco_state = dict(real_state)
     # Synthesize 81-way / 320-way / 80-way shapes that match the D2 COCO
     # convention; the rest of the keys keep their toy shapes (which match

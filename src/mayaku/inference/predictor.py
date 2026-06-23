@@ -77,7 +77,9 @@ class Predictor:
         pinned_memory: bool = False,
     ) -> None:
         if resize_mode not in ("shortest_edge", "letterbox"):
-            raise ValueError(f"resize_mode must be 'shortest_edge' or 'letterbox'; got {resize_mode!r}")
+            raise ValueError(
+                f"resize_mode must be 'shortest_edge' or 'letterbox'; got {resize_mode!r}"
+            )
         if resize_mode == "letterbox" and infer_size <= 0:
             raise ValueError(f"infer_size must be > 0; got {infer_size}")
         if resize_mode == "shortest_edge" and (min_size_test <= 0 or max_size_test <= 0):
