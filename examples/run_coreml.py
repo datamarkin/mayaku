@@ -12,7 +12,7 @@ import platform
 import urllib.request
 from pathlib import Path
 
-from mayaku.inference import Predictor
+from mayaku import from_pretrained
 from mayaku.inference.export import CoreMLBackbone
 from mayaku.utils.image import read_image
 
@@ -35,7 +35,7 @@ def _sample_image() -> Path:
     return p
 
 
-predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+predictor = from_pretrained("faster_rcnn_R_50_FPN_3x")
 size_div = getattr(predictor.model.backbone, "size_divisibility", 32)
 predictor.model.backbone = CoreMLBackbone(
     MLPACKAGE, size_divisibility=size_div, compute_units="CPU_AND_GPU"

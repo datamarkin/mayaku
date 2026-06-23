@@ -20,7 +20,7 @@ Same shape for the segmentation and keypoint variants:
 | `predict_segmentation.py` | Mask R-CNN | `mask_rcnn_R_50_FPN_3x` |
 | `predict_keypoint.py` | Keypoint R-CNN | `keypoint_rcnn_R_50_FPN_3x` |
 
-To swap to another zoo model, edit the `Predictor.from_pretrained("...")` line.
+To swap to another zoo model, edit the `from_pretrained("...")` line.
 Every name from `python -c "from mayaku import configs; print(*configs.list_all(), sep='\n')"` works.
 
 ## Inference

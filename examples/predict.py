@@ -8,7 +8,7 @@ from __future__ import annotations
 import urllib.request
 from pathlib import Path
 
-from mayaku.inference import Predictor
+from mayaku import from_pretrained
 from mayaku.utils.image import read_image
 
 ASSETS = Path(__file__).parent / "assets"
@@ -23,7 +23,7 @@ def _sample_image() -> Path:
     return p
 
 
-predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+predictor = from_pretrained("faster_rcnn_R_50_FPN_3x")
 instances = predictor(read_image(_sample_image()))
 
 for box, score, cls in zip(

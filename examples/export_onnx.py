@@ -13,13 +13,13 @@ from pathlib import Path
 
 import torch
 
-from mayaku.inference import Predictor
+from mayaku import from_pretrained
 from mayaku.inference.export import ONNXExporter
 
 OUT = Path(__file__).parent / "outputs" / "model.onnx"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
-predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+predictor = from_pretrained("faster_rcnn_R_50_FPN_3x")
 sample = torch.zeros(1, 3, 800, 1344, device=predictor.device)
 
 exporter = ONNXExporter(dynamic_input_shape=True)

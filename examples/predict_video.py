@@ -14,7 +14,7 @@ from pathlib import Path
 
 import cv2
 
-from mayaku.inference import Predictor
+from mayaku import from_pretrained
 
 ASSETS = Path(__file__).parent / "assets"
 OUT = Path(__file__).parent / "outputs" / "annotated.mp4"
@@ -30,7 +30,7 @@ def _sample_video() -> Path:
 
 
 video = sys.argv[1] if len(sys.argv) > 1 else str(_sample_video())
-predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+predictor = from_pretrained("faster_rcnn_R_50_FPN_3x")
 
 cap = cv2.VideoCapture(video)
 fps = cap.get(cv2.CAP_PROP_FPS) or 25.0

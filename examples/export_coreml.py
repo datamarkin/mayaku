@@ -14,7 +14,7 @@ from pathlib import Path
 
 import torch
 
-from mayaku.inference import Predictor
+from mayaku import from_pretrained
 from mayaku.inference.export import CoreMLExporter
 
 if platform.system() != "Darwin":
@@ -23,7 +23,7 @@ if platform.system() != "Darwin":
 OUT = Path(__file__).parent / "outputs" / "model.mlpackage"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
-predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
+predictor = from_pretrained("faster_rcnn_R_50_FPN_3x")
 sample = torch.zeros(1, 3, 800, 1344, device=predictor.device)
 
 exporter = CoreMLExporter(compute_precision="fp16", compute_units="CPU_AND_GPU")
