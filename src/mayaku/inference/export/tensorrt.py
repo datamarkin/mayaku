@@ -248,6 +248,19 @@ class TensorRTExporter:
         except ModuleNotFoundError as e:
             raise ModuleNotFoundError(_trt_install_hint()) from e
 
+        # A TRT engine build needs a live CUDA device: ``trt.Builder`` (and
+        # cuDNN/cuBLAS tactic selection) call C++ ``abort()`` when no device
+        # is visible, which crashes the whole process (SIGABRT) instead of
+        # raising. Fail fast with a catchable error so callers — and the
+        # dispatch tests on CPU-only / ``CUDA_VISIBLE_DEVICES=""`` hosts —
+        # get a clean Python exception.
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "TensorRT engine build requires a visible CUDA device, but "
+                "torch.cuda.is_available() is False (no GPU, or "
+                "CUDA_VISIBLE_DEVICES is empty). Build the engine on a CUDA host."
+            )
+
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
