@@ -18,11 +18,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from mayaku.backends.mps import apply_mps_environment
-from mayaku.cli._factory import load_detector
+from mayaku.cli._factory import build_resize_augmentation, load_detector
 from mayaku.data import (
     DatasetMapper,
     InferenceSampler,
-    ResizeShortestEdge,
     SerializedList,
     build_coco_metadata,
     load_coco_json,
@@ -140,8 +139,10 @@ def run_eval(
         keep_keypoints=False,
     )
 
+    # Letterbox eval measures at the fixed deploy size (infer_size); the mapper
+    # records the transform so the evaluator un-letterboxes.
     mapper = DatasetMapper(
-        [ResizeShortestEdge((cfg.input.min_size_test,), max_size=cfg.input.max_size_test)],
+        [build_resize_augmentation(cfg, for_train=False)],
         is_train=False,
         keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn",
         metadata=metadata if cfg.model.meta_architecture == "keypoint_rcnn" else None,

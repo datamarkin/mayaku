@@ -45,6 +45,7 @@ from mayaku.data.catalog import Metadata
 from mayaku.data.transforms import (
     AugInput,
     AugmentationList,
+    LetterboxTransform,
     TransformList,
 )
 from mayaku.structures.boxes import BoxMode
@@ -138,6 +139,18 @@ class DatasetMapper:
 
         if not self.is_train:
             dd.pop("annotations", None)
+            # Letterbox eval: hand the evaluator the transform so it can map
+            # predictions back to the original image (uniform scale + pad, not
+            # the per-axis detector_postprocess). The model runs on the square
+            # canvas, so report height=width=canvas → it emits canvas-space
+            # boxes; the transform carries the original (h, w).
+            letterbox = next(
+                (t for t in transforms.transforms if isinstance(t, LetterboxTransform)), None
+            )
+            if letterbox is not None:
+                dd["height"] = letterbox.size
+                dd["width"] = letterbox.size
+                dd["letterbox"] = letterbox
             return dd
 
         annos = dd.pop("annotations", [])

@@ -36,9 +36,9 @@ import torch
 from torch import nn
 
 from mayaku.config.schemas import MayakuConfig
-from mayaku.data.transforms import ResizeShortestEdge
+from mayaku.data.transforms import LetterboxTransform, ResizeShortestEdge
 from mayaku.data.transforms.augmentation import compute_resized_hw
-from mayaku.inference.postprocess import detector_postprocess
+from mayaku.inference.postprocess import detector_postprocess, unletterbox_instances
 from mayaku.structures.instances import Instances
 from mayaku.utils.image import read_image
 
@@ -68,31 +68,45 @@ class Predictor:
         self,
         model: nn.Module,
         *,
+        resize_mode: str = "shortest_edge",
+        infer_size: int = 640,
         min_size_test: int = 800,
         max_size_test: int = 1333,
         device: torch.device | None = None,
         gpu_preprocess: bool = False,
         pinned_memory: bool = False,
     ) -> None:
-        if min_size_test <= 0 or max_size_test <= 0:
+        if resize_mode not in ("shortest_edge", "letterbox"):
+            raise ValueError(f"resize_mode must be 'shortest_edge' or 'letterbox'; got {resize_mode!r}")
+        if resize_mode == "letterbox" and infer_size <= 0:
+            raise ValueError(f"infer_size must be > 0; got {infer_size}")
+        if resize_mode == "shortest_edge" and (min_size_test <= 0 or max_size_test <= 0):
             raise ValueError(
                 f"min_size_test / max_size_test must be > 0; got ({min_size_test}, {max_size_test})"
             )
+        if gpu_preprocess and resize_mode == "letterbox":
+            raise ValueError("gpu_preprocess is only supported with resize_mode='shortest_edge'")
         if pinned_memory and not gpu_preprocess:
             raise ValueError(
                 "pinned_memory=True requires gpu_preprocess=True; the staging "
                 "buffer is shaped for the uint8 RGB upload path."
             )
         self.model = model.eval()
+        self.resize_mode = resize_mode
+        self.infer_size = infer_size
         self.min_size_test = min_size_test
         self.max_size_test = max_size_test
         self.device = device or _resolve_device(model)
         self.gpu_preprocess = gpu_preprocess
         self.pinned_memory = pinned_memory
-        self._resize = ResizeShortestEdge(
-            short_edge_lengths=(min_size_test,),
-            max_size=max_size_test,
-            sample_style="choice",
+        self._resize = (
+            ResizeShortestEdge(
+                short_edge_lengths=(min_size_test,),
+                max_size=max_size_test,
+                sample_style="choice",
+            )
+            if resize_mode == "shortest_edge"
+            else None
         )
         self._pinned_buf: torch.Tensor | None = None
 
@@ -111,6 +125,8 @@ class Predictor:
         """
         return cls(
             model,
+            resize_mode=cfg.input.resize_mode,
+            infer_size=cfg.input.infer_size,
             min_size_test=cfg.input.min_size_test,
             max_size_test=cfg.input.max_size_test,
         )
@@ -185,6 +201,8 @@ class Predictor:
 
         return cls(
             model,
+            resize_mode=cfg.input.resize_mode,
+            infer_size=cfg.input.infer_size,
             min_size_test=cfg.input.min_size_test,
             max_size_test=cfg.input.max_size_test,
             gpu_preprocess=gpu_preprocess,
@@ -205,13 +223,39 @@ class Predictor:
         """
         arr = _to_uint8_rgb(image)
         h, w = int(arr.shape[0]), int(arr.shape[1])
+
+        if self.resize_mode == "letterbox":
+            # Fixed-size deploy geometry: letterbox to infer_size, run on the
+            # square, un-letterbox host-side. Passing height=width=infer_size
+            # makes the model emit boxes in the canvas space (identity rescale)
+            # so the transform's inverse maps them back exactly.
+            transform = LetterboxTransform(h, w, self.infer_size)
+            img_tensor = self._to_tensor(transform.apply_image(arr))
+            instances = self._forward(
+                [{"image": img_tensor, "height": self.infer_size, "width": self.infer_size}]
+            )
+            return unletterbox_instances(instances, transform, h, w)
+
         if self.gpu_preprocess:
             img_tensor = self._gpu_preprocess(arr, h, w)
         else:
-            resized = self._resize.get_transform(arr).apply_image(arr)
-            chw = np.ascontiguousarray(resized.transpose(2, 0, 1))
-            img_tensor = torch.from_numpy(chw).to(dtype=torch.float32, device=self.device)
-        inputs = [{"image": img_tensor, "height": h, "width": w}]
+            assert self._resize is not None
+            img_tensor = self._to_tensor(self._resize.get_transform(arr).apply_image(arr))
+        instances = self._forward([{"image": img_tensor, "height": h, "width": w}])
+        # Masks/keypoints are box-relative and must be pasted to image res even
+        # when boxes need no rescale (UniQuery emits boxes in image coords, so
+        # the size check alone would skip the paste). Mirrors COCOEvaluator.
+        needs_paste = instances.has("pred_masks") or instances.has("pred_keypoints")
+        if instances.image_size != (h, w) or needs_paste:
+            instances = detector_postprocess(instances, h, w)
+        return instances
+
+    def _to_tensor(self, hwc: npt.NDArray[np.uint8]) -> torch.Tensor:
+        """``(H, W, 3)`` uint8 RGB → ``(3, H, W)`` float32 on the model device."""
+        chw = np.ascontiguousarray(hwc.transpose(2, 0, 1))
+        return torch.from_numpy(chw).to(dtype=torch.float32, device=self.device)
+
+    def _forward(self, inputs: list[dict[str, object]]) -> Instances:
         with torch.no_grad():
             outputs = self.model(inputs)
         if not isinstance(outputs, list) or not outputs:
@@ -222,12 +266,6 @@ class Predictor:
                 "the Predictor."
             )
         instances: Instances = outputs[0]["instances"]
-        # Masks/keypoints are box-relative and must be pasted to image res even
-        # when boxes need no rescale (UniQuery emits boxes in image coords, so
-        # the size check alone would skip the paste). Mirrors COCOEvaluator.
-        needs_paste = instances.has("pred_masks") or instances.has("pred_keypoints")
-        if instances.image_size != (h, w) or needs_paste:
-            instances = detector_postprocess(instances, h, w)
         return instances
 
     def _gpu_preprocess(self, arr: npt.NDArray[np.uint8], h: int, w: int) -> torch.Tensor:

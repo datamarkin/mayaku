@@ -16,6 +16,7 @@ from torch import nn
 
 from mayaku.cli._weights import resolve_weights
 from mayaku.config.schemas import MayakuConfig
+from mayaku.data.transforms import Augmentation, LetterboxResize, ResizeShortestEdge
 from mayaku.models.detectors import (
     build_faster_rcnn,
     build_keypoint_rcnn,
@@ -24,7 +25,27 @@ from mayaku.models.detectors import (
 )
 from mayaku.utils.checkpoint import config_from_checkpoint
 
-__all__ = ["build_detector", "load_detector"]
+__all__ = ["build_detector", "build_resize_augmentation", "load_detector"]
+
+
+def build_resize_augmentation(cfg: MayakuConfig, *, for_train: bool) -> Augmentation:
+    """Pick the resize augmentation from ``cfg.input.resize_mode``.
+
+    ``letterbox`` → aspect-preserving resize+pad to a fixed square (train:
+    multi-scale ``train_sizes``; inference/eval: the single ``infer_size``).
+    ``shortest_edge`` → the legacy variable resize. One place so train, eval, and
+    the in-train periodic eval can't drift in how they read the config.
+    """
+    inp = cfg.input
+    if inp.resize_mode == "letterbox":
+        return LetterboxResize(inp.train_sizes if for_train else (inp.infer_size,))
+    if for_train:
+        return ResizeShortestEdge(
+            inp.min_size_train,
+            max_size=inp.max_size_train,
+            sample_style=inp.min_size_train_sampling,
+        )
+    return ResizeShortestEdge((inp.min_size_test,), max_size=inp.max_size_test)
 
 
 def build_detector(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> nn.Module:

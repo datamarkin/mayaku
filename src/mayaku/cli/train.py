@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 from mayaku import __version__
 from mayaku.backends.device import Device
 from mayaku.backends.mps import apply_mps_environment
-from mayaku.cli._factory import build_detector
+from mayaku.cli._factory import build_detector, build_resize_augmentation
 from mayaku.config import MayakuConfig, dump_yaml, merge_overrides
 from mayaku.data import (
     AspectRatioGroupedDataset,
@@ -38,7 +38,6 @@ from mayaku.data import (
     RandomColorJitter,
     RandomFlip,
     RepeatFactorTrainingSampler,
-    ResizeShortestEdge,
     TrainingSampler,
     load_coco_dataset,
     load_shared_dataset,
@@ -365,12 +364,10 @@ def run_train(
         _fast_forward_scheduler(scheduler, start_iter)
     if world_size > 1:
         model = create_ddp_model(model, dev)
+    # Letterbox training draws one square size per image from train_sizes (the
+    # deploy infer_size at the top of the range); geometry == eval == deploy.
     augmentations: list[Augmentation] = [
-        ResizeShortestEdge(
-            cfg.input.min_size_train,
-            max_size=cfg.input.max_size_train,
-            sample_style=cfg.input.min_size_train_sampling,
-        ),
+        build_resize_augmentation(cfg, for_train=True),
         RandomFlip(prob=0.5 if cfg.input.random_flip == "horizontal" else 0.0),
     ]
     if cfg.input.color_jitter_enabled:
@@ -791,8 +788,10 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
             keep_keypoints=False,
         ),
     )
+    # In-train periodic eval matches deploy: letterbox to infer_size when the
+    # config uses it (the evaluator un-letterboxes via the recorded transform).
     mapper = DatasetMapper(
-        [ResizeShortestEdge((cfg.input.min_size_test,), max_size=cfg.input.max_size_test)],
+        [build_resize_augmentation(cfg, for_train=False)],
         is_train=False,
         keypoint_on=cfg.model.meta_architecture == "keypoint_rcnn",
         metadata=metadata if cfg.model.meta_architecture == "keypoint_rcnn" else None,

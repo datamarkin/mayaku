@@ -40,7 +40,7 @@ from pycocotools.cocoeval import COCOeval
 from torch import Tensor, nn
 
 from mayaku.engine.distributed import all_gather_object, is_main_process, synchronize
-from mayaku.inference.postprocess import detector_postprocess
+from mayaku.inference.postprocess import detector_postprocess, unletterbox_instances
 from mayaku.structures.boxes import BoxMode
 from mayaku.structures.instances import Instances
 
@@ -224,16 +224,23 @@ class COCOEvaluator(DatasetEvaluator):
             if instances is None or len(instances) == 0:
                 continue
             assert isinstance(instances, Instances)
-            # Rescale to the original image size when we have it.
-            output_h = int(inp.get("height", instances.image_size[0]))
-            output_w = int(inp.get("width", instances.image_size[1]))
-            # Masks/keypoints are emitted box-relative (e.g. 28x28 soft masks)
-            # and must be pasted to image resolution in detector_postprocess —
-            # even when boxes need no rescale (UniQuery already outputs boxes in
-            # image coords, so the size check alone would skip the paste).
-            needs_paste = instances.has("pred_masks") or instances.has("pred_keypoints")
-            if (output_h, output_w) != instances.image_size or needs_paste:
-                instances = detector_postprocess(instances, output_h, output_w)
+            letterbox = inp.get("letterbox")
+            if letterbox is not None:
+                # Letterbox eval: map canvas-space preds back to the original
+                # image (uniform scale + pad). The transform carries the
+                # original (h, w); shared with the eager Predictor.
+                instances = unletterbox_instances(instances, letterbox, letterbox.h, letterbox.w)
+            else:
+                # Rescale to the original image size when we have it.
+                output_h = int(inp.get("height", instances.image_size[0]))
+                output_w = int(inp.get("width", instances.image_size[1]))
+                # Masks/keypoints are emitted box-relative (e.g. 28x28 soft masks)
+                # and must be pasted to image resolution in detector_postprocess —
+                # even when boxes need no rescale (UniQuery already outputs boxes in
+                # image coords, so the size check alone would skip the paste).
+                needs_paste = instances.has("pred_masks") or instances.has("pred_keypoints")
+                if (output_h, output_w) != instances.image_size or needs_paste:
+                    instances = detector_postprocess(instances, output_h, output_w)
             json_records = list(
                 instances_to_coco_json(
                     instances,

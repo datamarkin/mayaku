@@ -21,13 +21,18 @@ clean (`BACKEND_PORTABILITY_REPORT.md` §6).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.instances import Instances
 from mayaku.structures.masks import ROIMasks
 
-__all__ = ["detector_postprocess"]
+if TYPE_CHECKING:
+    from mayaku.data.transforms.geometry import LetterboxTransform
+
+__all__ = ["detector_postprocess", "unletterbox_instances"]
 
 
 def detector_postprocess(
@@ -109,3 +114,51 @@ def detector_postprocess(
             out.set("pred_keypoint_heatmaps", instances.pred_keypoint_heatmaps[keep])
 
     return out
+
+
+def unletterbox_instances(
+    instances: Instances,
+    transform: LetterboxTransform,
+    output_height: int,
+    output_width: int,
+    *,
+    mask_threshold: float = 0.5,
+) -> Instances:
+    """Map predictions from the letterbox canvas back to the original image.
+
+    The model runs on the ``infer_size × infer_size`` letterbox canvas and emits
+    boxes/keypoints in *that* space (``instances.image_size`` is the canvas).
+    ``transform`` is the :class:`LetterboxTransform` that produced the canvas;
+    its uniform ``scale`` + ``pad`` offset are inverted here to recover original
+    image coordinates — ``c → (c − pad) / scale``.
+
+    Masks need **no** special handling: they are box-relative ``M×M`` heatmaps,
+    so once the boxes are in original coords :func:`detector_postprocess` (called
+    here with an identity scale) pastes them at the right place. This is the host
+    half of the fixed-size deploy contract, shared by the eager ``Predictor`` and
+    the evaluator so their pre/post can't drift.
+    """
+    scale = transform.scale
+    pad_x = float(transform.pad_left)
+    pad_y = float(transform.pad_top)
+
+    out = Instances(image_size=(output_height, output_width))
+    for name, value in instances.get_fields().items():
+        out.set(name, value)
+
+    if instances.has("pred_boxes"):
+        boxes = instances.pred_boxes.tensor.clone()
+        boxes[:, 0::2] = (boxes[:, 0::2] - pad_x) / scale
+        boxes[:, 1::2] = (boxes[:, 1::2] - pad_y) / scale
+        out.pred_boxes = Boxes(boxes)
+
+    if instances.has("pred_keypoints"):
+        kp = instances.pred_keypoints.clone()  # (R, K, 3): x, y, score
+        kp[..., 0] = (kp[..., 0] - pad_x) / scale
+        kp[..., 1] = (kp[..., 1] - pad_y) / scale
+        out.pred_keypoints = kp
+
+    # Boxes/keypoints are now in original coords and image_size == output, so
+    # detector_postprocess applies an identity scale; it does the mask paste,
+    # the canvas clip, and the empty-box drop.
+    return detector_postprocess(out, output_height, output_width, mask_threshold=mask_threshold)
