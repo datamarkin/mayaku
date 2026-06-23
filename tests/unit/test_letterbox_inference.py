@@ -10,11 +10,20 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from mayaku.config.schemas import MayakuConfig
 from mayaku.data.transforms import LetterboxTransform
 from mayaku.inference import Predictor
 from mayaku.inference.postprocess import unletterbox_instances
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.instances import Instances
+
+
+def _predictor(cfg: MayakuConfig, model: object) -> Predictor:
+    """Deploy a fake/in-code model in tests via the shared internal seam.
+
+    ``from_pretrained`` needs a real checkpoint, so tests use ``_from_cfg``
+    directly — the same cfg→Predictor mapping ``from_pretrained`` uses."""
+    return Predictor._from_cfg(cfg, model)  # type: ignore[arg-type]
 
 
 def test_unletterbox_instances_is_exact_inverse() -> None:
@@ -113,7 +122,7 @@ def test_predictor_letterbox_with_real_detector() -> None:
         input=InputConfig(resize_mode="letterbox", infer_size=640),
     )
     torch.manual_seed(0)
-    pred = Predictor.from_config(cfg, build_faster_rcnn(cfg).eval())
+    pred = _predictor(cfg, build_faster_rcnn(cfg).eval())
 
     img = (np.random.default_rng(0).random((300, 600, 3)) * 255).astype(np.uint8)
     out = pred(img)
@@ -125,11 +134,11 @@ def test_predictor_letterbox_with_real_detector() -> None:
         assert bool((b[:, 1] >= 0).all() and (b[:, 3] <= 300).all())
 
 
-def test_predictor_from_config_selects_letterbox() -> None:
-    from mayaku.config import InputConfig, MayakuConfig
+def test_predictor_selects_letterbox_from_cfg() -> None:
+    from mayaku.config import InputConfig
 
     cfg = MayakuConfig(input=InputConfig(resize_mode="letterbox", infer_size=640))
-    pred = Predictor.from_config(cfg, _FakeDetector([0.0, 0.0, 1.0, 1.0]))
+    pred = _predictor(cfg, _FakeDetector([0.0, 0.0, 1.0, 1.0]))
     assert pred.resize_mode == "letterbox"
     assert pred.infer_size == 640
 

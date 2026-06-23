@@ -17,7 +17,7 @@ from mayaku.config.schemas import (
     ROIHeadsConfig,
     RPNConfig,
 )
-from mayaku.inference import Predictor
+from mayaku.inference import Predictor, from_pretrained
 from mayaku.models.detectors import build_faster_rcnn
 from mayaku.structures.boxes import Boxes
 from mayaku.structures.instances import Instances
@@ -194,20 +194,6 @@ def test_predictor_batch_returns_one_instances_per_image(device: torch.device) -
 
 
 # ---------------------------------------------------------------------------
-# from_config
-# ---------------------------------------------------------------------------
-
-
-def test_predictor_from_config_picks_up_input_sizes(device: torch.device) -> None:
-    cfg = _tiny_cfg()
-    model = build_faster_rcnn(cfg).to(device).eval()
-    predictor = Predictor.from_config(cfg, model)
-    # Default config: min_size_test=800, max_size_test=1333.
-    assert predictor.min_size_test == cfg.input.min_size_test
-    assert predictor.max_size_test == cfg.input.max_size_test
-
-
-# ---------------------------------------------------------------------------
 # Eval-mode invariant
 # ---------------------------------------------------------------------------
 
@@ -243,31 +229,18 @@ def test_from_pretrained_builds_from_sidecar(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(_factory, "load_detector", fake_load_detector)
 
-    p = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x", device="cpu")
+    p = from_pretrained("faster_rcnn_R_50_FPN_3x", device="cpu")
 
     assert isinstance(p, Predictor)
-    # The name is the default checkpoint source; its sidecar defines the arch.
+    # The source is the checkpoint; its sidecar defines the arch.
     assert calls["weights"] == "faster_rcnn_R_50_FPN_3x"
     assert p.min_size_test == cfg.input.min_size_test
     assert p.max_size_test == cfg.input.max_size_test
     assert p.model.training is False  # eval-mode invariant
 
 
-def test_from_pretrained_weights_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """``weights=`` overrides ``name`` as the checkpoint source."""
-    from mayaku.cli import _factory
-
-    cfg = _tiny_cfg()
-    fake_model = build_faster_rcnn(cfg)
-    explicit = tmp_path / "explicit.pth"
-    captured: dict[str, object] = {}
-
-    def fake_load_detector(weights: str | Path) -> tuple[MayakuConfig, torch.nn.Module]:
-        captured["weights"] = weights
-        return cfg, fake_model
-
-    monkeypatch.setattr(_factory, "load_detector", fake_load_detector)
-
-    Predictor.from_pretrained("ignored_name", weights=explicit, device="cpu")
-
-    assert captured["weights"] == explicit
+def test_from_pretrained_rejects_artifact_suffix() -> None:
+    """A pre-exported artifact suffix routes to the (not-yet-wired) full-graph
+    runtime, not the checkpoint path — the 'file is the backend' dispatch."""
+    with pytest.raises(NotImplementedError, match="artifact"):
+        from_pretrained("model.onnx")
