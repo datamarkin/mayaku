@@ -75,8 +75,8 @@ solver:
   clip_gradients_value: 1.0
   clip_gradients_type: norm
   grad_norm_log_enabled: false
-  amp_enabled: false
-  amp_dtype: fp16
+  amp_enabled: true
+  amp_dtype: bf16
   checkpoint_period: 5000
   ema_enabled: true
   ema_decay: 0.9999
