@@ -110,95 +110,22 @@ class Predictor:
         )
         self._pinned_buf: torch.Tensor | None = None
 
-    # ------------------------------------------------------------------
-    # Construction from a config
-    # ------------------------------------------------------------------
-
     @classmethod
-    def from_config(cls, cfg: MayakuConfig, model: nn.Module) -> Predictor:
-        """Build a predictor with sizes pulled from a :class:`MayakuConfig`.
-
-        ``model`` is the already-built detector (the predictor doesn't
-        construct one itself — that decision belongs to the CLI / user
-        script so they can choose between Faster / Mask / Keypoint
-        R-CNN explicitly and load weights when appropriate).
-        """
-        return cls(
-            model,
-            resize_mode=cfg.input.resize_mode,
-            infer_size=cfg.input.infer_size,
-            min_size_test=cfg.input.min_size_test,
-            max_size_test=cfg.input.max_size_test,
-        )
-
-    @classmethod
-    def from_pretrained(
+    def _from_cfg(
         cls,
-        name: str,
+        cfg: MayakuConfig,
+        model: nn.Module,
         *,
-        weights: str | Path | None = None,
-        device: str = "auto",
-        target: Target = "pytorch",
-        fp16: bool = True,
-        pinned: tuple[int, int] = (1344, 1344),
         gpu_preprocess: bool = False,
         pinned_memory: bool = False,
     ) -> Predictor:
-        """Build a fully-loaded :class:`Predictor` from a model name in one call.
+        """Internal seam: map ``cfg.input`` deploy geometry onto the constructor.
 
-        This is the high-level zero-config constructor. ``name`` resolves the
-        cached weights via the model manifest; the architecture comes from the
-        checkpoint's embedded sidecar — no separate config file.
-
-        Args:
-            name: Bundled model name, e.g. ``"faster_rcnn_R_50_FPN_3x"``.
-            weights: Override the weights source — a model name (resolved
-                via the manifest) or a filesystem path to a ``.pth``.
-                Defaults to ``name``.
-            device: ``"cpu" | "cuda" | "mps" | "auto"``. Defaults to
-                ``"auto"`` which picks the best available accelerator.
-            target: Backbone runtime. ``"pytorch"`` (default) keeps the
-                eager backbone. ``"onnx"`` downloads the manifest's
-                ONNX backbone and wraps it in
-                :class:`mayaku.inference.export.ONNXBackbone`.
-                ``"tensorrt"`` builds (or loads from cache) a TRT engine
-                via :class:`mayaku.inference.export.TensorRTExporter`
-                and wraps it in
-                :class:`mayaku.inference.export.TensorRTBackbone`.
-            fp16: Used only by ``target="tensorrt"`` — build the engine
-                with FP16 on for ~2x throughput.
-            pinned: Used only by ``target in {"onnx", "tensorrt"}`` — the
-                fixed input shape the exported backbone is built for.
-                Defaults to ``(1344, 1344)`` to safely cover any
-                ``(min_size_test, max_size_test) = (800, 1333)`` input.
-            gpu_preprocess: Forward to :class:`Predictor` constructor.
-            pinned_memory: Forward to :class:`Predictor` constructor.
-
-        Example:
-            >>> from mayaku.inference import Predictor
-            >>> predictor = Predictor.from_pretrained("faster_rcnn_R_50_FPN_3x")
-            >>> instances = predictor("photo.jpg")
-
-        Fast-path example:
-            >>> p = Predictor.from_pretrained(
-            ...     "faster_rcnn_R_50_FPN_3x",
-            ...     target="tensorrt",
-            ...     gpu_preprocess=True,
-            ...     pinned_memory=True,
-            ... )
+        The single place that translates a config to a ``Predictor`` — shared by
+        :func:`from_pretrained` (the public entry) and the unit-test helpers that
+        wrap an in-code/fake model. **Not** a public deploy API; use
+        :func:`from_pretrained`.
         """
-        from mayaku.backends.device import Device
-        from mayaku.cli._factory import load_detector
-
-        if device == "auto":
-            device = Device.auto().kind
-
-        # Architecture + weights both come from the checkpoint's sidecar.
-        cfg, model = load_detector(weights if weights is not None else name)
-        model = model.eval().to(torch.device(device))
-
-        _swap_backbone(model, name=name, target=target, fp16=fp16, pinned=pinned)
-
         return cls(
             model,
             resize_mode=cfg.input.resize_mode,
@@ -327,6 +254,77 @@ def _resolve_device(model: nn.Module) -> torch.device:
         for buf in model.buffers():
             return buf.device
         return torch.device("cpu")
+
+
+# Pre-exported artifact suffixes — the "the file is the backend" dispatch.
+# Loading one of these runs the artifact directly (full-graph runtime); not
+# wired yet (see ArtifactPredictor). A ``.pth`` / bare name is an eager
+# checkpoint, optionally backbone-accelerated via ``target=``.
+_ARTIFACT_SUFFIXES = frozenset({".onnx", ".engine", ".mlpackage", ".xml"})
+
+
+def from_pretrained(
+    source: str | Path,
+    *,
+    device: str = "auto",
+    target: Target = "pytorch",
+    fp16: bool = True,
+    pinned: tuple[int, int] = (1344, 1344),
+    gpu_preprocess: bool = False,
+    pinned_memory: bool = False,
+) -> Predictor:
+    """Load a deployable detector. The single public deploy entry point.
+
+    The ``source`` *suffix selects the backend*:
+
+    - ``.pth`` (or a bundled model name) → eager Torch checkpoint. Architecture
+      + weights come from the checkpoint's embedded sidecar (no config file).
+      ``target="onnx"``/``"tensorrt"`` optionally swaps the backbone to an
+      accelerated runtime; ``fp16`` applies to the TensorRT engine.
+    - ``.onnx`` / ``.engine`` / ``.mlpackage`` / ``.xml`` → a pre-exported
+      artifact, run directly (not wired yet — the standalone full-graph runtime).
+
+    Args:
+        source: Path to a ``.pth`` / exported artifact, or a bundled model name.
+        device: ``"cpu" | "cuda" | "mps" | "auto"`` (default ``"auto"``).
+        target: Backbone runtime for the ``.pth`` path — ``"pytorch"`` (default),
+            ``"onnx"``, or ``"tensorrt"``.
+        fp16: TensorRT engine precision (``target="tensorrt"`` only).
+        pinned: Fixed input shape the exported backbone is built for
+            (``target in {"onnx","tensorrt"}``).
+        gpu_preprocess: Do resize/normalize on-device (shortest-edge only).
+        pinned_memory: Use a pinned staging buffer (requires ``gpu_preprocess``).
+
+    Example:
+        >>> from mayaku import from_pretrained
+        >>> p = from_pretrained("model.pth")
+        >>> dets = p("image.jpg")
+        >>> p = from_pretrained("model.pth", target="tensorrt", fp16=True)
+    """
+    from mayaku.backends.device import Device
+    from mayaku.cli._factory import load_detector
+
+    suffix = Path(source).suffix.lower()
+    # TODO: when the full-graph ArtifactPredictor lands, dispatch here to it
+    # (`return ArtifactPredictor(source, device=device)`) instead of raising —
+    # the artifact path won't use target/fp16/pinned (those are checkpoint-only).
+    if suffix in _ARTIFACT_SUFFIXES:
+        raise NotImplementedError(
+            f"Running a pre-exported '{suffix}' artifact directly is not wired yet "
+            "(the standalone full-graph runtime). For now: load the '.pth' and pass "
+            "target='onnx'/'tensorrt' to accelerate the backbone, or run the artifact "
+            "with its native runtime."
+        )
+
+    if device == "auto":
+        device = Device.auto().kind
+    # Architecture + weights both come from the checkpoint's sidecar.
+    cfg, model = load_detector(source)
+    model = model.to(torch.device(device))  # Predictor.__init__ flips to eval()
+    _swap_backbone(model, name=str(source), target=target, fp16=fp16, pinned=pinned)
+    return Predictor._from_cfg(
+        cfg, model, gpu_preprocess=gpu_preprocess, pinned_memory=pinned_memory
+    )
 
 
 def _swap_backbone(

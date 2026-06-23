@@ -16,7 +16,7 @@ __version__ = "0.0.0"
 # Lazy top-level exports. ``from mayaku import train`` works without
 # eagerly pulling ``torch`` + the entire CLI stack on plain ``import
 # mayaku``. PEP 562 ``__getattr__`` resolves the name on first access.
-__all__ = ["health_check", "train"]
+__all__ = ["from_pretrained", "health_check", "train"]
 
 
 def __getattr__(name: str) -> object:
@@ -24,6 +24,10 @@ def __getattr__(name: str) -> object:
         from mayaku.api import train
 
         return train
+    if name == "from_pretrained":
+        from mayaku.inference import from_pretrained
+
+        return from_pretrained
     if name == "health_check":
         from mayaku.health import health_check
 

@@ -3,6 +3,6 @@
 from __future__ import annotations
 
 from mayaku.inference.postprocess import detector_postprocess
-from mayaku.inference.predictor import Predictor
+from mayaku.inference.predictor import Predictor, from_pretrained
 
-__all__ = ["Predictor", "detector_postprocess"]
+__all__ = ["Predictor", "detector_postprocess", "from_pretrained"]

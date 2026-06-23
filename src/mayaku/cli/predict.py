@@ -11,10 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import torch
-
-from mayaku.cli._factory import load_detector
-from mayaku.inference import Predictor
+from mayaku.inference import from_pretrained
 from mayaku.structures.boxes import BoxMode
 from mayaku.structures.instances import Instances
 
@@ -35,10 +32,7 @@ def run_predict(
     written to ``output`` so the same payload can be inspected
     programmatically. Useful in tests.
     """
-    cfg, model = load_detector(weights)
-    if device is not None:
-        model = model.to(torch.device(device))
-    predictor = Predictor.from_config(cfg, model)
+    predictor = from_pretrained(weights, device=device if device is not None else "auto")
     instances = predictor(image_path)
 
     payload = {
