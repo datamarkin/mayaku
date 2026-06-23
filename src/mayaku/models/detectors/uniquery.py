@@ -338,6 +338,60 @@ class UniQuery(nn.Module):
         keypoint_rcnn_inference(kp_logits, instances)
 
     # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    def export_forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Traceable full-detector forward for ONNX/TensorRT export.
+
+        Runs the whole detector — backbone + FPN + UniQuery head (single-pass
+        ``grid_sample`` ROI pooler) + NMS-free top-k decode — and returns the
+        fixed top-K detections as plain tensors:
+
+            boxes  (detections_per_image, 4)  xyxy in the (padded) input frame
+            scores (detections_per_image,)
+            labels (detections_per_image,)     int64 class indices
+
+        Unlike :meth:`_inference` it does **not** apply the score threshold (a
+        data-dependent, variable-length op that can't be traced); the host
+        thresholds and un-letterboxes the fixed top-K. The decode is otherwise
+        identical to ``_inference``.
+
+        ``image`` is a single already-normalised ``(1, 3, H, W)`` batch — the
+        same tensor the eager backbone receives. With letterbox inference the
+        content size equals the square input size, so ``images_whwh`` is the
+        constant ``(H, W)`` baked from ``image.shape`` (no runtime input needed).
+        """
+        h, w = int(image.shape[-2]), int(image.shape[-1])
+        features = self.backbone(image)
+        feature_list = [features[k] for k in self._feature_keys]
+        outputs = self.head(
+            feature_list,
+            [(h, w)],
+            num_stages_override=self.inference_num_stages,
+            num_proposals_override=self.inference_num_proposals,
+        )[-1]
+
+        logits = outputs["pred_logits"][0]  # (N, K)
+        boxes = outputs["pred_boxes"][0]  # (N, 4) absolute xyxy
+        scores = logits.sigmoid()
+
+        topk = min(self.detections_per_image, scores.numel())
+        # sorted=True: deterministic descending order so the exported graph's
+        # detection ordering is stable and matches eager element-for-element
+        # (parity checks and downstream consumers don't depend on luck).
+        scores_flat, idx = scores.reshape(-1).topk(topk, sorted=True)
+        labels = idx % self.num_classes
+        proposals = idx // self.num_classes
+        sel = boxes.index_select(0, proposals)  # (topk, 4)
+        # Clamp into the image frame functionally — clamp-min then a broadcast
+        # ``minimum`` against the per-corner bounds [w, h, w, h]. No strided
+        # slice-assign, so it never traces to ScatterND (scratch/bug.md Bug 1).
+        bounds = torch.tensor([w, h, w, h], dtype=sel.dtype, device=sel.device)
+        out_boxes = sel.clamp(min=0).minimum(bounds)
+        return out_boxes, scores_flat, labels
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

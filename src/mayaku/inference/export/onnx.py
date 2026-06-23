@@ -113,20 +113,30 @@ class ONNXExporter:
         ``dict[str, Tensor]``, which traces less cleanly).
         """
         del opts  # Reserved for future per-target options.
-        backbone = _resolve_backbone(model)
-        adapter = _DictToTupleBackbone(backbone, self.output_names).eval()
+        # Full-detector models (UniQuery) expose ``export_forward`` — trace the
+        # whole graph (image -> boxes/scores/labels). Everything else exports the
+        # backbone+FPN body only (the R-CNN head doesn't trace cleanly).
+        if _is_full_detector(model):
+            adapter: nn.Module = _FullDetectorAdapter(model).eval()
+            out_names: tuple[str, ...] = ("boxes", "scores", "labels")
+            full = True
+        else:
+            adapter = _DictToTupleBackbone(_resolve_backbone(model), self.output_names).eval()
+            out_names = self.output_names
+            full = False
 
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        # When `dynamic_input_shape=True`: declare batch + spatial
-        # axes as dynamic so the graph supports any input size that's
-        # a multiple of `backbone.size_divisibility`. When `False`:
-        # bake the literal `sample.shape` into the graph for TRT
-        # throughput (see class docstring).
+        # When `dynamic_input_shape=True`: declare batch + spatial axes as
+        # dynamic so the graph supports any input size that's a multiple of
+        # `backbone.size_divisibility`. When `False`: bake the literal
+        # `sample.shape` for TRT throughput (see class docstring). The
+        # full-detector graph is single-image fixed-shape by construction (the
+        # top-k decode + box clamp bake the input size), so it's always static.
         dynamic_axes: dict[str, dict[int, str]] | None
-        if self.dynamic_input_shape:
+        if self.dynamic_input_shape and not full:
             dynamic_axes = {"image": {0: "batch", 2: "height", 3: "width"}}
-            for name in self.output_names:
+            for name in out_names:
                 dynamic_axes[name] = {0: "batch", 2: "height", 3: "width"}
         else:
             dynamic_axes = None
@@ -137,7 +147,7 @@ class ONNXExporter:
                 (sample,),
                 str(out_path),
                 input_names=["image"],
-                output_names=list(self.output_names),
+                output_names=list(out_names),
                 opset_version=self.opset,
                 dynamic_axes=dynamic_axes,
                 do_constant_folding=True,
@@ -153,7 +163,7 @@ class ONNXExporter:
             target=self.name,
             opset=self.opset,
             input_names=("image",),
-            output_names=self.output_names,
+            output_names=out_names,
         )
 
     # ------------------------------------------------------------------
@@ -188,6 +198,11 @@ class ONNXExporter:
             raise ModuleNotFoundError(
                 f"ONNX verify requires onnxruntime. Install with: {_ort_install_hint}"
             ) from e
+
+        # Full-detector graphs compare the (boxes, scores, labels) outputs;
+        # backbone graphs compare the FPN feature tensors.
+        if _is_full_detector(model):
+            return self._parity_full(model, exported_path, sample, ort=ort, atol=atol, rtol=rtol)
 
         backbone = _resolve_backbone(model)
         backbone.eval()
@@ -224,6 +239,67 @@ class ONNXExporter:
             per_output=per_output,
         )
 
+    def _parity_full(
+        self,
+        model: nn.Module,
+        exported_path: Path,
+        sample: Tensor,
+        *,
+        ort: object,
+        atol: float,
+        rtol: float,
+    ) -> ParityResult:
+        """Parity for the full-detector graph: eager ``export_forward`` vs ONNX
+        Runtime, per (boxes, scores, labels).
+
+        Top-k over near-equal scores can order detections differently between
+        PyTorch and ORT — a benign reordering of the *same* detection set (same
+        boxes, same scores, same COCO AP). Comparing element-wise by rank would
+        flag that as a huge error, so both sides are first aligned by a stable
+        box-coordinate sort; parity then reflects detection *content*, not which
+        runtime won a score tie.
+        """
+        import numpy as np
+
+        model.eval()
+        device = next(iter(model.parameters())).device
+        with torch.no_grad():
+            eager = model.export_forward(sample.to(device))
+        names = ("boxes", "scores", "labels")
+        eager_np = {n: t.detach().cpu().float().numpy() for n, t in zip(names, eager, strict=True)}
+
+        sess = ort.InferenceSession(  # type: ignore[attr-defined]
+            str(exported_path), providers=["CPUExecutionProvider"]
+        )
+        ort_np = dict(zip(names, sess.run(list(names), {"image": sample.cpu().numpy()}), strict=True))
+
+        def _order(boxes: "np.ndarray") -> "np.ndarray":
+            return np.lexsort((boxes[:, 3], boxes[:, 2], boxes[:, 1], boxes[:, 0]))
+
+        eo, oo = _order(eager_np["boxes"]), _order(ort_np["boxes"])
+
+        per_output: dict[str, tuple[float, float]] = {}
+        max_abs = 0.0
+        max_rel = 0.0
+        for name in names:
+            e = eager_np[name][eo]
+            o = ort_np[name].astype(e.dtype)[oo]
+            abs_err = float(abs(o - e).max())
+            rel_err = float((abs(o - e) / abs(e).clip(min=1e-8)).max())
+            per_output[name] = (abs_err, rel_err)
+            max_abs = max(max_abs, abs_err)
+            max_rel = max(max_rel, rel_err)
+
+        return ParityResult(
+            target=self.name,
+            passed=max_abs <= atol or max_rel <= rtol,
+            max_abs_error=max_abs,
+            max_rel_error=max_rel,
+            atol=atol,
+            rtol=rtol,
+            per_output=per_output,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -246,6 +322,22 @@ class _DictToTupleBackbone(nn.Module):
     def forward(self, image: Tensor) -> tuple[Tensor, ...]:
         out = self.backbone(image)
         return tuple(out[name] for name in self.output_names)
+
+
+class _FullDetectorAdapter(nn.Module):
+    """Wrap a full-detector model so ONNX export traces ``export_forward``.
+
+    Exposes the whole image -> ``(boxes, scores, labels)`` graph as a plain
+    ``forward`` for ``torch.onnx.export`` (which traces a ``nn.Module.forward``,
+    not an arbitrary method name).
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        return self.model.export_forward(image)
 
 
 class ONNXBackbone(nn.Module):
@@ -345,6 +437,16 @@ class ONNXBackbone(nn.Module):
             crop_w = (w + stride - 1) // stride
             out[name] = full[:, :, :crop_h, :crop_w].contiguous()
         return out
+
+
+def _is_full_detector(model: nn.Module) -> bool:
+    """Whether ``model`` exports as one full graph (image -> boxes/scores/labels).
+
+    Models that expose ``export_forward`` (e.g. UniQuery) trace the whole
+    detector; everything else exports the backbone+FPN body only (the R-CNN head
+    doesn't trace cleanly). The exporter and its parity check dispatch on this.
+    """
+    return hasattr(model, "export_forward")
 
 
 def _resolve_backbone(model: nn.Module) -> nn.Module:
