@@ -44,7 +44,7 @@ def test_committed_config_matches_generator(path: Path, want: str) -> None:
 
 
 @pytest.mark.parametrize("tier", gen.TIERS, ids=[t.name for t in gen.TIERS])
-@pytest.mark.parametrize("task", ["detection", "segmentation"])
+@pytest.mark.parametrize("task", ["detection", "segmentation", "keypoints"])
 def test_derived_invariants_hold(task: str, tier) -> None:
     from mayaku import configs
 
@@ -55,5 +55,9 @@ def test_derived_invariants_hold(task: str, tier) -> None:
     assert head.dim_dynamic == head.hidden_dim // 4
     assert head.pooler_sampling_ratio == (1 if tier.realtime else 2)
     assert cfg.input.infer_size == tier.infer_size
+    # COCO keypoints is person-only; detection/segmentation default to 80.
+    assert cfg.model.roi_heads.num_classes == (1 if task == "keypoints" else 80)
     if task == "segmentation":
         assert cfg.model.uniquery_mask.conv_dim == head.hidden_dim
+    if task == "keypoints":
+        assert cfg.model.uniquery_keypoint.num_keypoints == 17

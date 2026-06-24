@@ -432,7 +432,11 @@ class UniQueryHeadConfig(_BaseModel):
 
 
 class UniQueryMaskConfig(_BaseModel):
-    """UniQuery dynamic mask head (Phase 2 — not yet implemented)."""
+    """UniQuery dynamic mask head (instance segmentation).
+
+    Built by :func:`build_uniquery` when ``model.uniquery_mask`` is set; drives
+    ``configs/segmentation/mayaku-*``.
+    """
 
     pooler_resolution: Annotated[int, Field(gt=0)] = 14
     mask_resolution: Annotated[int, Field(gt=0)] = 28
@@ -442,7 +446,12 @@ class UniQueryMaskConfig(_BaseModel):
 
 
 class UniQueryKeypointConfig(_BaseModel):
-    """UniQuery keypoint head (Phase 3 — not yet implemented)."""
+    """UniQuery keypoint head (person-pose).
+
+    Built by :func:`build_uniquery` when ``model.uniquery_keypoint`` is set;
+    drives ``configs/keypoints/mayaku-*``. ``heatmap_resolution`` is currently
+    advisory — the head derives its output size internally.
+    """
 
     pooler_resolution: Annotated[int, Field(gt=0)] = 14
     num_keypoints: Annotated[int, Field(gt=0)] = 17

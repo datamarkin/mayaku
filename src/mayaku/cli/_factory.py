@@ -77,7 +77,23 @@ def load_detector(weights: Path | str) -> tuple[MayakuConfig, nn.Module]:
     dropped — the deploy model uses FrozenBatchNorm2d, which has no such entry.
     Returns ``(cfg, model)``; the caller sets eval mode / device as it needs.
     """
-    cfg, state = config_from_checkpoint(resolve_weights(weights))
+    weights_path = resolve_weights(weights)
+    if weights_path is None:  # weights is non-None here; this only narrows the type
+        raise ValueError(f"could not resolve a checkpoint from {weights!r}")
+    cfg, state = config_from_checkpoint(weights_path)
+    # Deploy builds the architecture only — the checkpoint's state_dict carries
+    # every trained weight, so don't re-load the pretrained backbone. Its file
+    # lives on the training host and need not exist where we deploy; loading it
+    # would be wasted I/O at best and a FileNotFoundError at worst.
+    #
+    # The config is frozen (immutable), so clearing a nested field means rebuilding
+    # the chain bottom-up — backbone → model → cfg — one model_copy per level.
+    backbone = cfg.model.backbone
+    if backbone.weights_path is not None:
+        model_cfg = cfg.model.model_copy(
+            update={"backbone": backbone.model_copy(update={"weights_path": None})}
+        )
+        cfg = cfg.model_copy(update={"model": model_cfg})
     model = build_detector(cfg)
     state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
     model.load_state_dict(state)

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, Protocol, cast
 
 import torch
 from torch import Tensor, nn
@@ -264,17 +265,20 @@ class ONNXExporter:
         model.eval()
         device = next(iter(model.parameters())).device
         with torch.no_grad():
-            eager = model.export_forward(sample.to(device))
+            eager = cast(_FullDetector, model).export_forward(sample.to(device))
         names = ("boxes", "scores", "labels")
         eager_np = {n: t.detach().cpu().float().numpy() for n, t in zip(names, eager, strict=True)}
 
         sess = ort.InferenceSession(  # type: ignore[attr-defined]
             str(exported_path), providers=["CPUExecutionProvider"]
         )
-        ort_np = dict(zip(names, sess.run(list(names), {"image": sample.cpu().numpy()}), strict=True))
+        ort_np = dict(
+            zip(names, sess.run(list(names), {"image": sample.cpu().numpy()}), strict=True)
+        )
 
-        def _order(boxes: "np.ndarray") -> "np.ndarray":
-            return np.lexsort((boxes[:, 3], boxes[:, 2], boxes[:, 1], boxes[:, 0]))
+        def _order(boxes: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
+            # np.lexsort is stubbed as Any in this numpy version.
+            return np.lexsort((boxes[:, 3], boxes[:, 2], boxes[:, 1], boxes[:, 0]))  # type: ignore[no-any-return]
 
         eo, oo = _order(eager_np["boxes"]), _order(ort_np["boxes"])
 
@@ -306,6 +310,16 @@ class ONNXExporter:
 # ---------------------------------------------------------------------------
 
 
+class _FullDetector(Protocol):
+    """A detector exposing the traceable image -> (boxes, scores, labels) graph.
+
+    Used to type the ``export_forward`` call sites; membership is checked at
+    runtime by :func:`_is_full_detector` (``hasattr(model, "export_forward")``).
+    """
+
+    def export_forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]: ...
+
+
 class _DictToTupleBackbone(nn.Module):
     """Wrap a dict-returning backbone so ONNX export sees a fixed tuple.
 
@@ -334,7 +348,10 @@ class _FullDetectorAdapter(nn.Module):
 
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
-        self.model = model
+        # Cast once at construction (validated by _is_full_detector upstream) so
+        # forward() reads clean. The object is still an nn.Module at runtime, so
+        # nn.Module registers it as a submodule as usual.
+        self.model: _FullDetector = cast(_FullDetector, model)
 
     def forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         return self.model.export_forward(image)

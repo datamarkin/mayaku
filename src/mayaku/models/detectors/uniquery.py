@@ -382,7 +382,10 @@ class UniQuery(nn.Module):
         # (parity checks and downstream consumers don't depend on luck).
         scores_flat, idx = scores.reshape(-1).topk(topk, sorted=True)
         labels = idx % self.num_classes
-        proposals = idx // self.num_classes
+        # ``.long()`` is a no-op in eager (idx is already long) but pins the
+        # gather-index dtype explicitly: CoreML/coremltools traces the topk-index
+        # arithmetic as fp32 and then rejects a float index into ``index_select``.
+        proposals = (idx // self.num_classes).long()
         sel = boxes.index_select(0, proposals)  # (topk, 4)
         # Clamp into the image frame functionally — clamp-min then a broadcast
         # ``minimum`` against the per-corner bounds [w, h, w, h]. No strided

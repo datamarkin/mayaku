@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the ``mayaku-{n,s,m,l,xl,xxl}`` config family — the source of truth.
 
-The 12 family configs (6 tiers × {detection, segmentation}) are *derived* from
+The 18 family configs (6 tiers × {detection, segmentation, keypoints}) are *derived* from
 the :data:`TIERS` table below, not hand-maintained. A tier supplies five inputs
 — backbone, ``hidden_dim``, ``num_stages``, ``infer_size``, and whether it is a
 real-time tier — and every other family-varying field is computed from them so
@@ -18,7 +18,7 @@ pixel mean/std) is constant across the family and lives in the templates.
 
 Usage::
 
-    python tools/gen_configs.py            # (re)write all 12 configs
+    python tools/gen_configs.py            # (re)write all 18 configs
     python tools/gen_configs.py --check    # CI gate: exit 1 if any file drifted
 
 The ``--check`` mode is the 0-drift guarantee: regenerate in memory and diff
@@ -96,10 +96,14 @@ def render(tier: Tier, task: str) -> str:
     train_sizes = list(range(tier.infer_size - 160, tier.infer_size + 1, 32))
     train_sizes_yaml = "[" + ", ".join(str(s) for s in train_sizes) + "]"
 
-    mask_block = (
-        ""
-        if task == "detection"
-        else (
+    # Task = detection body + one optional head block. Segmentation adds a mask
+    # head (conv_dim scales with the model); keypoints adds a keypoint head
+    # (width auto-scales via fpn.out_channels, so no per-tier knob). COCO
+    # keypoints is person-only → num_classes 1, vs 80 for detection/segmentation.
+    head_block = ""
+    extra_format = ""
+    if task == "segmentation":
+        head_block = (
             "  uniquery_mask:\n"
             "    pooler_resolution: 14\n"
             "    mask_resolution: 28\n"
@@ -107,10 +111,15 @@ def render(tier: Tier, task: str) -> str:
             f"    conv_dim: {hd}     # scale the mask head with the model\n"
             "    loss_weight: 1.0       # real GT masks; lower to 0.5 only for noisy pseudo-masks\n"
         )
-    )
-    mask_format = (
-        "" if task == "detection" else "  mask_format: polygon   # COCO instance masks; use bitmask for RLE\n"
-    )
+        extra_format = "  mask_format: polygon   # COCO instance masks; use bitmask for RLE\n"
+    elif task == "keypoints":
+        head_block = (
+            "  uniquery_keypoint:\n"
+            "    pooler_resolution: 14\n"
+            "    num_keypoints: 17        # COCO person-pose keypoints\n"
+            "    loss_weight: 1.0\n"
+        )
+    num_classes = 1 if task == "keypoints" else 80
 
     return (
         f"{_header(tier, task)}"
@@ -131,7 +140,7 @@ def render(tier: Tier, task: str) -> str:
         "    norm: ''\n"
         "    fuse_type: sum\n"
         "  roi_heads:\n"
-        "    num_classes: 80\n"
+        f"    num_classes: {num_classes}\n"
         "  uniquery_head:\n"
         "    num_proposals: 300\n"
         f"    hidden_dim: {hd}\n"
@@ -147,7 +156,7 @@ def render(tier: Tier, task: str) -> str:
         "    cost_bbox: 5.0\n"
         "    cost_giou: 2.0\n"
         "    cascade_iou_thresholds: []\n"
-        f"{mask_block}"
+        f"{head_block}"
         "\n"
         "input:\n"
         "  resize_mode: letterbox\n"
@@ -160,7 +169,7 @@ def render(tier: Tier, task: str) -> str:
         "  color_jitter_saturation: 0.7\n"
         "  color_jitter_hue: 0.015\n"
         "  color_jitter_prob: 0.5\n"
-        f"{mask_format}"
+        f"{extra_format}"
         "\n"
         "solver:\n"
         "  optimizer_name: AdamW\n"
@@ -221,7 +230,7 @@ def _validate(text: str) -> None:
 def _targets() -> list[tuple[Path, str]]:
     """Every (output_path, rendered_text) the family comprises."""
     out: list[tuple[Path, str]] = []
-    for task in ("detection", "segmentation"):
+    for task in ("detection", "segmentation", "keypoints"):
         for tier in TIERS:
             text = render(tier, task)
             _validate(text)
