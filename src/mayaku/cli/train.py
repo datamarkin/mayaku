@@ -91,6 +91,7 @@ def run_train(
     val_json: Path | None = None,
     val_image_root: Path | None = None,
     resume: Path | None = None,
+    user_set_paths: set[str] | None = None,
 ) -> None:
     """Train a detector.
 
@@ -120,16 +121,19 @@ def run_train(
             "schedule) from a checkpoint, so there is nothing left to initialise."
         )
 
-    # Track which YAML paths the user explicitly set. Auto-config later
+    # Track which config paths the user explicitly set. Auto-config later
     # uses this to skip any field the user already pinned, so explicit
-    # values always win over the dataset-derived recipe. Python-direct
-    # callers (``config`` is a constructed MayakuConfig) start with an
-    # empty set — auto-config will fill in everything except CLI flags
-    # which we mark below.
-    user_set_paths: set[str]
+    # values always win over the dataset-derived recipe. Two sources feed
+    # it: ``user_set_paths`` forwarded by the caller (``mayaku.api`` passes
+    # the user's ``overrides`` + ``size_budget`` here so they survive
+    # auto-config), and — when ``config`` is a YAML path — the leaves of
+    # that YAML. A constructed ``MayakuConfig`` carries no such record, so
+    # only the caller-forwarded set protects it.
+    # Fresh copy so the later ``.add("solver.max_iter")`` never mutates the
+    # caller's set.
+    user_set_paths = set(user_set_paths) if user_set_paths is not None else set()
     if isinstance(config, MayakuConfig):
         cfg = config
-        user_set_paths = set()
     else:
         text = Path(config).read_text(encoding="utf-8")
         raw_yaml = yaml.safe_load(text) or {}
@@ -139,7 +143,7 @@ def run_train(
                 f"got {type(raw_yaml).__name__}"
             )
         raw_dict = dict(raw_yaml)
-        user_set_paths = collect_set_paths(raw_dict)
+        user_set_paths |= collect_set_paths(raw_dict)
         cfg = MayakuConfig.model_validate(raw_dict)
 
     if max_iter is not None:
@@ -669,6 +673,7 @@ def run_train_worker(
     val_json: Path | None,
     val_image_root: Path | None,
     resume: Path | None = None,
+    user_set_paths: set[str] | None = None,
 ) -> None:
     """Positional-arg adapter for :func:`mayaku.engine.launch`.
 
@@ -689,6 +694,7 @@ def run_train_worker(
         val_json=val_json,
         val_image_root=val_image_root,
         resume=resume,
+        user_set_paths=user_set_paths,
     )
 
 

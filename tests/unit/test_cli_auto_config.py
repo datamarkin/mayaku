@@ -328,3 +328,47 @@ def test_auto_config_skipped_below_min_images_threshold(tmp_path: Path) -> None:
     # With only 3 images auto-config refuses to run; defaults unchanged.
     assert resolved.model.roi_heads.num_classes == 80
     assert resolved.model.anchor_generator.sizes == ((32,), (64,), (128,), (256,), (512,))
+
+
+# ---------------------------------------------------------------------------
+# Forwarded user_set_paths protect fields on the MayakuConfig-object path
+# (the path mayaku.api.train uses) — regression for auto-config silently
+# overwriting the user's overrides / size_budget.
+# ---------------------------------------------------------------------------
+
+
+def test_forwarded_user_set_paths_survive_auto_config_on_object_path(
+    tmp_path: Path,
+) -> None:
+    """A constructed config carries no set-path record, so without the
+    forwarded ``user_set_paths`` auto-config would overwrite everything.
+    Forwarding ``{"solver.base_lr"}`` (as mayaku.api does for the user's
+    overrides) must keep base_lr while still letting auto-config correct
+    the *unprotected* num_classes from the dataset.
+    """
+    fixture = _fake_coco(num_images=30, num_classes=4, tmp_path=tmp_path)
+
+    # num_classes is wrong on purpose and NOT protected → auto-config fixes it.
+    # base_lr is the user's pin → must survive.
+    cfg = _base_cfg(num_classes=99, auto_config_enabled=True)
+    cfg = cfg.model_copy(update={"solver": cfg.solver.model_copy(update={"base_lr": 7e-5})})
+
+    out = tmp_path / "run"
+    with pytest.warns(UserWarning, match="freeze_at"):
+        run_train(
+            cfg,  # a MayakuConfig OBJECT, like mayaku.api.train forwards
+            coco_gt_json=fixture["json"],
+            image_root=fixture["images"],
+            output_dir=out,
+            device="cpu",
+            max_iter=5,  # keeps training cheap + pins solver.max_iter
+            user_set_paths={"solver.base_lr"},
+        )
+
+    resolved = load_yaml(out / "config.yaml")
+    # Protected pin survived auto-config.
+    assert resolved.solver.base_lr == 7e-5
+    # Unprotected field was auto-derived from the dataset (4 categories).
+    assert resolved.model.roi_heads.num_classes == 4
+    # CLI max_iter pin also survived.
+    assert resolved.solver.max_iter == 5

@@ -78,6 +78,7 @@ from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
 from mayaku.data import resolve_dataset
 from mayaku.engine import launch, resolve_ddp_device
+from mayaku.tuning import collect_set_paths
 from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
 
 __all__ = ["train"]
@@ -131,6 +132,14 @@ def train(
     ``overrides={"input": {"size_budget": ...}}`` and wins over both the config
     and ``overrides``.
 
+    **Auto-config vs. manual recipe.** When you pass a ``config`` (YAML path,
+    bundled name, or :class:`MayakuConfig`), it is used *verbatim* — auto-config
+    is off, so the recipe you wrote is never silently re-tuned. With no
+    ``config`` (the ``weights`` + ``data`` path), the recipe is derived from
+    your dataset (schedule, LR, anchors, num_classes, augmentation). In both
+    cases anything you pass via ``overrides`` or ``size_budget`` is applied last
+    and always wins — auto-config never overwrites a field you set explicitly.
+
     See the module docstring for full parameter semantics and the
     auto-detection rules (pretrained-backbone derivation, no-val
     short-circuit, output-dir defaulting). Returns a result dict.
@@ -178,14 +187,28 @@ def train(
     # is the checkpoint to load when ``weights`` was given, else None.
     cfg, config_stem, detector_weights = _resolve_model_source(config, weights)
 
-    # --- Apply overrides --------------------------------------------------
+    # --- Apply user overrides + record which fields the user pinned --------
+    # Everything the user passes here is an explicit choice that must survive
+    # auto-config. The values are merged into ``cfg`` now; their dotted paths
+    # go into ``pinned_paths`` so the dataset-derived recipe (which runs inside
+    # run_train on the no-config path) skips them and the user's value wins.
+    pinned_paths: set[str] = set()
     if overrides:
         cfg = merge_overrides(cfg, overrides)
+        pinned_paths |= collect_set_paths(overrides)
     # size_budget is the first-class form of the most common knob; applied last
     # so the explicit arg wins over the config and overrides. Schema validation
     # (positive, stride-32 multiple) runs inside merge_overrides.
     if size_budget is not None:
         cfg = merge_overrides(cfg, {"input": {"size_budget": size_budget}})
+        pinned_paths.add("input.size_budget")
+
+    # A config (YAML path, bundled name, or MayakuConfig) means "train exactly
+    # this recipe": auto-config is turned off so the config is used verbatim and
+    # never silently re-tuned. Without a config, the recipe is derived from the
+    # dataset (auto-config on, but never overwriting ``pinned_paths``).
+    if config is not None:
+        cfg = merge_overrides(cfg, {"auto_config": {"enabled": False}})
 
     # --- No-val short-circuit (after overrides, so eval_period is final) --
     eval_after = val_json is not None
@@ -240,6 +263,7 @@ def train(
             val_json=val_json if forward_val else None,
             val_image_root=val_images if forward_val else None,
             resume=resume_path,
+            user_set_paths=pinned_paths,
         )
     else:
         # Multi-GPU DDP: spawn ``num_gpus`` workers via :func:`launch`.
@@ -266,6 +290,7 @@ def train(
                 val_json if forward_val else None,
                 val_images if forward_val else None,
                 resume_path,
+                pinned_paths,
             ),
         )
     train_seconds = time.time() - train_start
