@@ -821,10 +821,9 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
     # Eval mapper drops annotations entirely (is_train=False), so neither
     # polygons nor keypoints are needed in the loaded dicts. One COCO parse
     # for both metadata and dicts (load_coco_dataset) instead of two — and
-    # routed through the same per-node shared loader as the train set, so
-    # every rank evaluating the full val split (v1 redundant-eval design)
-    # parses it once per node, not once per GPU. Matters for large eval
-    # sets (LVIS / O365 val); a no-op extra broadcast for COCO's 50 MB.
+    # routed through the same per-node shared loader as the train set, so it
+    # parses once per node, not once per GPU. Matters for large eval sets
+    # (LVIS / O365 val); a no-op extra broadcast for COCO's 50 MB.
     metadata, dataset_dicts, _ = load_shared_dataset(
         parse_fn=lambda: load_coco_dataset(
             name="cli_train_eval",
@@ -848,7 +847,11 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
     # training run (5k images × ~10 MB each on COCO val2017). The
     # DataLoader fetches one at a time on demand instead.
     mapped: Any = _MappedList(dataset_dicts, mapper)
-    sampler = InferenceSampler(len(mapped))
+    # Shard the val indices across ranks (disjoint, no padding) so each image is
+    # evaluated exactly once. The evaluator all-gathers + flat-merges per-rank
+    # predictions, so a non-sharded sampler (num_replicas=1) would feed COCOeval
+    # world_size duplicate detections and deflate AP. No-op at world_size=1.
+    sampler = InferenceSampler(len(mapped), num_replicas=get_world_size(), rank=get_rank())
     return DataLoader(
         mapped,
         batch_size=1,

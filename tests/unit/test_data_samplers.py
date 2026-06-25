@@ -83,6 +83,31 @@ def test_inference_sampler_covers_every_index_exactly_once_across_ranks() -> Non
     assert len(union) == size  # no duplicates
 
 
+def test_inference_sampler_shards_prevent_duplicate_eval_predictions() -> None:
+    # Regression: the in-train DDP evaluator all-gathers + flat-merges each
+    # rank's predictions with NO dedup, so the per-rank index shards must be
+    # disjoint. The old loader built InferenceSampler(size) with num_replicas=1,
+    # so every rank evaluated the full split -> world_size duplicate detections
+    # -> COCO AP deflated. Mirror the loader's sharded construction and assert
+    # the merged image set is the full split exactly once.
+    n_images, world = 7, 3
+    image_ids = list(range(100, 100 + n_images))
+
+    # Sharded (the fix): each rank evaluates a disjoint slice.
+    merged = [
+        image_ids[i]
+        for r in range(world)
+        for i in InferenceSampler(n_images, num_replicas=world, rank=r)
+    ]
+    assert sorted(merged) == image_ids  # full coverage
+    assert len(merged) == len(set(merged))  # no duplicates after merge
+
+    # Non-sharded (the bug): num_replicas=1 -> every rank sees the full set.
+    buggy = [image_ids[i] for _ in range(world) for i in InferenceSampler(n_images)]
+    assert len(buggy) == world * n_images
+    assert len(set(buggy)) == n_images  # same images, duplicated world_size times
+
+
 def test_inference_sampler_len_matches_iter() -> None:
     s = InferenceSampler(size=10, num_replicas=3, rank=1)
     assert len(s) == sum(1 for _ in s)
