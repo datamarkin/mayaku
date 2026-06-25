@@ -124,10 +124,19 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
         arr = (np.random.default_rng(i).random((1080, 1920, 3)) * 255).astype(np.uint8)
         Image.fromarray(arr).save(imgs / f"{i}.png")
     coco = {
-        "images": [{"id": i, "file_name": f"{i}.png", "height": 1080, "width": 1920} for i in range(12)],
+        "images": [
+            {"id": i, "file_name": f"{i}.png", "height": 1080, "width": 1920} for i in range(12)
+        ],
         "categories": [{"id": 1, "name": "x"}],
         "annotations": [
-            {"id": i, "image_id": i, "category_id": 1, "bbox": [10, 10, 40, 40], "area": 1600, "iscrowd": 0}
+            {
+                "id": i,
+                "image_id": i,
+                "category_id": 1,
+                "bbox": [10, 10, 40, 40],
+                "area": 1600,
+                "iscrowd": 0,
+            }
             for i in range(12)
         ],
     }
@@ -142,9 +151,16 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
             roi_box_head=ROIBoxHeadConfig(num_fc=1, fc_dim=32),
         ),
         solver=SolverConfig(
-            base_lr=1e-4, ims_per_batch=2, max_iter=2, warmup_iters=1, steps=(1,), checkpoint_period=2
+            base_lr=1e-4,
+            ims_per_batch=2,
+            max_iter=2,
+            warmup_iters=1,
+            steps=(1,),
+            checkpoint_period=2,
         ),
-        input=InputConfig(resize_mode="letterbox", infer_size=640, infer_hw=(640, 640)),  # inherited 1:1 base
+        input=InputConfig(
+            resize_mode="letterbox", infer_size=640, infer_hw=(640, 640)
+        ),  # inherited 1:1 base
         dataloader=DataLoaderConfig(num_workers=0),
     )
     out = tmp_path / "run"
