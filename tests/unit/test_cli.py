@@ -100,6 +100,61 @@ def test_run_train_runs_the_loop_and_writes_checkpoints(
     assert "model_final.pth" in checkpoints
 
 
+def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) -> None:
+    """A 1:1 base fine-tuned on 16:9 data must ADAPT: the sidecar canvas
+    re-resolves to the user's aspect, not the inherited square. Regression for
+    the infer_hw-inheritance footgun (the platform's core fine-tune flow)."""
+    import numpy as np
+    from PIL import Image
+
+    from mayaku.config.schemas import (
+        BackboneConfig,
+        DataLoaderConfig,
+        InputConfig,
+        ModelConfig,
+        ROIBoxHeadConfig,
+        ROIHeadsConfig,
+        RPNConfig,
+        SolverConfig,
+    )
+
+    imgs = tmp_path / "i"
+    imgs.mkdir()
+    for i in range(12):  # uniform 16:9
+        arr = (np.random.default_rng(i).random((1080, 1920, 3)) * 255).astype(np.uint8)
+        Image.fromarray(arr).save(imgs / f"{i}.png")
+    coco = {
+        "images": [{"id": i, "file_name": f"{i}.png", "height": 1080, "width": 1920} for i in range(12)],
+        "categories": [{"id": 1, "name": "x"}],
+        "annotations": [
+            {"id": i, "image_id": i, "category_id": 1, "bbox": [10, 10, 40, 40], "area": 1600, "iscrowd": 0}
+            for i in range(12)
+        ],
+    }
+    gt = tmp_path / "gt.json"
+    gt.write_text(json.dumps(coco))
+    cfg = MayakuConfig(
+        model=ModelConfig(
+            meta_architecture="faster_rcnn",
+            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
+            rpn=RPNConfig(pre_nms_topk_train=100, post_nms_topk_train=20, batch_size_per_image=16),
+            roi_heads=ROIHeadsConfig(num_classes=1, batch_size_per_image=8),
+            roi_box_head=ROIBoxHeadConfig(num_fc=1, fc_dim=32),
+        ),
+        solver=SolverConfig(
+            base_lr=1e-4, ims_per_batch=2, max_iter=2, warmup_iters=1, steps=(1,), checkpoint_period=2
+        ),
+        input=InputConfig(resize_mode="letterbox", infer_size=640, infer_hw=(640, 640)),  # inherited 1:1 base
+        dataloader=DataLoaderConfig(num_workers=0),
+    )
+    out = tmp_path / "run"
+    with pytest.warns(UserWarning, match="freeze_at"):
+        run_train(cfg, coco_gt_json=gt, image_root=imgs, output_dir=out, device="cpu", max_iter=2)
+    sd = torch.load(out / "model_final.pth", map_location="cpu", weights_only=True)
+    # Re-resolved to the 16:9 canvas — NOT the inherited [640, 640].
+    assert sd["mayaku"]["config"]["input"]["infer_hw"] == [512, 768]
+
+
 def test_run_train_pretrained_backbone_passes_through(
     toy_workspace: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
