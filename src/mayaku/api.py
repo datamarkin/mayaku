@@ -93,6 +93,7 @@ def train(
     val_json: Path | None = None,
     val_images: Path | None = None,
     output_dir: Path | None = None,
+    size_budget: int | None = None,
     overrides: Mapping[str, Any] | None = None,
     device: DeviceSetting = "auto",
     num_gpus: int = 1,
@@ -122,6 +123,13 @@ def train(
       come from the COCO annotations, not the descriptor.
     * ``train_json`` + ``train_images`` (+ optional ``val_json`` +
       ``val_images``) — the explicit form.
+
+    ``size_budget`` is the first-class form of the compute-budget dial: the
+    letterbox canvas is the largest 128-aligned ``(H, W)`` under
+    ``size_budget²`` at the data's native aspect (raise it for more resolution,
+    lower it for speed). It's equivalent to
+    ``overrides={"input": {"size_budget": ...}}`` and wins over both the config
+    and ``overrides``.
 
     See the module docstring for full parameter semantics and the
     auto-detection rules (pretrained-backbone derivation, no-val
@@ -173,6 +181,11 @@ def train(
     # --- Apply overrides --------------------------------------------------
     if overrides:
         cfg = merge_overrides(cfg, overrides)
+    # size_budget is the first-class form of the most common knob; applied last
+    # so the explicit arg wins over the config and overrides. Schema validation
+    # (positive, stride-32 multiple) runs inside merge_overrides.
+    if size_budget is not None:
+        cfg = merge_overrides(cfg, {"input": {"size_budget": size_budget}})
 
     # --- No-val short-circuit (after overrides, so eval_period is final) --
     eval_after = val_json is not None
