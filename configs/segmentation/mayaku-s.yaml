@@ -1,6 +1,6 @@
 # mayaku-s (segmentation) — real-time. ConvNeXt-nano + FPN + UniQuery (QGN, 2 stages).
-# ~20M params (detection). Proven head dims: dim_feedforward = 4*hidden_dim,
-# dim_dynamic = hidden_dim/4 (Sparse R-CNN ratio), pooler 7.
+# ~20M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
+# dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.
 
 model:
   meta_architecture: uniquery
@@ -25,8 +25,8 @@ model:
     num_heads: 8
     num_stages: 2
     uniquery_generator: true
-    dim_feedforward: 512    # 4 x hidden_dim
-    dim_dynamic: 32         # hidden_dim / 4
+    dim_feedforward: 2048    # absolute (Sparse R-CNN), not scaled with hidden_dim
+    dim_dynamic: 64         # absolute (Sparse R-CNN), not scaled with hidden_dim
     pooler_resolution: 7
     pooler_sampling_ratio: 1   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier
     dropout: 0.0
@@ -56,13 +56,13 @@ input:
 
 solver:
   optimizer_name: AdamW
-  base_lr: 2.5e-5
+  base_lr: 1.0e-4
   weight_decay: 1.0e-4
   weight_decay_norm: 0.0
   betas: [0.9, 0.999]
   eps: 1.0e-8
   llrd_enabled: true
-  llrd_decay: 0.8
+  llrd_decay: 0.9
   lr_scheduler_name: WarmupCosineLR
   max_iter: 90000
   steps: [60000, 80000]
