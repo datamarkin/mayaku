@@ -67,6 +67,26 @@ def test_train_returns_result_dict_and_writes_artefacts(
     assert meta["final_box_ap"] == result["final_box_ap"]
 
 
+def test_train_size_budget_arg_overrides_config(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
+    """The first-class ``size_budget=`` arg threads into the run's config and
+    wins over the config's default (640)."""
+    from mayaku.config import load_yaml
+
+    out = tmp_path / "run_budget"
+    train(
+        config=toy_workspace["cfg"],
+        train_json=toy_workspace["json"],
+        train_images=toy_workspace["images"],
+        output_dir=out,
+        device="cpu",
+        size_budget=512,
+    )
+    written = load_yaml(out / "train" / "config.yaml")
+    assert written.input.size_budget == 512  # not the default 640
+
+
 # ---------------------------------------------------------------------------
 # The final checkpoint is self-describing (config + class names embedded)
 # ---------------------------------------------------------------------------
