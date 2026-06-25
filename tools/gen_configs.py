@@ -75,16 +75,20 @@ def _header(tier: Tier, task: str) -> str:
     return (
         f"# mayaku-{tier.name} ({task}) — {tier.desc}. "
         f"{bb} + FPN + UniQuery (QGN, {tier.num_stages} stages).\n"
-        f"# ~{tier.params} params (detection). Proven head dims: dim_feedforward = 4*hidden_dim,\n"
-        f"# dim_dynamic = hidden_dim/4 (Sparse R-CNN ratio), pooler 7.\n"
+        f"# ~{tier.params} params (detection). Head dims are ABSOLUTE (Sparse R-CNN):\n"
+        f"# dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.\n"
     )
 
 
 def render(tier: Tier, task: str) -> str:
     """Return the full YAML text for one (tier, task) family member."""
     hd = tier.hidden_dim
-    ff = 4 * hd
-    dd = hd // 4
+    # Head capacity is ABSOLUTE, not scaled with hidden_dim. Sparse R-CNN uses
+    # dim_feedforward 2048 / dim_dynamic 64 at hidden 256; the proven UniQuery h128
+    # config uses the same absolute pair. The earlier "4*hidden / hidden//4 ratio"
+    # starved the h128 head (ff 512 / dyn 32) → ~7 AP @5k vs ~16 AP with 2048/64.
+    ff = 2048
+    dd = 64
     # Real-time tier: 1 sample/ROI bin (skips the sub-bin average → faster, no
     # ReduceMean op). Accuracy tier: 2 samples/bin. The deploy one-pass pooler
     # can't do per-box adaptive sampling, so these are the literal fixed counts
@@ -142,8 +146,8 @@ def render(tier: Tier, task: str) -> str:
         "    num_heads: 8\n"
         f"    num_stages: {tier.num_stages}\n"
         "    uniquery_generator: true\n"
-        f"    dim_feedforward: {ff}    # 4 x hidden_dim\n"
-        f"    dim_dynamic: {dd}         # hidden_dim / 4\n"
+        f"    dim_feedforward: {ff}    # absolute (Sparse R-CNN), not scaled with hidden_dim\n"
+        f"    dim_dynamic: {dd}         # absolute (Sparse R-CNN), not scaled with hidden_dim\n"
         "    pooler_resolution: 7\n"
         f"    pooler_sampling_ratio: {sr}   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier\n"
         "    dropout: 0.0\n"
@@ -168,13 +172,13 @@ def render(tier: Tier, task: str) -> str:
         "\n"
         "solver:\n"
         "  optimizer_name: AdamW\n"
-        "  base_lr: 2.5e-5\n"
+        "  base_lr: 1.0e-4\n"
         "  weight_decay: 1.0e-4\n"
         "  weight_decay_norm: 0.0\n"
         "  betas: [0.9, 0.999]\n"
         "  eps: 1.0e-8\n"
         "  llrd_enabled: true\n"
-        "  llrd_decay: 0.8\n"
+        "  llrd_decay: 0.9\n"
         "  lr_scheduler_name: WarmupCosineLR\n"
         "  max_iter: 90000\n"
         "  steps: [60000, 80000]\n"
