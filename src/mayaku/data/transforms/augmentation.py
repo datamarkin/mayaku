@@ -104,32 +104,37 @@ class ResizeShortestEdge(Augmentation):
 
 
 class LetterboxResize(Augmentation):
-    """Aspect-preserving resize into a fixed ``size × size`` square (centred pad).
+    """Aspect-preserving resize into a fixed canvas (centred pad).
 
-    The fixed-shape inference/eval/deploy geometry. ``sizes`` is a single int
-    for the one deploy size, or a sequence for multi-scale training — one drawn
-    per call, ``"choice"`` (pick from the list) or ``"range"`` (uniform between
-    the two endpoints), mirroring :class:`ResizeShortestEdge`. ``640`` (the
-    deploy size) belongs in the training set so train geometry == deploy.
+    The fixed-shape inference/eval/deploy geometry. ``sizes`` is a single ``int``
+    (one square deploy size) or a **sequence of canvases**, each an ``int``
+    (square) or an ``(H, W)`` pair (rectangle). One is drawn per call:
+    ``"choice"`` (pick uniformly) or ``"range"`` (uniform between two int
+    endpoints — squares only). The deploy canvas belongs in the training set so
+    train geometry == deploy. A bare ``(H, W)`` must be wrapped in a list
+    (``[(512, 768)]``) so it isn't read as two square sizes.
     """
 
     def __init__(
         self,
-        sizes: int | Sequence[int],
+        sizes: int | Sequence[int | tuple[int, int]],
         *,
         sample_style: str = "choice",
         pad_value: float = 0.0,
         rng: np.random.Generator | None = None,
     ) -> None:
-        self.sizes = (sizes,) if isinstance(sizes, int) else tuple(sizes)
+        self.sizes: tuple[int | tuple[int, int], ...] = (
+            (sizes,) if isinstance(sizes, int) else tuple(sizes)
+        )
         if not self.sizes:
             raise ValueError("LetterboxResize requires at least one size")
         if sample_style not in ("choice", "range"):
             raise ValueError(f"sample_style must be 'choice' or 'range'; got {sample_style!r}")
-        if sample_style == "range" and len(self.sizes) != 2:
+        if sample_style == "range" and (
+            len(self.sizes) != 2 or not all(isinstance(s, int) for s in self.sizes)
+        ):
             raise ValueError(
-                "sample_style='range' requires exactly two sizes (min, max); "
-                f"got length {len(self.sizes)}"
+                f"sample_style='range' requires exactly two int sizes (min, max); got {self.sizes}"
             )
         self.sample_style = sample_style
         self.pad_value = pad_value
@@ -137,12 +142,15 @@ class LetterboxResize(Augmentation):
 
     def get_transform(self, image: npt.NDArray[Any]) -> LetterboxTransform:
         h, w = image.shape[:2]
+        size: int | tuple[int, int]
         if len(self.sizes) == 1:
             size = self.sizes[0]
         elif self.sample_style == "choice":
-            size = int(self.rng.choice(self.sizes))
+            # Index-based draw so (H, W) tuples survive (rng.choice flattens them).
+            size = self.sizes[int(self.rng.integers(len(self.sizes)))]
         else:
             lo, hi = self.sizes
+            assert isinstance(lo, int) and isinstance(hi, int)  # range is int-only (validated)
             size = int(self.rng.integers(lo, hi + 1))
         return LetterboxTransform(h, w, size, pad_value=self.pad_value)
 

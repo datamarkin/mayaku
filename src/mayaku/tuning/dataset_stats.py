@@ -21,7 +21,35 @@ from typing import Any
 
 from mayaku.data.transforms.augmentation import compute_resized_hw
 
-__all__ = ["DatasetStats", "analyze_dataset"]
+__all__ = ["DatasetStats", "analyze_dataset", "dataset_aspect"]
+
+# Robust aspect spread (p90/p10) at or below this → the dataset is "one aspect"
+# and a fixed (H, W) canvas beats square letterbox. The single source for both
+# the health report (DatasetStats.is_uniform_aspect) and the train-time resolver.
+ASPECT_UNIFORMITY_THRESHOLD = 1.10
+
+
+def _aspect_spread(aspects: Sequence[float]) -> float:
+    """Robust aspect spread ``p90 / p10`` (1.0 for < 10 samples). The one place
+    the percentile math lives — shared by ``dataset_aspect`` and ``DatasetStats``."""
+    n = len(aspects)
+    if n < 10:
+        return 1.0
+    s = sorted(aspects)
+    return s[(n * 9) // 10] / max(s[n // 10], 1e-9)
+
+
+def dataset_aspect(dataset_dicts: Sequence[dict[str, Any]]) -> tuple[float, bool]:
+    """Median image aspect ``W / H`` + uniformity, from image dims only.
+
+    A light dims-only pass (no box analysis) shared by the letterbox canvas
+    resolver. Uniform = robust ``p90 / p10 <= ASPECT_UNIFORMITY_THRESHOLD`` so a
+    few outliers never flip it. Returns ``(median_aspect, is_uniform)``.
+    """
+    aspects = [int(d["width"]) / int(d["height"]) for d in dataset_dicts]
+    if not aspects:
+        return 1.0, False
+    return statistics.median(aspects), _aspect_spread(aspects) <= ASPECT_UNIFORMITY_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -40,6 +68,9 @@ class DatasetStats:
     aspect_ratios: tuple[float, ...]
     median_image_short_edge: int
     median_image_long_edge: int
+    # Per-image aspect ``W / H`` (original pixels) — drives aspect-aware input
+    # sizing (a uniform-aspect dataset → a fixed (H, W) canvas instead of square).
+    image_aspects: tuple[float, ...] = ()
     # Hygiene counts — boxes/images the analyser skipped, surfaced
     # instead of silently dropped so a health report can flag bad labels.
     num_degenerate_boxes: int = 0
@@ -61,6 +92,24 @@ class DatasetStats:
         counts = list(self.class_counts.values())
         lo = max(1, min(counts))
         return max(counts) / lo
+
+    @property
+    def aspect_median(self) -> float:
+        """Median image aspect ``W / H`` (1.0 for an empty dataset)."""
+        return float(statistics.median(self.image_aspects)) if self.image_aspects else 1.0
+
+    @property
+    def aspect_spread(self) -> float:
+        """Robust spread of image aspect — ``p90 / p10``. 1.0 = all identical;
+        grows with diversity. Percentiles (not min/max) so a few outliers — one
+        odd image, a 5% minority — never flip the result."""
+        return _aspect_spread(self.image_aspects)
+
+    @property
+    def is_uniform_aspect(self) -> bool:
+        """True when the dataset is effectively one aspect ratio → a fixed
+        ``(H, W)`` canvas beats square letterbox (no padding waste)."""
+        return self.aspect_spread <= ASPECT_UNIFORMITY_THRESHOLD
 
 
 def analyze_dataset(
@@ -96,6 +145,7 @@ def analyze_dataset(
 
     short_edges: list[int] = []
     long_edges: list[int] = []
+    image_aspects: list[float] = []
     sqrt_areas: list[float] = []
     aspect_ratios: list[float] = []
     # Image-level — same semantics as RepeatFactorTrainingSampler so a
@@ -109,6 +159,7 @@ def analyze_dataset(
         w = int(d["width"])
         short_edges.append(min(h, w))
         long_edges.append(max(h, w))
+        image_aspects.append(w / h)
 
         # Match ResizeShortestEdge's target size exactly so box stats are
         # in the same space the model will see.
@@ -149,6 +200,7 @@ def analyze_dataset(
         class_counts=dict(class_image_count),
         sqrt_areas=tuple(sqrt_areas),
         aspect_ratios=tuple(aspect_ratios),
+        image_aspects=tuple(image_aspects),
         median_image_short_edge=int(statistics.median(short_edges)),
         median_image_long_edge=int(statistics.median(long_edges)),
         num_degenerate_boxes=num_degenerate,

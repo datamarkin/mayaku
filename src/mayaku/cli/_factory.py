@@ -23,6 +23,7 @@ from mayaku.models.detectors import (
     build_mask_rcnn,
     build_uniquery,
 )
+from mayaku.tuning.sizing import multi_scale_canvases, resolve_deploy_canvas
 from mayaku.utils.checkpoint import config_from_checkpoint
 
 __all__ = ["build_detector", "build_resize_augmentation", "load_detector"]
@@ -31,14 +32,22 @@ __all__ = ["build_detector", "build_resize_augmentation", "load_detector"]
 def build_resize_augmentation(cfg: MayakuConfig, *, for_train: bool) -> Augmentation:
     """Pick the resize augmentation from ``cfg.input.resize_mode``.
 
-    ``letterbox`` → aspect-preserving resize+pad to a fixed square (train:
-    multi-scale ``train_sizes``; inference/eval: the single ``infer_size``).
+    ``letterbox`` → aspect-preserving resize+pad to the resolved canvas under the
+    ``infer_size**2`` budget (train: multi-scale down to ``train_scale_min``;
+    inference/eval: the single deploy canvas). The canvas is ``infer_hw`` when
+    resolved (data-health / manual), else the largest aligned square in budget.
     ``shortest_edge`` → the legacy variable resize. One place so train, eval, and
     the in-train periodic eval can't drift in how they read the config.
     """
     inp = cfg.input
     if inp.resize_mode == "letterbox":
-        return LetterboxResize(inp.train_sizes if for_train else (inp.infer_size,))
+        budget = inp.infer_size * inp.infer_size
+        aspect = inp.infer_hw[1] / inp.infer_hw[0] if inp.infer_hw is not None else 1.0
+        if for_train:
+            return LetterboxResize(
+                multi_scale_canvases(budget, aspect, scale_min=inp.train_scale_min)
+            )
+        return LetterboxResize([resolve_deploy_canvas(inp.infer_hw, inp.infer_size)])
     if for_train:
         return ResizeShortestEdge(
             inp.min_size_train,

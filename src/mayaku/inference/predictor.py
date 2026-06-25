@@ -69,7 +69,7 @@ class Predictor:
         model: nn.Module,
         *,
         resize_mode: str = "shortest_edge",
-        infer_size: int = 640,
+        infer_size: int | tuple[int, int] = 640,
         min_size_test: int = 800,
         max_size_test: int = 1333,
         device: torch.device | None = None,
@@ -80,8 +80,12 @@ class Predictor:
             raise ValueError(
                 f"resize_mode must be 'shortest_edge' or 'letterbox'; got {resize_mode!r}"
             )
-        if resize_mode == "letterbox" and infer_size <= 0:
-            raise ValueError(f"infer_size must be > 0; got {infer_size}")
+        # ``infer_size`` is the resolved letterbox canvas: a scalar S (→ S×S) or
+        # an (H, W) rectangle. It's passed straight to LetterboxTransform.
+        if resize_mode == "letterbox":
+            dims = (infer_size, infer_size) if isinstance(infer_size, int) else infer_size
+            if dims[0] <= 0 or dims[1] <= 0:
+                raise ValueError(f"infer_size canvas must be > 0; got {infer_size}")
         if resize_mode == "shortest_edge" and (min_size_test <= 0 or max_size_test <= 0):
             raise ValueError(
                 f"min_size_test / max_size_test must be > 0; got ({min_size_test}, {max_size_test})"
@@ -128,12 +132,17 @@ class Predictor:
         wrap an in-code/fake model. **Not** a public deploy API; use
         :func:`from_pretrained`.
         """
+        from mayaku.tuning.sizing import resolve_deploy_canvas
+
+        inp = cfg.input
+        # Resolved letterbox canvas (shared with build_resize_augmentation).
+        canvas: int | tuple[int, int] = resolve_deploy_canvas(inp.infer_hw, inp.infer_size)
         return cls(
             model,
-            resize_mode=cfg.input.resize_mode,
-            infer_size=cfg.input.infer_size,
-            min_size_test=cfg.input.min_size_test,
-            max_size_test=cfg.input.max_size_test,
+            resize_mode=inp.resize_mode,
+            infer_size=canvas,
+            min_size_test=inp.min_size_test,
+            max_size_test=inp.max_size_test,
             gpu_preprocess=gpu_preprocess,
             pinned_memory=pinned_memory,
         )
@@ -154,14 +163,14 @@ class Predictor:
         h, w = int(arr.shape[0]), int(arr.shape[1])
 
         if self.resize_mode == "letterbox":
-            # Fixed-size deploy geometry: letterbox to infer_size, run on the
-            # square, un-letterbox host-side. Passing height=width=infer_size
-            # makes the model emit boxes in the canvas space (identity rescale)
-            # so the transform's inverse maps them back exactly.
+            # Fixed-size deploy geometry: letterbox to the resolved canvas (square
+            # S or an (H, W) rectangle), run on it, un-letterbox host-side.
+            # Passing height/width = the canvas dims makes the model emit boxes in
+            # canvas space (identity rescale) so the transform's inverse is exact.
             transform = LetterboxTransform(h, w, self.infer_size)
             img_tensor = self._to_tensor(transform.apply_image(arr))
             instances = self._forward(
-                [{"image": img_tensor, "height": self.infer_size, "width": self.infer_size}]
+                [{"image": img_tensor, "height": transform.out_h, "width": transform.out_w}]
             )
             return unletterbox_instances(instances, transform, h, w)
 

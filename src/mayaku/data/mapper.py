@@ -148,8 +148,8 @@ class DatasetMapper:
                 (t for t in transforms.transforms if isinstance(t, LetterboxTransform)), None
             )
             if letterbox is not None:
-                dd["height"] = letterbox.size
-                dd["width"] = letterbox.size
+                dd["height"] = letterbox.out_h
+                dd["width"] = letterbox.out_w
                 dd["letterbox"] = letterbox
             return dd
 

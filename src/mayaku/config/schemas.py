@@ -587,23 +587,27 @@ class InputConfig(_BaseModel):
     min_size_train_sampling: Literal["choice", "range"] = "choice"
     min_size_test: Annotated[int, Field(gt=0)] = 800
     max_size_test: Annotated[int, Field(gt=0)] = 1333
-    # Fixed square letterbox size for inference + export (the single static shape
-    # every fast path specialises on). Drives the eager Predictor, the export
-    # sample shape, and eval. Must be a multiple of the FPN max stride (32) — see
-    # the validator below. A flat int for now; aspect-aware sizing is a later step.
+    # The COMPUTE BUDGET DIAL for fixed-size letterbox inference: the compute
+    # budget is ``infer_size ** 2`` pixels. The actual canvas is *derived* — the
+    # largest 128-aligned ``(H, W)`` under that budget at the data's native aspect
+    # (square for diverse data). Raise/lower it to trade speed for resolution.
     infer_size: Annotated[int, Field(gt=0)] = 640
+    # Resolved letterbox canvas ``(H, W)`` — set by data-health at train start (or
+    # manually) and baked into the checkpoint sidecar so deploy reads the exact
+    # shape with no dataset. ``None`` → fall back to the largest aligned square in
+    # budget. Both dims are FPN-stride (32) multiples. See ``mayaku.tuning.sizing``.
+    infer_hw: tuple[int, int] | None = None
     # How inference/eval resize an image to the network input:
     #   "shortest_edge" — variable resize (ResizeShortestEdge), the legacy path.
-    #   "letterbox"     — aspect-preserving resize + pad to infer_size×infer_size,
+    #   "letterbox"     — aspect-preserving resize + pad to the resolved canvas,
     #                     the fixed-size deploy geometry (host un-letterboxes preds).
     # The mayaku-* family uses "letterbox"; kept switchable as the proven fallback.
     resize_mode: Literal["shortest_edge", "letterbox"] = "shortest_edge"
-    # Multi-scale letterbox training sizes (resize_mode="letterbox" only); one
-    # square size drawn per iteration. Should *end* at infer_size and jitter
-    # downward — the deploy size is the top of the range, smaller sizes are
-    # scale-down augmentation (better small-object robustness). The
-    # shortest-edge path uses min_size_train instead.
-    train_sizes: tuple[int, ...] = (640,)
+    # Multi-scale letterbox training: the smallest budget fraction (one canvas
+    # drawn per iteration, from this fraction up to the full deploy canvas). The
+    # deploy canvas is always the top — train geometry == deploy. Derived from the
+    # budget; replaces the old explicit ``train_sizes`` list.
+    train_scale_min: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
     mask_format: Literal["polygon", "bitmask"] = "polygon"
     random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 
@@ -661,6 +665,12 @@ class InputConfig(_BaseModel):
             raise ValueError(
                 f"infer_size must be a multiple of 32 (the FPN max stride); got "
                 f"{self.infer_size}. Use e.g. 640, 672, …, 800."
+            )
+        if self.infer_hw is not None and any(d % 32 != 0 for d in self.infer_hw):
+            raise ValueError(
+                f"infer_hw dims must each be a multiple of 32 (the FPN max stride); "
+                f"got {self.infer_hw}. Resolve it via mayaku.tuning.snap_max_content "
+                "(128-aligned), or use 32-multiples."
             )
         return self
 

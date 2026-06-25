@@ -121,14 +121,16 @@ class HFlipTransform(Transform):
 
 
 class LetterboxTransform(Transform):
-    """Aspect-preserving resize into a fixed ``size × size`` square, **centred**.
+    """Aspect-preserving resize into a fixed canvas, **centred**.
 
-    The fixed-shape inference geometry (the deploy keystone). The image is
-    scaled by ``scale = size / max(h, w)`` so the long side becomes ``size``;
-    the short side is padded equally on both sides (the "letterbox" bars) to a
-    ``size × size`` canvas. A single static shape is what every fast path
-    (torch.compile / ONNX / TensorRT / CoreML) specialises on, and a **single
-    uniform scale** (not per-axis) makes the inverse exact.
+    The fixed-shape inference geometry (the deploy keystone). The canvas is a
+    scalar ``S`` (→ ``S×S`` square) or an ``(H, W)`` pair (→ a rectangle matched
+    to the data's native aspect — see :func:`mayaku.tuning.snap_max_content`).
+    The image is scaled by ``scale = min(out_h/h, out_w/w)`` to fit inside both
+    dims; the remainder is padded equally on each side (the "letterbox" bars). A
+    single static shape is what every fast path (torch.compile / ONNX / TensorRT
+    / CoreML) specialises on, and a **single uniform scale** (not per-axis) makes
+    the inverse exact.
 
     Centred padding (not top-left) matches the YOLO-family convention and keeps
     real content off the canvas edge on all four sides (mild win for border /
@@ -143,23 +145,29 @@ class LetterboxTransform(Transform):
         self,
         h: int,
         w: int,
-        size: int,
+        size: int | tuple[int, int],
         *,
         pad_value: float = 0.0,
         interp: Image.Resampling = Image.Resampling.BILINEAR,
     ) -> None:
-        if size <= 0:
-            raise ValueError(f"LetterboxTransform size must be > 0; got {size}")
+        # ``size`` is the output canvas: a scalar ``S`` → ``S×S`` square, or an
+        # ``(H, W)`` pair → a rectangle matched to the data's native aspect.
+        out_h, out_w = (size, size) if isinstance(size, int) else size
+        if out_h <= 0 or out_w <= 0:
+            raise ValueError(f"LetterboxTransform canvas must be > 0; got {(out_h, out_w)}")
         self.h = h
         self.w = w
-        self.size = size
-        self.scale = size / max(h, w)
-        # Long side → size; clamp against float rounding so the resized image
-        # never exceeds the canvas.
-        self.new_h = min(round(h * self.scale), size)
-        self.new_w = min(round(w * self.scale), size)
-        self.pad_top = (size - self.new_h) // 2
-        self.pad_left = (size - self.new_w) // 2
+        self.out_h = out_h
+        self.out_w = out_w
+        # Fit-inside scale: the largest single (aspect-preserving) factor keeping
+        # the image within BOTH canvas dims. For a square this reduces to
+        # ``size / max(h, w)``; a single scalar keeps the inverse exact.
+        self.scale = min(out_h / h, out_w / w)
+        # Clamp against float rounding so the resized image never exceeds the canvas.
+        self.new_h = min(round(h * self.scale), out_h)
+        self.new_w = min(round(w * self.scale), out_w)
+        self.pad_top = (out_h - self.new_h) // 2
+        self.pad_left = (out_w - self.new_w) // 2
         self.pad_value = pad_value
         self.interp = interp
 
@@ -171,8 +179,8 @@ class LetterboxTransform(Transform):
         # copies the content once (the old ``np.full`` filled the whole canvas,
         # then ~half of it was overwritten). dtype is preserved.
         pad_width = [
-            (self.pad_top, self.size - self.new_h - self.pad_top),
-            (self.pad_left, self.size - self.new_w - self.pad_left),
+            (self.pad_top, self.out_h - self.new_h - self.pad_top),
+            (self.pad_left, self.out_w - self.new_w - self.pad_left),
         ]
         if resized.ndim == 3:
             pad_width.append((0, 0))  # don't pad the channel axis
@@ -209,9 +217,10 @@ class LetterboxTransform(Transform):
 
 
 def letterbox(
-    image: npt.NDArray[Any], size: int, *, pad_value: float = 0.0
+    image: npt.NDArray[Any], size: int | tuple[int, int], *, pad_value: float = 0.0
 ) -> tuple[npt.NDArray[Any], LetterboxTransform]:
-    """Centred-letterbox ``image`` to ``size × size``; return ``(padded, transform)``.
+    """Centred-letterbox ``image`` to ``size`` (square ``S`` or ``(H, W)``); return
+    ``(padded, transform)``.
 
     The geometry is built **once** as a :class:`LetterboxTransform` and reused:
     the returned transform carries ``scale``/``pad`` so the caller maps
