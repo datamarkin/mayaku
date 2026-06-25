@@ -592,10 +592,13 @@ class InputConfig(_BaseModel):
     # largest 128-aligned ``(H, W)`` under that budget at the data's native aspect
     # (square for diverse data). Raise/lower it to trade speed for resolution.
     infer_size: Annotated[int, Field(gt=0)] = 640
-    # Resolved letterbox canvas ``(H, W)`` — set by data-health at train start (or
-    # manually) and baked into the checkpoint sidecar so deploy reads the exact
-    # shape with no dataset. ``None`` → fall back to the largest aligned square in
-    # budget. Both dims are FPN-stride (32) multiples. See ``mayaku.tuning.sizing``.
+    # Resolved letterbox canvas ``(H, W)`` — a DEPLOY ARTIFACT, not a user input:
+    # training re-resolves it from *this* run's data every time (so fine-tuning a
+    # 1:1 base on 16:9 data adapts to a 16:9 canvas) and bakes it into the sidecar
+    # so deploy reads the exact shape with no dataset. Any inbound value is
+    # overwritten at train. ``None`` → deploy falls back to the largest aligned
+    # square in budget. Both dims are FPN-stride (32) multiples. See
+    # ``mayaku.tuning.sizing``.
     infer_hw: tuple[int, int] | None = None
     # How inference/eval resize an image to the network input:
     #   "shortest_edge" — variable resize (ResizeShortestEdge), the legacy path.

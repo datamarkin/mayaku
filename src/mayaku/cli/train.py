@@ -277,13 +277,20 @@ def run_train(
             rfs = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
                 dicts, repeat_thresh=dataloader.repeat_threshold
             )
-        # Aspect-aware letterbox canvas: resolve (H, W) from the data's native
-        # aspect under the infer_size² budget (uniform → rectangle, diverse →
-        # square). Skipped when the user pinned infer_hw or isn't letterboxing.
+        # Aspect-aware letterbox canvas: ALWAYS resolved from *this* run's data
+        # (uniform → rectangle, diverse → square) under the infer_size² budget.
+        # Re-resolving every train is what lets fine-tuning adapt: a 1:1 base model
+        # fine-tuned on 16:9 data gets a 16:9 canvas, not the base's inherited
+        # square. ``infer_hw`` is a deploy artifact of training, not a user input.
         canvas: tuple[int, int] | None = None
         canvas_use = 1.0
-        if cfg.input.resize_mode == "letterbox" and cfg.input.infer_hw is None:
-            median, uniform = dataset_aspect(dicts)
+        if cfg.input.resize_mode == "letterbox":
+            # Reuse the auto-config stats' aspect profile when it already ran;
+            # else a light dims-only pass (avoids re-scanning the dicts).
+            if stats is not None:
+                median, uniform = stats.aspect_median, stats.is_uniform_aspect
+            else:
+                median, uniform = dataset_aspect(dicts)
             canvas, canvas_use = resolve_canvas(cfg.input.infer_size, median, uniform)
         return {
             "overrides": overrides,
