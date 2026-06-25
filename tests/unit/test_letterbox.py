@@ -116,13 +116,13 @@ def test_resize_fixed_size() -> None:
     aug = LetterboxResize(640)
     t = aug.get_transform(_img(300, 600))
     assert isinstance(t, LetterboxTransform)
-    assert t.size == 640
+    assert t.out_h == t.out_w == 640  # scalar size → square canvas
 
 
 def test_resize_multiscale_choice_stays_in_set() -> None:
     sizes = (640, 672, 704, 736, 768, 800)
     aug = LetterboxResize(sizes, rng=np.random.default_rng(0))
-    drawn = {aug.get_transform(_img(400, 500)).size for _ in range(40)}
+    drawn = {aug.get_transform(_img(400, 500)).out_h for _ in range(40)}
     assert drawn.issubset(set(sizes))
     assert len(drawn) > 1  # actually varies
 
@@ -130,7 +130,28 @@ def test_resize_multiscale_choice_stays_in_set() -> None:
 def test_resize_range_style() -> None:
     aug = LetterboxResize((640, 800), sample_style="range", rng=np.random.default_rng(0))
     for _ in range(20):
-        assert 640 <= aug.get_transform(_img(400, 500)).size <= 800
+        assert 640 <= aug.get_transform(_img(400, 500)).out_h <= 800
+
+
+def test_letterbox_rectangle_uniform_scale_and_inverse() -> None:
+    # Portrait image (h=640, w=400) into a portrait (H=640, W=384) canvas.
+    img = _img(640, 400)
+    t = LetterboxTransform(640, 400, (640, 384))
+    assert (t.out_h, t.out_w) == (640, 384)
+    # Fit-inside uniform scale: min(640/640, 384/400) = 0.96 (width binds).
+    assert t.scale == pytest.approx(0.96)
+    assert t.new_w == 384 and t.new_h == round(640 * 0.96)  # 614, with vertical pad
+    assert t.apply_image(img).shape[:2] == (640, 384)
+    # The inverse is exact — a single uniform scale, same as the square case.
+    boxes = np.array([[10.0, 20.0, 300.0, 500.0]], dtype=np.float32)
+    np.testing.assert_allclose(t.inverse_box(t.apply_box(boxes)), boxes, atol=1e-2)
+
+
+def test_letterbox_rectangle_reduces_to_square() -> None:
+    # A scalar size and the equal-sided pair must produce identical geometry.
+    sq = LetterboxTransform(300, 600, 640)
+    rect = LetterboxTransform(300, 600, (640, 640))
+    assert (sq.scale, sq.new_h, sq.new_w) == (rect.scale, rect.new_h, rect.new_w)
 
 
 def test_resize_validates_range_arity() -> None:

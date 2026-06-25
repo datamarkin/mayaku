@@ -140,7 +140,18 @@ def test_predictor_selects_letterbox_from_cfg() -> None:
     cfg = MayakuConfig(input=InputConfig(resize_mode="letterbox", infer_size=640))
     pred = _predictor(cfg, _FakeDetector([0.0, 0.0, 1.0, 1.0]))
     assert pred.resize_mode == "letterbox"
-    assert pred.infer_size == 640
+    # infer_size now holds the *resolved* canvas: budget 640² → 640×640 square.
+    assert pred.infer_size == (640, 640)
+
+
+def test_predictor_selects_rectangle_from_infer_hw() -> None:
+    from mayaku.config import InputConfig
+
+    cfg = MayakuConfig(
+        input=InputConfig(resize_mode="letterbox", infer_size=640, infer_hw=(512, 768))
+    )
+    pred = _predictor(cfg, _FakeDetector([0.0, 0.0, 1.0, 1.0]))
+    assert pred.infer_size == (512, 768)  # uniform-aspect → rectangle canvas
 
 
 def test_eval_mapper_records_letterbox_transform() -> None:
