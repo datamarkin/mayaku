@@ -103,7 +103,7 @@ def test_run_train_runs_the_loop_and_writes_checkpoints(
 def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) -> None:
     """A 1:1 base fine-tuned on 16:9 data must ADAPT: the sidecar canvas
     re-resolves to the user's aspect, not the inherited square. Regression for
-    the infer_hw-inheritance footgun (the platform's core fine-tune flow)."""
+    the canvas_hw-inheritance footgun (the platform's core fine-tune flow)."""
     import numpy as np
     from PIL import Image
 
@@ -159,7 +159,7 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
             checkpoint_period=2,
         ),
         input=InputConfig(
-            resize_mode="letterbox", infer_size=640, infer_hw=(640, 640)
+            resize_mode="letterbox", size_budget=640, canvas_hw=(640, 640)
         ),  # inherited 1:1 base
         dataloader=DataLoaderConfig(num_workers=0),
     )
@@ -168,7 +168,7 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
         run_train(cfg, coco_gt_json=gt, image_root=imgs, output_dir=out, device="cpu", max_iter=2)
     sd = torch.load(out / "model_final.pth", map_location="cpu", weights_only=True)
     # Re-resolved to the 16:9 canvas — NOT the inherited [640, 640].
-    assert sd["mayaku"]["config"]["input"]["infer_hw"] == [512, 768]
+    assert sd["mayaku"]["config"]["input"]["canvas_hw"] == [512, 768]
 
 
 def test_run_train_pretrained_backbone_passes_through(

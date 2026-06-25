@@ -54,7 +54,7 @@ def test_derived_invariants_hold(task: str, tier) -> None:
     assert head.dim_feedforward == 4 * head.hidden_dim
     assert head.dim_dynamic == head.hidden_dim // 4
     assert head.pooler_sampling_ratio == (1 if tier.realtime else 2)
-    assert cfg.input.infer_size == tier.infer_size
+    assert cfg.input.size_budget == tier.size_budget
     # COCO keypoints is person-only; detection/segmentation default to 80.
     assert cfg.model.roi_heads.num_classes == (1 if task == "keypoints" else 80)
     if task == "segmentation":

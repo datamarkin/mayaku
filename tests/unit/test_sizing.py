@@ -6,7 +6,7 @@ import pytest
 
 from mayaku.tuning.sizing import resolve_canvas, snap_max_content
 
-BUDGET = 640 * 640  # 409,600 — the infer_size=640 square-equivalent budget
+BUDGET = 640 * 640  # 409,600 — the size_budget=640 square-equivalent budget
 
 
 @pytest.mark.parametrize(
@@ -52,7 +52,7 @@ def test_portrait_is_transpose_of_landscape() -> None:
 
 
 def test_budget_scales_the_canvas() -> None:
-    # A smaller budget (lower infer_size) → a smaller canvas, same aspect family.
+    # A smaller budget (lower size_budget) → a smaller canvas, same aspect family.
     big = snap_max_content(640 * 640, 16 / 9)
     small = snap_max_content(512 * 512, 16 / 9)
     assert small[0] * small[1] < big[0] * big[1]
@@ -73,7 +73,7 @@ def test_resolve_canvas_uniform_fits_aspect() -> None:
 
 def test_resolve_canvas_reports_grid_headroom() -> None:
     # An awkward aspect that the 128 grid can't fill → budget_use well under 1
-    # (this is what triggers the "raise infer_size" info line).
+    # (this is what triggers the "raise size_budget" info line).
     (h, w), use = resolve_canvas(640, aspect=5.0, uniform=True)
     assert h * w <= 640 * 640
     assert use < 1.0

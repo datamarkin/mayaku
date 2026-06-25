@@ -1,7 +1,7 @@
 """Eager letterbox inference: the host letterbox→infer→un-letterbox contract.
 
 Verifies the un-letterbox postprocess and the Predictor's letterbox path map
-predictions from the fixed ``infer_size`` canvas back to original-image coords —
+predictions from the fixed letterbox canvas back to original-image coords —
 no real detector needed (the geometry is what's under test).
 """
 
@@ -78,12 +78,12 @@ class _FakeDetector(torch.nn.Module):
 
 def test_predictor_letterbox_feeds_square_and_unletterboxes() -> None:
     fake = _FakeDetector([50.0, 200.0, 300.0, 400.0])  # a box on the 640 canvas
-    pred = Predictor(fake, resize_mode="letterbox", infer_size=640, device=torch.device("cpu"))
+    pred = Predictor(fake, resize_mode="letterbox", canvas=640, device=torch.device("cpu"))
 
     img = (np.random.default_rng(0).random((300, 600, 3)) * 255).astype(np.uint8)
     out = pred(img)
 
-    # The model saw a square infer_size input + canvas-sized metadata.
+    # The model saw a square canvas input + canvas-sized metadata.
     assert fake.seen["shape"] == (3, 640, 640)
     assert fake.seen["hw"] == (640, 640)
     # Output is back in original-image space.
@@ -119,7 +119,7 @@ def test_predictor_letterbox_with_real_detector() -> None:
             roi_heads=ROIHeadsConfig(num_classes=2),
             roi_box_head=ROIBoxHeadConfig(num_fc=1, fc_dim=32),
         ),
-        input=InputConfig(resize_mode="letterbox", infer_size=640),
+        input=InputConfig(resize_mode="letterbox", size_budget=640),
     )
     torch.manual_seed(0)
     pred = _predictor(cfg, build_faster_rcnn(cfg).eval())
@@ -137,21 +137,21 @@ def test_predictor_letterbox_with_real_detector() -> None:
 def test_predictor_selects_letterbox_from_cfg() -> None:
     from mayaku.config import InputConfig
 
-    cfg = MayakuConfig(input=InputConfig(resize_mode="letterbox", infer_size=640))
+    cfg = MayakuConfig(input=InputConfig(resize_mode="letterbox", size_budget=640))
     pred = _predictor(cfg, _FakeDetector([0.0, 0.0, 1.0, 1.0]))
     assert pred.resize_mode == "letterbox"
-    # infer_size now holds the *resolved* canvas: budget 640² → 640×640 square.
-    assert pred.infer_size == (640, 640)
+    # pred.canvas now holds the *resolved* canvas: budget 640² → 640×640 square.
+    assert pred.canvas == (640, 640)
 
 
-def test_predictor_selects_rectangle_from_infer_hw() -> None:
+def test_predictor_selects_rectangle_from_canvas_hw() -> None:
     from mayaku.config import InputConfig
 
     cfg = MayakuConfig(
-        input=InputConfig(resize_mode="letterbox", infer_size=640, infer_hw=(512, 768))
+        input=InputConfig(resize_mode="letterbox", size_budget=640, canvas_hw=(512, 768))
     )
     pred = _predictor(cfg, _FakeDetector([0.0, 0.0, 1.0, 1.0]))
-    assert pred.infer_size == (512, 768)  # uniform-aspect → rectangle canvas
+    assert pred.canvas == (512, 768)  # uniform-aspect → rectangle canvas
 
 
 def test_eval_mapper_records_letterbox_transform() -> None:
