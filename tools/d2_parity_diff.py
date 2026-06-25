@@ -40,11 +40,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
-
 
 # --------------------------------------------------------------------------
 # Shared input preprocessor
@@ -147,9 +145,9 @@ def dump_mayaku(weights: Path, config: Path, image: Path, out: Path) -> None:
 
 def dump_d2(pkl: Path, image: Path, out: Path) -> None:
     from detectron2 import model_zoo
+    from detectron2.checkpoint import DetectionCheckpointer
     from detectron2.config import get_cfg
     from detectron2.modeling import build_model
-    from detectron2.checkpoint import DetectionCheckpointer
 
     cfg = get_cfg()
     cfg.merge_from_file(
@@ -230,16 +228,16 @@ def diff(d2_path: Path, mayaku_path: Path) -> None:
         a, b = d2[k], my[k]
         as_, bs_ = tuple(a.shape) if hasattr(a, "shape") else "-", tuple(b.shape) if hasattr(b, "shape") else "-"
         if as_ != bs_:
-            print(f"{k:45s} {str(as_):25s} {str(bs_):25s} {'SHAPE MISMATCH'}")
+            print(f"{k:45s} {as_!s:25s} {bs_!s:25s} {'SHAPE MISMATCH'}")
             continue
         if not torch.is_floating_point(a):
             eq = bool(torch.equal(a, b))
-            print(f"{k:45s} {str(as_):25s} {str(bs_):25s} {'-':>10s} {'==' if eq else '!='}")
+            print(f"{k:45s} {as_!s:25s} {bs_!s:25s} {'-':>10s} {'==' if eq else '!='}")
             continue
         diff_ = (a - b).abs()
         mx = float(diff_.max())
         ok = "✓" if mx < 1e-3 else ("~" if mx < 1e-1 else "✗")
-        print(f"{k:45s} {str(as_):25s} {str(bs_):25s} {mx:10.4e} {ok}")
+        print(f"{k:45s} {as_!s:25s} {bs_!s:25s} {mx:10.4e} {ok}")
 
 
 # --------------------------------------------------------------------------
