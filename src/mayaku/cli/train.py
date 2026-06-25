@@ -70,6 +70,8 @@ from mayaku.tuning import (
     filter_unset,
     walk_leaves,
 )
+from mayaku.tuning.dataset_stats import dataset_aspect
+from mayaku.tuning.sizing import resolve_canvas
 from mayaku.utils import build_sidecar, git_hash
 
 __all__ = ["run_train", "run_train_worker"]
@@ -275,7 +277,21 @@ def run_train(
             rfs = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
                 dicts, repeat_thresh=dataloader.repeat_threshold
             )
-        return {"overrides": overrides, "stats": stats, "repeat_factors": rfs}
+        # Aspect-aware letterbox canvas: resolve (H, W) from the data's native
+        # aspect under the infer_size² budget (uniform → rectangle, diverse →
+        # square). Skipped when the user pinned infer_hw or isn't letterboxing.
+        canvas: tuple[int, int] | None = None
+        canvas_use = 1.0
+        if cfg.input.resize_mode == "letterbox" and cfg.input.infer_hw is None:
+            median, uniform = dataset_aspect(dicts)
+            canvas, canvas_use = resolve_canvas(cfg.input.infer_size, median, uniform)
+        return {
+            "overrides": overrides,
+            "stats": stats,
+            "repeat_factors": rfs,
+            "canvas": canvas,
+            "canvas_use": canvas_use,
+        }
 
     # Load the dataset BEFORE model construction so auto-config can rewrite
     # anchor sizes, ROI head class count, schedule, etc. before any weights
@@ -301,6 +317,13 @@ def run_train(
         cfg = merge_overrides(cfg, derived["overrides"])
         if is_main_process():
             _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths)
+    # Bake the resolved letterbox canvas into cfg so the resize aug (train + eval)
+    # and the checkpoint sidecar all carry the exact (H, W) the model deploys at.
+    if derived["canvas"] is not None:
+        canvas: tuple[int, int] = derived["canvas"]
+        cfg = cfg.model_copy(update={"input": cfg.input.model_copy(update={"infer_hw": canvas})})
+        if is_main_process():
+            _log_canvas(canvas, derived["canvas_use"])
     repeat_factors: torch.Tensor | None = derived["repeat_factors"]
 
     # Surface the most common silent footgun: freezing early backbone stages
@@ -364,8 +387,9 @@ def run_train(
         _fast_forward_scheduler(scheduler, start_iter)
     if world_size > 1:
         model = create_ddp_model(model, dev)
-    # Letterbox training draws one square size per image from train_sizes (the
-    # deploy infer_size at the top of the range); geometry == eval == deploy.
+    # Letterbox training draws one multi-scale canvas per image (down to the
+    # train_scale_min budget fraction, top = the deploy canvas); the resize
+    # builder resolves it from infer_size + infer_hw. geometry == eval == deploy.
     augmentations: list[Augmentation] = [
         build_resize_augmentation(cfg, for_train=True),
         RandomFlip(prob=0.5 if cfg.input.random_flip == "horizontal" else 0.0),
@@ -695,6 +719,21 @@ def _fast_forward_scheduler(scheduler: Any, start_iter: int) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         scheduler.step()
+
+
+def _log_canvas(canvas: tuple[int, int], use: float) -> None:
+    """Report the resolved letterbox canvas + flag a budget-underusing grid gap."""
+    print(
+        f"[letterbox] canvas resolved to {canvas[1]}w x {canvas[0]}h "
+        f"({use:.0%} of the infer_size^2 budget)",
+        flush=True,
+    )
+    if use < 0.80:
+        print(
+            f"[letterbox] canvas uses only {use:.0%} of the budget (128-grid gap) — "
+            "raise infer_size for more resolution.",
+            flush=True,
+        )
 
 
 def _log_auto_config_report(
