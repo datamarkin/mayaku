@@ -1,7 +1,7 @@
 """Aspect-aware input sizing under a compute budget.
 
-The keystone of native-size training/inference. ``infer_size`` is the *budget
-dial* — the square-equivalent side, so the compute budget is ``infer_size**2``
+The keystone of native-size training/inference. ``size_budget`` is the *budget
+dial* — the square-equivalent side, so the compute budget is ``size_budget**2``
 pixels. :func:`snap_max_content` resolves the actual ``(H, W)`` canvas that
 maximizes real letterbox content for the data's native aspect while staying
 *under* that budget, on a stride-aligned grid.
@@ -57,7 +57,7 @@ def multi_scale_canvases(
 
 
 def resolve_canvas(
-    infer_size: int,
+    size_budget: int,
     aspect: float,
     uniform: bool,
     *,
@@ -65,32 +65,32 @@ def resolve_canvas(
 ) -> tuple[tuple[int, int], float]:
     """Resolve the train/deploy canvas from the budget dial + data aspect.
 
-    ``infer_size`` is the budget dial (``budget = infer_size ** 2``). Uniform-aspect
+    ``size_budget`` is the budget dial (``budget = size_budget ** 2``). Uniform-aspect
     data fits a rectangle at ``aspect`` (no pad waste); diverse data falls back to
     a square (``aspect = 1.0``) — robust to any shape.
 
-    Returns ``((H, W), budget_use)`` where ``budget_use = H * W / infer_size ** 2``
+    Returns ``((H, W), budget_use)`` where ``budget_use = H * W / size_budget ** 2``
     in ``(0, 1]`` — a value well under 1 means the 128-grid left headroom and a
-    larger ``infer_size`` would buy more resolution.
+    larger ``size_budget`` would buy more resolution.
     """
-    budget = infer_size * infer_size
+    budget = size_budget * size_budget
     canvas = snap_max_content(budget, aspect if uniform else 1.0, align=align)
     return canvas, (canvas[0] * canvas[1]) / budget
 
 
 def resolve_deploy_canvas(
-    infer_hw: tuple[int, int] | None,
-    infer_size: int,
+    canvas_hw: tuple[int, int] | None,
+    size_budget: int,
     *,
     align: int = 128,
 ) -> tuple[int, int]:
-    """The fixed deploy/eval canvas: the pinned ``infer_hw`` (resolved at train
-    time or set manually), else the largest aligned square in the ``infer_size**2``
+    """The fixed deploy/eval canvas: the pinned ``canvas_hw`` (resolved at train
+    time or set manually), else the largest aligned square in the ``size_budget**2``
     budget. The single source for this fallback (resize builder + Predictor)."""
     return (
-        infer_hw
-        if infer_hw is not None
-        else snap_max_content(infer_size * infer_size, 1.0, align=align)
+        canvas_hw
+        if canvas_hw is not None
+        else snap_max_content(size_budget * size_budget, 1.0, align=align)
     )
 
 
@@ -104,7 +104,7 @@ def snap_max_content(
     """Resolve the ``(H, W)`` canvas that maximizes letterbox content under budget.
 
     Args:
-        budget: Max canvas area in pixels (``infer_size ** 2``). The result never
+        budget: Max canvas area in pixels (``size_budget ** 2``). The result never
             exceeds it (``H * W <= budget``).
         aspect: Data aspect ``W / H`` (>1 landscape, <1 portrait, 1 square).
         align: Both sides are multiples of this. 128 is torch.compile-safe and

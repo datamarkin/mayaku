@@ -55,6 +55,12 @@ class Predictor:
         model: A built and loaded detector (e.g.
             :class:`mayaku.models.detectors.FasterRCNN`). Will be put
             into eval mode.
+        resize_mode: ``"shortest_edge"`` (variable resize) or
+            ``"letterbox"`` (fixed-canvas deploy geometry). Defaults to
+            ``"shortest_edge"``.
+        canvas: The resolved letterbox canvas — a scalar ``S`` (→ ``S×S``)
+            or an ``(H, W)`` rectangle. Used only when
+            ``resize_mode="letterbox"``.
         min_size_test: Short edge of the resized image (pixels).
             Defaults to ``800`` (`spec §6.1`).
         max_size_test: Maximum long-edge length (pixels). Defaults to
@@ -69,7 +75,7 @@ class Predictor:
         model: nn.Module,
         *,
         resize_mode: str = "shortest_edge",
-        infer_size: int | tuple[int, int] = 640,
+        canvas: int | tuple[int, int] = 640,
         min_size_test: int = 800,
         max_size_test: int = 1333,
         device: torch.device | None = None,
@@ -80,12 +86,12 @@ class Predictor:
             raise ValueError(
                 f"resize_mode must be 'shortest_edge' or 'letterbox'; got {resize_mode!r}"
             )
-        # ``infer_size`` is the resolved letterbox canvas: a scalar S (→ S×S) or
+        # ``canvas`` is the resolved letterbox canvas: a scalar S (→ S×S) or
         # an (H, W) rectangle. It's passed straight to LetterboxTransform.
         if resize_mode == "letterbox":
-            dims = (infer_size, infer_size) if isinstance(infer_size, int) else infer_size
+            dims = (canvas, canvas) if isinstance(canvas, int) else canvas
             if dims[0] <= 0 or dims[1] <= 0:
-                raise ValueError(f"infer_size canvas must be > 0; got {infer_size}")
+                raise ValueError(f"canvas must be > 0; got {canvas}")
         if resize_mode == "shortest_edge" and (min_size_test <= 0 or max_size_test <= 0):
             raise ValueError(
                 f"min_size_test / max_size_test must be > 0; got ({min_size_test}, {max_size_test})"
@@ -99,7 +105,7 @@ class Predictor:
             )
         self.model = model.eval()
         self.resize_mode = resize_mode
-        self.infer_size = infer_size
+        self.canvas = canvas
         self.min_size_test = min_size_test
         self.max_size_test = max_size_test
         self.device = device or _resolve_device(model)
@@ -136,11 +142,11 @@ class Predictor:
 
         inp = cfg.input
         # Resolved letterbox canvas (shared with build_resize_augmentation).
-        canvas: int | tuple[int, int] = resolve_deploy_canvas(inp.infer_hw, inp.infer_size)
+        canvas: int | tuple[int, int] = resolve_deploy_canvas(inp.canvas_hw, inp.size_budget)
         return cls(
             model,
             resize_mode=inp.resize_mode,
-            infer_size=canvas,
+            canvas=canvas,
             min_size_test=inp.min_size_test,
             max_size_test=inp.max_size_test,
             gpu_preprocess=gpu_preprocess,
@@ -167,7 +173,7 @@ class Predictor:
             # S or an (H, W) rectangle), run on it, un-letterbox host-side.
             # Passing height/width = the canvas dims makes the model emit boxes in
             # canvas space (identity rescale) so the transform's inverse is exact.
-            transform = LetterboxTransform(h, w, self.infer_size)
+            transform = LetterboxTransform(h, w, self.canvas)
             img_tensor = self._to_tensor(transform.apply_image(arr))
             instances = self._forward(
                 [{"image": img_tensor, "height": transform.out_h, "width": transform.out_w}]

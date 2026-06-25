@@ -278,10 +278,10 @@ def run_train(
                 dicts, repeat_thresh=dataloader.repeat_threshold
             )
         # Aspect-aware letterbox canvas: ALWAYS resolved from *this* run's data
-        # (uniform → rectangle, diverse → square) under the infer_size² budget.
+        # (uniform → rectangle, diverse → square) under the size_budget² budget.
         # Re-resolving every train is what lets fine-tuning adapt: a 1:1 base model
         # fine-tuned on 16:9 data gets a 16:9 canvas, not the base's inherited
-        # square. ``infer_hw`` is a deploy artifact of training, not a user input.
+        # square. ``canvas_hw`` is a deploy artifact of training, not a user input.
         canvas: tuple[int, int] | None = None
         canvas_use = 1.0
         if cfg.input.resize_mode == "letterbox":
@@ -291,7 +291,7 @@ def run_train(
                 median, uniform = stats.aspect_median, stats.is_uniform_aspect
             else:
                 median, uniform = dataset_aspect(dicts)
-            canvas, canvas_use = resolve_canvas(cfg.input.infer_size, median, uniform)
+            canvas, canvas_use = resolve_canvas(cfg.input.size_budget, median, uniform)
         return {
             "overrides": overrides,
             "stats": stats,
@@ -328,7 +328,7 @@ def run_train(
     # and the checkpoint sidecar all carry the exact (H, W) the model deploys at.
     if derived["canvas"] is not None:
         canvas: tuple[int, int] = derived["canvas"]
-        cfg = cfg.model_copy(update={"input": cfg.input.model_copy(update={"infer_hw": canvas})})
+        cfg = cfg.model_copy(update={"input": cfg.input.model_copy(update={"canvas_hw": canvas})})
         if is_main_process():
             _log_canvas(canvas, derived["canvas_use"])
     repeat_factors: torch.Tensor | None = derived["repeat_factors"]
@@ -396,7 +396,7 @@ def run_train(
         model = create_ddp_model(model, dev)
     # Letterbox training draws one multi-scale canvas per image (down to the
     # train_scale_min budget fraction, top = the deploy canvas); the resize
-    # builder resolves it from infer_size + infer_hw. geometry == eval == deploy.
+    # builder resolves it from size_budget + canvas_hw. geometry == eval == deploy.
     augmentations: list[Augmentation] = [
         build_resize_augmentation(cfg, for_train=True),
         RandomFlip(prob=0.5 if cfg.input.random_flip == "horizontal" else 0.0),
@@ -732,13 +732,13 @@ def _log_canvas(canvas: tuple[int, int], use: float) -> None:
     """Report the resolved letterbox canvas + flag a budget-underusing grid gap."""
     print(
         f"[letterbox] canvas resolved to {canvas[1]}w x {canvas[0]}h "
-        f"({use:.0%} of the infer_size^2 budget)",
+        f"({use:.0%} of the size_budget^2 budget)",
         flush=True,
     )
     if use < 0.80:
         print(
             f"[letterbox] canvas uses only {use:.0%} of the budget (128-grid gap) — "
-            "raise infer_size for more resolution.",
+            "raise size_budget for more resolution.",
             flush=True,
         )
 
@@ -834,7 +834,7 @@ def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoa
             keep_keypoints=False,
         ),
     )
-    # In-train periodic eval matches deploy: letterbox to infer_size when the
+    # In-train periodic eval matches deploy: letterbox to size_budget when the
     # config uses it (the evaluator un-letterboxes via the recorded transform).
     mapper = DatasetMapper(
         [build_resize_augmentation(cfg, for_train=False)],

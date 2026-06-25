@@ -33,21 +33,21 @@ def build_resize_augmentation(cfg: MayakuConfig, *, for_train: bool) -> Augmenta
     """Pick the resize augmentation from ``cfg.input.resize_mode``.
 
     ``letterbox`` → aspect-preserving resize+pad to the resolved canvas under the
-    ``infer_size**2`` budget (train: multi-scale down to ``train_scale_min``;
-    inference/eval: the single deploy canvas). The canvas is ``infer_hw`` when
+    ``size_budget**2`` budget (train: multi-scale down to ``train_scale_min``;
+    inference/eval: the single deploy canvas). The canvas is ``canvas_hw`` when
     resolved (data-health / manual), else the largest aligned square in budget.
     ``shortest_edge`` → the legacy variable resize. One place so train, eval, and
     the in-train periodic eval can't drift in how they read the config.
     """
     inp = cfg.input
     if inp.resize_mode == "letterbox":
-        budget = inp.infer_size * inp.infer_size
-        aspect = inp.infer_hw[1] / inp.infer_hw[0] if inp.infer_hw is not None else 1.0
+        budget = inp.size_budget * inp.size_budget
+        aspect = inp.canvas_hw[1] / inp.canvas_hw[0] if inp.canvas_hw is not None else 1.0
         if for_train:
             return LetterboxResize(
                 multi_scale_canvases(budget, aspect, scale_min=inp.train_scale_min)
             )
-        return LetterboxResize([resolve_deploy_canvas(inp.infer_hw, inp.infer_size)])
+        return LetterboxResize([resolve_deploy_canvas(inp.canvas_hw, inp.size_budget)])
     if for_train:
         return ResizeShortestEdge(
             inp.min_size_train,

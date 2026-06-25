@@ -126,8 +126,8 @@ def unletterbox_instances(
 ) -> Instances:
     """Map predictions from the letterbox canvas back to the original image.
 
-    The model runs on the ``infer_size × infer_size`` letterbox canvas and emits
-    boxes/keypoints in *that* space (``instances.image_size`` is the canvas).
+    The model runs on the fixed letterbox canvas and emits boxes/keypoints in
+    *that* space (``instances.image_size`` is the canvas).
     ``transform`` is the :class:`LetterboxTransform` that produced the canvas;
     its uniform ``scale`` + ``pad`` offset are inverted here to recover original
     image coordinates — ``c → (c − pad) / scale``.

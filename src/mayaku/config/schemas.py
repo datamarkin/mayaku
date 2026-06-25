@@ -588,10 +588,10 @@ class InputConfig(_BaseModel):
     min_size_test: Annotated[int, Field(gt=0)] = 800
     max_size_test: Annotated[int, Field(gt=0)] = 1333
     # The COMPUTE BUDGET DIAL for fixed-size letterbox inference: the compute
-    # budget is ``infer_size ** 2`` pixels. The actual canvas is *derived* — the
+    # budget is ``size_budget ** 2`` pixels. The actual canvas is *derived* — the
     # largest 128-aligned ``(H, W)`` under that budget at the data's native aspect
     # (square for diverse data). Raise/lower it to trade speed for resolution.
-    infer_size: Annotated[int, Field(gt=0)] = 640
+    size_budget: Annotated[int, Field(gt=0)] = 640
     # Resolved letterbox canvas ``(H, W)`` — a DEPLOY ARTIFACT, not a user input:
     # training re-resolves it from *this* run's data every time (so fine-tuning a
     # 1:1 base on 16:9 data adapts to a 16:9 canvas) and bakes it into the sidecar
@@ -599,7 +599,7 @@ class InputConfig(_BaseModel):
     # overwritten at train. ``None`` → deploy falls back to the largest aligned
     # square in budget. Both dims are FPN-stride (32) multiples. See
     # ``mayaku.tuning.sizing``.
-    infer_hw: tuple[int, int] | None = None
+    canvas_hw: tuple[int, int] | None = None
     # How inference/eval resize an image to the network input:
     #   "shortest_edge" — variable resize (ResizeShortestEdge), the legacy path.
     #   "letterbox"     — aspect-preserving resize + pad to the resolved canvas,
@@ -663,16 +663,16 @@ class InputConfig(_BaseModel):
     # because the config can't see the model's stride; it holds for all current
     # ResNet/ConvNeXt FPN backbones.)
     @model_validator(mode="after")
-    def _check_infer_size_stride(self) -> InputConfig:
-        if self.infer_size % 32 != 0:
+    def _check_size_budget_stride(self) -> InputConfig:
+        if self.size_budget % 32 != 0:
             raise ValueError(
-                f"infer_size must be a multiple of 32 (the FPN max stride); got "
-                f"{self.infer_size}. Use e.g. 640, 672, …, 800."
+                f"size_budget must be a multiple of 32 (the FPN max stride); got "
+                f"{self.size_budget}. Use e.g. 640, 672, …, 800."
             )
-        if self.infer_hw is not None and any(d % 32 != 0 for d in self.infer_hw):
+        if self.canvas_hw is not None and any(d % 32 != 0 for d in self.canvas_hw):
             raise ValueError(
-                f"infer_hw dims must each be a multiple of 32 (the FPN max stride); "
-                f"got {self.infer_hw}. Resolve it via mayaku.tuning.snap_max_content "
+                f"canvas_hw dims must each be a multiple of 32 (the FPN max stride); "
+                f"got {self.canvas_hw}. Resolve it via mayaku.tuning.snap_max_content "
                 "(128-aligned), or use 32-multiples."
             )
         return self

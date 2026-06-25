@@ -139,7 +139,7 @@ def run_eval(
         keep_keypoints=False,
     )
 
-    # Letterbox eval measures at the fixed deploy size (infer_size); the mapper
+    # Letterbox eval measures at the fixed deploy size (size_budget); the mapper
     # records the transform so the evaluator un-letterboxes.
     mapper = DatasetMapper(
         [build_resize_augmentation(cfg, for_train=False)],
