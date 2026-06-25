@@ -3,7 +3,7 @@
 
 The 18 family configs (6 tiers × {detection, segmentation, keypoints}) are *derived* from
 the :data:`TIERS` table below, not hand-maintained. A tier supplies five inputs
-— backbone, ``hidden_dim``, ``num_stages``, ``infer_size``, and whether it is a
+— backbone, ``hidden_dim``, ``num_stages``, ``size_budget``, and whether it is a
 real-time tier — and every other family-varying field is computed from them so
 the invariants can never drift:
 
@@ -47,7 +47,7 @@ class Tier:
     backbone: str  # convnext_femto | _nano | _tiny | _base
     hidden_dim: int  # 128 (real-time) | 256 (accuracy)
     num_stages: int  # QGN cascade depth
-    infer_size: int  # fixed square letterbox size for inference + export
+    size_budget: int  # fixed square letterbox size for inference + export
     realtime: bool  # True -> pooler_sampling_ratio 1; False -> 0
     desc: str  # one-phrase positioning, used in the header comment
     params: str  # detection param estimate, used in the header comment
@@ -155,7 +155,7 @@ def render(tier: Tier, task: str) -> str:
         "\n"
         "input:\n"
         "  resize_mode: letterbox\n"
-        f"  infer_size: {tier.infer_size}   # compute-budget dial (canvas = largest 128-aligned (H,W) under infer_size^2)\n"
+        f"  size_budget: {tier.size_budget}   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)\n"
         "  train_scale_min: 0.5   # multi-scale letterbox train: budget fraction floor → full deploy canvas\n"
         "  random_flip: horizontal\n"
         "  color_jitter_enabled: true\n"
