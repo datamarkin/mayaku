@@ -277,8 +277,10 @@ class ONNXExporter:
         )
 
         def _order(boxes: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
-            # np.lexsort is stubbed as Any in this numpy version.
-            return np.lexsort((boxes[:, 3], boxes[:, 2], boxes[:, 1], boxes[:, 0]))  # type: ignore[no-any-return]
+            # np.lexsort's return type drifts across numpy versions (Any vs typed);
+            # np.asarray pins it without a version-specific ignore/cast.
+            keys = (boxes[:, 3], boxes[:, 2], boxes[:, 1], boxes[:, 0])
+            return np.asarray(np.lexsort(keys), dtype=np.intp)
 
         eo, oo = _order(eager_np["boxes"]), _order(ort_np["boxes"])
 
