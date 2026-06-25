@@ -37,7 +37,7 @@ model:
 
 input:
   resize_mode: letterbox
-  infer_size: 800   # compute-budget dial (canvas = largest 128-aligned (H,W) under infer_size^2)
+  size_budget: 800   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)
   train_scale_min: 0.5   # multi-scale letterbox train: budget fraction floor → full deploy canvas
   random_flip: horizontal
   color_jitter_enabled: true
