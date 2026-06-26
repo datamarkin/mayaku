@@ -605,11 +605,14 @@ class InputConfig(_BaseModel):
     #                     the fixed-size deploy geometry (host un-letterboxes preds).
     # The mayaku-* family uses "letterbox"; kept switchable as the proven fallback.
     resize_mode: Literal["shortest_edge", "letterbox"] = "shortest_edge"
-    # Multi-scale letterbox training: the smallest budget fraction (one canvas
-    # drawn per iteration, from this fraction up to the full deploy canvas). The
-    # deploy canvas is always the top — train geometry == deploy. Derived from the
-    # budget; replaces the old explicit ``train_sizes`` list.
-    train_scale_min: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
+    # Multi-scale letterbox training: the smallest budget (AREA) fraction; one
+    # canvas is drawn per image, from this fraction up to the full deploy canvas
+    # on a 32-aligned grid. The deploy canvas is always the top — train geometry
+    # == deploy. Default 0.64 reproduces Detectron2's proven scale envelope: D2
+    # trains short-edge [640, 800] and tests at 800, i.e. a smallest scale of
+    # (640/800)**2 = 0.64 of the deploy AREA. Replaces the old explicit
+    # ``train_sizes`` list.
+    train_scale_min: Annotated[float, Field(gt=0.0, le=1.0)] = 0.64
     mask_format: Literal["polygon", "bitmask"] = "polygon"
     random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 

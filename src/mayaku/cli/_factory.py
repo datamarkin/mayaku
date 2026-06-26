@@ -41,13 +41,12 @@ def build_resize_augmentation(cfg: MayakuConfig, *, for_train: bool) -> Augmenta
     """
     inp = cfg.input
     if inp.resize_mode == "letterbox":
-        budget = inp.size_budget * inp.size_budget
-        aspect = inp.canvas_hw[1] / inp.canvas_hw[0] if inp.canvas_hw is not None else 1.0
+        # The 128-aligned deploy/export canvas anchors both paths: eval ships it
+        # verbatim, training pins it as the top of a finer 32-aligned ladder.
+        deploy = resolve_deploy_canvas(inp.canvas_hw, inp.size_budget)
         if for_train:
-            return LetterboxResize(
-                multi_scale_canvases(budget, aspect, scale_min=inp.train_scale_min)
-            )
-        return LetterboxResize([resolve_deploy_canvas(inp.canvas_hw, inp.size_budget)])
+            return LetterboxResize(multi_scale_canvases(deploy, scale_min=inp.train_scale_min))
+        return LetterboxResize([deploy])
     if for_train:
         return ResizeShortestEdge(
             inp.min_size_train,
