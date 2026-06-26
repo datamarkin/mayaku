@@ -55,14 +55,22 @@ def test_freeze_warning_suppressed_by_weights_path(
 ) -> None:
     """``cfg.model.backbone.weights_path`` set → warning does NOT fire.
 
-    Uses the toy ResNet config; the ResNet builder currently ignores
-    ``weights_path`` (only ConvNeXt consumes it), so we can supply any
-    non-None placeholder without the model trying to load a file. The
-    predicate under test is purely the boolean check in run_train.
+    Uses the toy ResNet config with a non-None ``weights_path`` placeholder:
+    the ResNet builder ignores it (only ConvNeXt consumes it), so nothing
+    tries to load the file. The predicate under test is purely the boolean
+    check in run_train.
+
+    ``auto_config`` is disabled here on purpose. The schema rejects
+    ``weights_path`` on a ResNet backbone (it's ConvNeXt-only), so this
+    placeholder config is only legal because nothing re-validates it. With
+    auto-config on, the structural ``num_classes`` derivation would
+    ``merge_overrides`` (which re-validates) and trip that rule. Disabling it
+    keeps the test focused on the freeze-warning predicate, not auto-config.
     """
-    cfg = _with_backbone_weights_path(
-        cast(MayakuConfig, toy_workspace["cfg_obj"]),
-        "/placeholder/not-loaded-by-resnet.pth",
+    base = cast(MayakuConfig, toy_workspace["cfg_obj"])
+    cfg = _with_backbone_weights_path(base, "/placeholder/not-loaded-by-resnet.pth")
+    cfg = cfg.model_copy(
+        update={"auto_config": cfg.auto_config.model_copy(update={"enabled": False})}
     )
     assert cfg.model.backbone.freeze_at >= 1
 

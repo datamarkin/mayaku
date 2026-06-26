@@ -9,6 +9,7 @@ keypoints.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -381,3 +382,53 @@ def test_coco_evaluator_writes_results_json_when_output_dir_set(
     assert written.exists()
     parsed = json.loads(written.read_text())
     assert isinstance(parsed, list) and len(parsed) == 2  # one record per image
+
+
+# ---------------------------------------------------------------------------
+# Train/val category alignment (C7): decode predictions by NAME, not position
+# ---------------------------------------------------------------------------
+
+
+def _write_gt(tmp_path: Path, categories: list[dict[str, Any]]) -> Path:
+    """A minimal (annotation-free) COCO GT JSON with the given categories."""
+    coco = {
+        "info": {},
+        "images": [{"id": 1, "file_name": "i.png", "height": 64, "width": 64}],
+        "categories": categories,
+        "annotations": [],
+    }
+    path = tmp_path / "gt_custom.json"
+    path.write_text(json.dumps(coco))
+    return path
+
+
+def test_class_id_map_matches_by_name_under_id_renumbering(tmp_path: Path) -> None:
+    # GT numbers its categories so the positional sort disagrees with the train
+    # order: sorted ids [2, 5] -> positional {0:2(dog), 1:5(cat)}, but the model
+    # trained index 0 = cat, index 1 = dog. Name-based decode must follow the
+    # train identity, not the GT's id order.
+    gt = _write_gt(tmp_path, [{"id": 5, "name": "cat"}, {"id": 2, "name": "dog"}])
+    ev = COCOEvaluator(gt, class_names=["cat", "dog"])
+    assert ev._get_class_id_map() == {0: 5, 1: 2}
+    # Without class_names the old positional remap maps the other way — exactly
+    # the silent misalignment C7 describes.
+    assert COCOEvaluator(gt)._get_class_id_map() == {0: 2, 1: 5}
+
+
+def test_class_id_map_warns_and_drops_train_class_absent_from_gt(tmp_path: Path) -> None:
+    # The model knows a class the eval GT lacks → that class is warned about and
+    # dropped (omitted from the map), while the present class still maps. Dropped
+    # predictions are scored as undetected — never silently mis-scored.
+    gt = _write_gt(tmp_path, [{"id": 1, "name": "cat"}, {"id": 2, "name": "dog"}])
+    ev = COCOEvaluator(gt, class_names=["cat", "dog", "bird"])
+    with pytest.warns(UserWarning, match="bird"):
+        id_map = ev._get_class_id_map()
+    assert id_map == {0: 1, 1: 2}  # cat, dog mapped; bird (index 2) dropped
+
+
+def test_class_id_map_no_warning_when_all_classes_present(tmp_path: Path) -> None:
+    gt = _write_gt(tmp_path, [{"id": 1, "name": "cat"}, {"id": 2, "name": "dog"}])
+    ev = COCOEvaluator(gt, class_names=["cat", "dog"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning would raise
+        assert ev._get_class_id_map() == {0: 1, 1: 2}

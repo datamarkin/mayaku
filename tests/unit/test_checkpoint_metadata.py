@@ -16,6 +16,7 @@ from torch import nn
 
 from mayaku.engine import PeriodicCheckpointer
 from mayaku.utils import load_checkpoint
+from mayaku.utils.checkpoint import class_names_from_checkpoint
 
 
 def _save_once(model: nn.Module, out: Path, **kwargs: Any) -> Path:
@@ -45,6 +46,19 @@ def test_load_checkpoint_sidecar_roundtrip(tmp_path: Path) -> None:
     sidecar = {"schema_version": 1, "config": {"model": {"meta_architecture": "faster_rcnn"}}}
     path = _save_once(nn.Linear(2, 2), tmp_path / "run", metadata=sidecar)
     assert load_checkpoint(path)[0] == sidecar
+
+
+def test_class_names_from_checkpoint_roundtrip(tmp_path: Path) -> None:
+    # The evaluator reads the model's training class identity from here (C7).
+    sidecar = {"schema_version": 1, "class_names": ["cat", "dog"]}
+    path = _save_once(nn.Linear(2, 2), tmp_path / "run", metadata=sidecar)
+    assert class_names_from_checkpoint(path) == ["cat", "dog"]
+
+
+def test_class_names_from_checkpoint_absent_is_none(tmp_path: Path) -> None:
+    # No sidecar (or no names) → None, so the evaluator falls back to positional.
+    path = _save_once(nn.Linear(2, 2), tmp_path / "run")
+    assert class_names_from_checkpoint(path) is None
 
 
 def test_load_checkpoint_sidecar_absent_is_none(tmp_path: Path) -> None:

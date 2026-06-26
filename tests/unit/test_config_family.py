@@ -51,8 +51,10 @@ def test_derived_invariants_hold(task: str, tier) -> None:
     cfg = configs.load(f"{task}/mayaku-{tier.name}")
     head = cfg.model.uniquery_head
     assert cfg.model.fpn.out_channels == head.hidden_dim == tier.hidden_dim
-    assert head.dim_feedforward == 4 * head.hidden_dim
-    assert head.dim_dynamic == head.hidden_dim // 4
+    # Head capacity is ABSOLUTE (Sparse R-CNN), not scaled with hidden_dim — the
+    # 4*hidden / hidden//4 ratio starved the h128 head (see gen_configs.render).
+    assert head.dim_feedforward == 2048
+    assert head.dim_dynamic == 64
     assert head.pooler_sampling_ratio == (1 if tier.realtime else 2)
     assert cfg.input.size_budget == tier.size_budget
     # COCO keypoints is person-only; detection/segmentation default to 80.
