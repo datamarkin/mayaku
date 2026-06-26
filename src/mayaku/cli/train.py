@@ -62,6 +62,7 @@ from mayaku.engine import (
     get_world_size,
     init_from_env_if_needed,
     is_main_process,
+    resolve_schedule,
 )
 from mayaku.tuning import (
     analyze_dataset,
@@ -86,7 +87,7 @@ def run_train(
     weights: Path | None = None,
     pretrained_backbone: bool = False,
     device: str | None = None,
-    max_iter: int | None = None,
+    num_epochs: int | None = None,
     log_period: int = 20,
     val_json: Path | None = None,
     val_image_root: Path | None = None,
@@ -129,7 +130,7 @@ def run_train(
     # auto-config), and — when ``config`` is a YAML path — the leaves of
     # that YAML. A constructed ``MayakuConfig`` carries no such record, so
     # only the caller-forwarded set protects it.
-    # Fresh copy so the later ``.add("solver.max_iter")`` never mutates the
+    # Fresh copy so the later ``.add("solver.num_epochs")`` never mutates the
     # caller's set.
     user_set_paths = set(user_set_paths) if user_set_paths is not None else set()
     if isinstance(config, MayakuConfig):
@@ -146,13 +147,13 @@ def run_train(
         user_set_paths |= collect_set_paths(raw_dict)
         cfg = MayakuConfig.model_validate(raw_dict)
 
-    if max_iter is not None:
+    if num_epochs is not None:
         cfg = cfg.model_copy(
-            update={"solver": cfg.solver.model_copy(update={"max_iter": max_iter})}
+            update={"solver": cfg.solver.model_copy(update={"num_epochs": num_epochs})}
         )
-        # CLI --max-iter is an explicit user choice; preserve it through
-        # auto-config even though the value didn't come from the YAML.
-        user_set_paths.add("solver.max_iter")
+        # An explicit --epochs is a user choice; preserve it through auto-config
+        # even though the value didn't come from the YAML.
+        user_set_paths.add("solver.num_epochs")
 
     # Periodic eval requires both the dataset paths *and* an enabled
     # period; rejecting the half-configured cases up front means users
@@ -269,7 +270,7 @@ def run_train(
                 resize_short_edge=cfg.input.min_size_test,
                 resize_max_edge=cfg.input.max_size_test,
             )
-            proposed = derive_overrides(stats, cfg, user_set_paths)
+            proposed = derive_overrides(stats, cfg)
             overrides = filter_unset(proposed, user_set_paths) or None
         # RFS repeat factors, decided against the *post*-auto-config dataloader
         # (auto-config may select RepeatFactorTrainingSampler). Computed on
@@ -328,6 +329,18 @@ def run_train(
         cfg = merge_overrides(cfg, derived["overrides"])
         if is_main_process():
             _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths)
+
+    # Resolve the epoch budget to iteration counts now that the dataset size is
+    # known. One epoch = ceil(num_images / global_batch) optimizer steps, where
+    # global_batch spans grad-accum and all DDP ranks. The scheduler, LLRD
+    # snapshot milestones, and the trainer loop all run on these resolved ints
+    # (max_iter / warmup_iters are derived, not config fields).
+    max_iter, warmup_iters = resolve_schedule(
+        cfg.solver.num_epochs,
+        len(dataset_dicts),
+        cfg.solver.effective_batch(world_size),
+        cfg.solver.warmup_fraction,
+    )
     # Bake the resolved letterbox canvas into cfg so the resize aug (train + eval)
     # and the checkpoint sidecar all carry the exact (H, W) the model deploys at.
     if derived["canvas"] is not None:
@@ -387,7 +400,9 @@ def run_train(
     # scheduler captures base LRs from the freshly-built optimizer, so it
     # must be constructed *before* the resumed optimizer state is loaded.
     optimizer = build_optimizer(model, cfg.solver)
-    scheduler = build_lr_scheduler(optimizer, cfg.solver)
+    scheduler = build_lr_scheduler(
+        optimizer, cfg.solver, max_iter=max_iter, warmup_iters=warmup_iters
+    )
     if resume_ckpt is not None:
         if "optimizer" in resume_ckpt:
             optimizer.load_state_dict(resume_ckpt["optimizer"])
@@ -593,11 +608,7 @@ def run_train(
         # through warmup + cosine. Only meaningful when LLRD actually
         # splits the optimizer into per-layer groups.
         if cfg.solver.llrd_enabled:
-            milestones = (
-                cfg.solver.warmup_iters,
-                cfg.solver.max_iter // 2,
-                cfg.solver.max_iter,
-            )
+            milestones = (warmup_iters, max_iter // 2, max_iter)
             hooks.append(LRSnapshotHook(optimizer, milestones))
 
     # EMA — register AFTER the live-model checkpointer so the EMA update
@@ -657,7 +668,7 @@ def run_train(
         eval_model = ema.shadow if ema is not None else unwrapped_model
         hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
-    trainer.train(start_iter=start_iter, max_iter=cfg.solver.max_iter)
+    trainer.train(start_iter=start_iter, max_iter=max_iter)
 
 
 def run_train_worker(
@@ -668,7 +679,7 @@ def run_train_worker(
     weights: Path | None,
     pretrained_backbone: bool,
     device: str | None,
-    max_iter: int | None,
+    num_epochs: int | None,
     log_period: int,
     val_json: Path | None,
     val_image_root: Path | None,
@@ -689,7 +700,7 @@ def run_train_worker(
         weights=weights,
         pretrained_backbone=pretrained_backbone,
         device=device,
-        max_iter=max_iter,
+        num_epochs=num_epochs,
         log_period=log_period,
         val_json=val_json,
         val_image_root=val_image_root,

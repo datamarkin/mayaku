@@ -1,6 +1,6 @@
 """Bundled model configurations — `pip install mayaku` ships them with the wheel.
 
-The 12 zoo configs are kept inside the package so installed users don't
+The zoo configs are kept inside the package so installed users don't
 need to clone the repo just to load a model. Every config name is unique
 across the three tasks (``faster_*`` is detection, ``mask_*`` is
 segmentation, ``keypoint_*`` is keypoints), so the short name alone is
@@ -9,21 +9,21 @@ enough — the resolver infers the task directory.
 Three equivalent ways to get a config path:
 
     >>> from mayaku import configs
-    >>> configs.path("faster_rcnn_R_50_FPN_3x")
-    PosixPath('.../mayaku/configs/detection/faster_rcnn_R_50_FPN_3x.yaml')
-    >>> configs.faster_rcnn_R_50_FPN_3x          # attribute form
-    PosixPath('.../mayaku/configs/detection/faster_rcnn_R_50_FPN_3x.yaml')
-    >>> configs.path("detection/faster_rcnn_R_50_FPN_3x")  # qualified form
-    PosixPath('.../mayaku/configs/detection/faster_rcnn_R_50_FPN_3x.yaml')
+    >>> configs.path("faster_rcnn_R_50_FPN")
+    PosixPath('.../mayaku/configs/detection/faster_rcnn_R_50_FPN.yaml')
+    >>> configs.faster_rcnn_R_50_FPN          # attribute form
+    PosixPath('.../mayaku/configs/detection/faster_rcnn_R_50_FPN.yaml')
+    >>> configs.path("detection/faster_rcnn_R_50_FPN")  # qualified form
+    PosixPath('.../mayaku/configs/detection/faster_rcnn_R_50_FPN.yaml')
 
 Or skip the path step and load directly:
 
-    >>> cfg = configs.load("faster_rcnn_R_50_FPN_3x")  # → MayakuConfig
+    >>> cfg = configs.load("faster_rcnn_R_50_FPN")  # → MayakuConfig
 
 List everything that ships:
 
     >>> configs.list_all()
-    ['detection/faster_rcnn_R_101_FPN_3x', 'detection/faster_rcnn_R_50_FPN_1x', ...]
+    ['detection/faster_rcnn_R_101_FPN', 'detection/faster_rcnn_R_50_FPN', ...]
 """
 
 from __future__ import annotations

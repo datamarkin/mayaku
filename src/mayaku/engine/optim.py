@@ -1,25 +1,16 @@
 """Optimizer + LR scheduler builders.
 
-Mirrors `DETECTRON2_TECHNICAL_SPEC.md` §3 (`solver/build.py`,
-`solver/lr_scheduler.py`) for the in-scope SGD + warmup-multistep /
-warmup-cosine combination.
-
-Key behaviours preserved from the upstream defaults:
+Key behaviours:
 
 * **Per-parameter weight-decay groups.** Norm parameters
   (`BatchNorm`/`LayerNorm`/`GroupNorm`/`FrozenBatchNorm`) get
   ``weight_decay_norm`` (0 by default), everything else gets
-  ``weight_decay`` (1e-4 by default). This is the standard practice
-  for ResNet-FPN training and is what the spec §6.1 defaults imply.
-* **`WarmupMultiStepLR`** linearly warms up for ``warmup_iters``
-  iterations from ``warmup_factor * base_lr`` to ``base_lr``, then
-  multiplies by ``gamma`` at every step in ``steps``.
-* **`WarmupCosineLR`** uses the same warmup, then a half-cosine decay
-  from ``base_lr`` to ``0`` over ``[warmup_iters, max_iter)``.
-
-Both schedulers are returned as ``LambdaLR`` instances so the same
-``lr_scheduler.step()`` plumbing in :class:`LRScheduler` (the engine
-hook) works for either.
+  ``weight_decay`` (1e-4 by default). Standard practice for ResNet-FPN.
+* **Warmup → cosine LR.** Linear warmup for ``warmup_iters`` iterations
+  from ``warmup_factor * base_lr`` to ``base_lr``, then a half-cosine
+  decay to ``0`` over ``[warmup_iters, max_iter)``, returned as a
+  ``LambdaLR``. ``num_epochs`` (config) is resolved to ``max_iter`` /
+  ``warmup_iters`` by :func:`resolve_schedule` at train time.
 """
 
 from __future__ import annotations
@@ -27,7 +18,6 @@ from __future__ import annotations
 import itertools
 import logging
 import math
-from collections.abc import Callable, Iterable
 from typing import cast
 
 import torch
@@ -36,7 +26,7 @@ from torch import nn
 from mayaku.config.schemas import SolverConfig
 from mayaku.models.backbones._frozen_bn import FrozenBatchNorm2d
 
-__all__ = ["build_lr_scheduler", "build_optimizer"]
+__all__ = ["build_lr_scheduler", "build_optimizer", "resolve_schedule"]
 
 logger = logging.getLogger(__name__)
 
@@ -421,74 +411,45 @@ def _log_and_assert_llrd_groups(
         )
 
 
+def resolve_schedule(
+    num_epochs: int, num_images: int, global_batch: int, warmup_fraction: float
+) -> tuple[int, int]:
+    """Resolve an epoch budget to ``(max_iter, warmup_iters)`` iteration counts.
+
+    ``global_batch`` is the cross-rank effective batch
+    (:meth:`SolverConfig.effective_batch`); one epoch is
+    ``ceil(num_images / global_batch)`` optimizer steps. Warmup is
+    ``warmup_fraction`` of the total, clamped to ``< max_iter``. Called once in
+    :func:`mayaku.cli.train.run_train` after the dataset is loaded.
+    """
+    iters_per_epoch = max(1, math.ceil(num_images / max(1, global_batch)))
+    max_iter = max(2, num_epochs * iters_per_epoch)
+    warmup_iters = min(max_iter - 1, round(warmup_fraction * max_iter))
+    return max_iter, warmup_iters
+
+
 def build_lr_scheduler(
-    optimizer: torch.optim.Optimizer, cfg: SolverConfig
-) -> torch.optim.lr_scheduler.LambdaLR:
-    """Construct ``WarmupMultiStepLR`` or ``WarmupCosineLR`` as a LambdaLR."""
-    if cfg.lr_scheduler_name == "WarmupMultiStepLR":
-        lr_fn = _warmup_multistep_lambda(
-            steps=cfg.steps,
-            gamma=cfg.gamma,
-            warmup_iters=cfg.warmup_iters,
-            warmup_factor=cfg.warmup_factor,
-            warmup_method=cfg.warmup_method,
-        )
-    elif cfg.lr_scheduler_name == "WarmupCosineLR":
-        lr_fn = _warmup_cosine_lambda(
-            max_iter=cfg.max_iter,
-            warmup_iters=cfg.warmup_iters,
-            warmup_factor=cfg.warmup_factor,
-            warmup_method=cfg.warmup_method,
-        )
-    else:  # pragma: no cover — defended by the schema's Literal
-        raise ValueError(f"unknown lr_scheduler_name: {cfg.lr_scheduler_name!r}")
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_fn)
-
-
-# ---------------------------------------------------------------------------
-# Lambda factories
-# ---------------------------------------------------------------------------
-
-
-def _warmup_factor_at_iter(method: str, it: int, warmup_iters: int, warmup_factor: float) -> float:
-    if it >= warmup_iters:
-        return 1.0
-    if method == "constant":
-        return warmup_factor
-    # Linear (default): grow from `warmup_factor` to 1 over warmup_iters.
-    alpha = it / max(warmup_iters, 1)
-    return warmup_factor * (1.0 - alpha) + alpha
-
-
-def _warmup_multistep_lambda(
-    steps: Iterable[int],
-    gamma: float,
-    warmup_iters: int,
-    warmup_factor: float,
-    warmup_method: str,
-) -> Callable[[int], float]:
-    sorted_steps = sorted(steps)
-
-    def lr_lambda(it: int) -> float:
-        warm = _warmup_factor_at_iter(warmup_method, it, warmup_iters, warmup_factor)
-        decays = sum(1 for s in sorted_steps if it >= s)
-        return warm * (gamma**decays)
-
-    return lr_lambda
-
-
-def _warmup_cosine_lambda(
+    optimizer: torch.optim.Optimizer,
+    cfg: SolverConfig,
+    *,
     max_iter: int,
     warmup_iters: int,
-    warmup_factor: float,
-    warmup_method: str,
-) -> Callable[[int], float]:
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Construct the warmup→cosine LR schedule as a LambdaLR.
+
+    ``max_iter`` / ``warmup_iters`` are resolved from ``cfg.num_epochs`` /
+    ``cfg.warmup_fraction`` and the dataset size at train time (they are not
+    config fields), so they're passed in explicitly. Linear warmup to 1.0 over
+    ``warmup_iters``, then a half-cosine decay to 0 over ``[warmup_iters, max_iter)``.
+    """
+    warmup_factor = cfg.warmup_factor
+
     def lr_lambda(it: int) -> float:
-        warm = _warmup_factor_at_iter(warmup_method, it, warmup_iters, warmup_factor)
         if it < warmup_iters:
-            return warm
+            alpha = it / max(warmup_iters, 1)
+            return warmup_factor * (1.0 - alpha) + alpha
         progress = (it - warmup_iters) / max(max_iter - warmup_iters, 1)
         progress = min(max(progress, 0.0), 1.0)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
-    return lr_lambda
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)

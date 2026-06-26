@@ -20,10 +20,9 @@ report:
   ``MODEL.DEVICE = "cuda"`` (see ``BACKEND_PORTABILITY_REPORT.md`` §4)
   would break anyone running on MPS; ``"auto"`` resolves through
   :meth:`mayaku.backends.device.Device.auto` at construction time.
-* **3x is the default schedule.** ``SolverConfig`` ships with the
-  spec §6.3 numbers (``max_iter=270000``, ``steps=(210000, 250000)``,
-  ``base_lr=0.02`` from ``Base-RCNN-FPN.yaml``). 1x and other
-  schedules are constructed via :mod:`mayaku.config.schedules`.
+* **Training length is in epochs.** ``SolverConfig.num_epochs`` sets the
+  number of passes over the dataset; the engine resolves it to an iteration
+  count at train time, and the LR follows a single warmup→cosine decay.
 
 All models are frozen and reject unknown fields. Use
 ``model.model_copy(update={...})`` to derive a variant.
@@ -681,11 +680,9 @@ class InputConfig(_BaseModel):
 class SolverConfig(_BaseModel):
     """Optimizer and LR schedule.
 
-    Defaults are the **3x schedule** from `DETECTRON2_TECHNICAL_SPEC.md`
-    §6.3: ``ims_per_batch=16``, ``base_lr=0.02``, ``max_iter=270000``,
-    ``steps=(210000, 250000)``, ``warmup_iters=1000``,
-    ``warmup_factor=1/1000``. Use :func:`mayaku.config.schedules.schedule_1x`
-    or ``schedule_3x`` to construct the canonical variants.
+    Training length is set in epochs (:attr:`num_epochs`) and the LR follows a
+    single warmup→cosine decay; the engine resolves epochs to an iteration
+    count at train time from the dataset size and effective batch.
     """
 
     ims_per_batch: Annotated[int, Field(gt=0)] = 16
@@ -696,12 +693,17 @@ class SolverConfig(_BaseModel):
     # ``base_lr`` should be tuned against the effective batch, not the micro.
     grad_accum_steps: Annotated[int, Field(ge=1)] = 1
     base_lr: Annotated[float, Field(gt=0.0)] = 0.02
-    lr_scheduler_name: Literal["WarmupMultiStepLR", "WarmupCosineLR"] = "WarmupMultiStepLR"
-    steps: tuple[int, ...] = (210_000, 250_000)
-    max_iter: Annotated[int, Field(gt=0)] = 270_000
-    warmup_iters: Annotated[int, Field(ge=0)] = 1000
+    # Training length is expressed in epochs (passes over the dataset). The
+    # engine resolves it to an iteration count at train time from the dataset
+    # size and effective batch (``num_images / (ims_per_batch * grad_accum *
+    # world_size)`` iters per epoch). The LR follows a single warmup→cosine
+    # decay over the full run; ``warmup_fraction`` is the share of total
+    # iterations spent warming up from ``warmup_factor * base_lr`` to
+    # ``base_lr``. Default 16 epochs is a sane fine-tune length for any dataset;
+    # auto-config picks a dataset-adaptive value when enabled.
+    num_epochs: Annotated[int, Field(gt=0)] = 16
+    warmup_fraction: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.03
     warmup_factor: Annotated[float, Field(gt=0.0, le=1.0)] = 1.0 / 1000.0
-    warmup_method: Literal["linear", "constant"] = "linear"
 
     # Optimizer choice. ``"SGD"`` (default) is the D2-replication path
     # and pairs with ``momentum`` / ``nesterov`` below. ``"AdamW"`` is
@@ -716,7 +718,6 @@ class SolverConfig(_BaseModel):
 
     weight_decay: Annotated[float, Field(ge=0.0)] = 1e-4
     weight_decay_norm: Annotated[float, Field(ge=0.0)] = 0.0
-    gamma: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.1
 
     # Layer-wise learning rate decay (LLRD). When enabled, each backbone
     # parameter's LR is scaled by ``llrd_decay ** ((num_layers + 2) - layer_id - 1)``
@@ -766,21 +767,12 @@ class SolverConfig(_BaseModel):
     ema_decay: Annotated[float, Field(ge=0.0, le=1.0)] = 0.9999
     ema_tau: Annotated[float, Field(gt=0.0)] = 2000.0
 
-    @model_validator(mode="after")
-    def _check_schedule(self) -> SolverConfig:
-        if self.warmup_iters >= self.max_iter:
-            raise ValueError(
-                f"warmup_iters ({self.warmup_iters}) must be < max_iter ({self.max_iter})"
-            )
-        for s in self.steps:
-            if not 0 < s < self.max_iter:
-                raise ValueError(
-                    f"steps entries must satisfy 0 < step < max_iter; got {s} "
-                    f"with max_iter={self.max_iter}"
-                )
-        if any(b <= a for a, b in zip(self.steps, self.steps[1:], strict=False)):
-            raise ValueError(f"steps must be strictly ascending; got {self.steps}")
-        return self
+    def effective_batch(self, world_size: int = 1) -> int:
+        """Images per optimizer step: ``ims_per_batch * grad_accum_steps``,
+        times ``world_size`` for the cross-rank total. ``base_lr`` should be
+        tuned against this, and one epoch is ``ceil(num_images / this)`` steps.
+        """
+        return self.ims_per_batch * self.grad_accum_steps * world_size
 
 
 class TestConfig(_BaseModel):
@@ -825,10 +817,9 @@ class AutoConfig(_BaseModel):
     * ``model.anchor_generator.sizes`` / ``aspect_ratios`` — k-means on
       GT box √area and w/h (skipped if <50 boxes)
     * ``model.backbone.freeze_at`` — from dataset size bucket
-    * ``solver.base_lr`` / ``max_iter`` / ``steps`` / ``warmup_iters`` /
-      ``lr_scheduler_name`` / ``ema_enabled`` / ``ema_decay`` / ``ema_tau``
-      — from dataset size bucket, anchored to the D2 scratch recipe and
-      applying both batch-scaling and the 10× fine-tune drop
+    * ``solver.base_lr`` / ``num_epochs`` / ``ema_enabled`` / ``ema_decay`` /
+      ``ema_tau`` — from dataset size bucket, anchored to the scratch recipe
+      and applying both batch-scaling and the 10× fine-tune drop
     * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
       dataset size bucket
     * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to

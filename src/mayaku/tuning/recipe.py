@@ -155,47 +155,6 @@ def size_bucket(num_images: int) -> SizeBucket:
 
 
 # ---------------------------------------------------------------------------
-# Schedule helpers
-# ---------------------------------------------------------------------------
-
-
-def _build_schedule(max_iter: int) -> dict[str, Any]:
-    """Build ``max_iter`` / ``steps`` / ``warmup_iters`` honouring
-    :meth:`SolverConfig._check_schedule`.
-
-    Invariants enforced: ``warmup_iters < max_iter``, every step in
-    ``(0, max_iter)``, and ``steps`` strictly ascending.
-    """
-    warmup_iters = min(500, max(0, max_iter // 10))
-    if warmup_iters >= max_iter:
-        warmup_iters = max(0, max_iter - 1)
-
-    if max_iter >= 5:
-        s1 = max(1, round(0.67 * max_iter))
-        s2 = max(s1 + 1, round(0.89 * max_iter))
-        # Squeeze both inside (0, max_iter) and keep strict ordering.
-        s2 = min(s2, max_iter - 1)
-        s1 = min(s1, s2 - 1)
-        steps: tuple[int, ...] = (max(1, s1), s2)
-    else:
-        # Cosine scheduler ignores steps, but the schema validator
-        # still demands a valid tuple. One mid-point step always passes.
-        steps = (max(1, max_iter // 2),)
-
-    return {"max_iter": max_iter, "steps": steps, "warmup_iters": warmup_iters}
-
-
-def _epoch_schedule(
-    num_images: int, ims_per_batch: int, grad_accum_steps: int, epochs: int
-) -> dict[str, Any]:
-    """Like :func:`_build_schedule` but derives ``max_iter`` from an
-    epoch budget over the effective batch size."""
-    effective_batch = max(1, ims_per_batch * grad_accum_steps)
-    iters_per_epoch = max(1, math.ceil(num_images / effective_batch))
-    return _build_schedule(max(2, epochs * iters_per_epoch))
-
-
-# ---------------------------------------------------------------------------
 # Override derivation
 # ---------------------------------------------------------------------------
 
@@ -203,21 +162,14 @@ def _epoch_schedule(
 def derive_overrides(
     stats: DatasetStats,
     cfg: MayakuConfig,
-    user_set_paths: Collection[str] = frozenset(),
 ) -> dict[str, Any]:
     """Produce a nested override dict from dataset stats + base config.
 
     The returned dict mirrors :class:`MayakuConfig`'s shape (top-level
     keys are ``model``, ``solver``, ``input``, ``dataloader``) and can
-    be passed straight to :func:`mayaku.config.merge_overrides`.
-
-    ``user_set_paths`` is used to keep the schedule self-consistent:
-    when ``solver.max_iter`` is user-pinned, ``warmup_iters`` and
-    ``steps`` are derived against the user's ``max_iter`` rather than
-    the bucket-derived one so the Pydantic schedule validator (warmup <
-    max_iter, every step in ``(0, max_iter)``) is satisfied after merge.
-    The caller still passes the result through :func:`filter_unset` —
-    this parameter only changes *values*, not which paths are emitted.
+    be passed straight to :func:`mayaku.config.merge_overrides`. The caller
+    passes the result through :func:`filter_unset` so any field the user pinned
+    is dropped — explicit user values always win.
 
     Returns an empty dict when ``stats.num_images <
     MIN_IMAGES_FOR_AUTO_CONFIG`` — the dataset is too small to drive a
@@ -242,29 +194,21 @@ def derive_overrides(
         }
 
     # ----- solver -----
-    # When the user pinned max_iter (in YAML or via --max-iter), the
-    # bucket-derived schedule must clamp around that value so the merge
-    # doesn't violate the SolverConfig validators.
-    if "solver.max_iter" in user_set_paths:
-        schedule = _build_schedule(cfg.solver.max_iter)
-    else:
-        schedule = _epoch_schedule(
-            stats.num_images,
-            cfg.solver.ims_per_batch,
-            cfg.solver.grad_accum_steps,
-            bucket.epochs,
-        )
-    # Re-apply linear batch scaling so the bucket's bs=8-anchored LR
-    # tracks the actual effective batch. The fine-tune drop is already
-    # baked into bucket.base_lr.
-    scaled_lr = bucket.base_lr * (cfg.solver.ims_per_batch / 8.0)
+    # Training length is a dataset-adaptive epoch budget; the engine resolves
+    # it to iterations at train time. Re-apply linear batch scaling so the
+    # bucket's bs=8-anchored LR tracks the actual EFFECTIVE batch
+    # (ims_per_batch * grad_accum_steps); the fine-tune drop is already baked
+    # into bucket.base_lr.
+    # Recipe runs pre-DDP, so the LR is anchored to the single-rank effective
+    # batch (world_size excluded by design; scale further by num_gpus when
+    # going multi-GPU per the linear-scaling rule).
+    scaled_lr = bucket.base_lr * (cfg.solver.effective_batch() / 8.0)
     solver_overrides: dict[str, Any] = {
         "base_lr": scaled_lr,
-        "lr_scheduler_name": "WarmupCosineLR",
+        "num_epochs": bucket.epochs,
         "ema_enabled": True,
         "ema_decay": 0.9995,
         "ema_tau": 500.0,
-        **schedule,
     }
 
     # ----- input augs -----

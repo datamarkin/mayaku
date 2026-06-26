@@ -95,6 +95,7 @@ def train(
     val_images: Path | None = None,
     output_dir: Path | None = None,
     size_budget: int | None = None,
+    num_epochs: int | None = None,
     overrides: Mapping[str, Any] | None = None,
     device: DeviceSetting = "auto",
     num_gpus: int = 1,
@@ -131,6 +132,12 @@ def train(
     lower it for speed). It's equivalent to
     ``overrides={"input": {"size_budget": ...}}`` and wins over both the config
     and ``overrides``.
+
+    ``num_epochs`` is the training-length dial — the number of passes over the
+    dataset (the engine resolves it to an iteration count from the dataset size
+    and batch). Equivalent to ``overrides={"solver": {"num_epochs": ...}}`` and
+    wins over the config and auto-config. Leave it unset to let auto-config pick
+    a dataset-adaptive value (or fall back to the schema default of 16).
 
     **Auto-config vs. manual recipe.** When you pass a ``config`` (YAML path,
     bundled name, or :class:`MayakuConfig`), it is used *verbatim* — auto-config
@@ -202,13 +209,22 @@ def train(
     if size_budget is not None:
         cfg = merge_overrides(cfg, {"input": {"size_budget": size_budget}})
         pinned_paths.add("input.size_budget")
+    # num_epochs is the first-class training-length knob (passes over the
+    # dataset). Like size_budget, an explicit value wins over the config and
+    # auto-config.
+    if num_epochs is not None:
+        cfg = merge_overrides(cfg, {"solver": {"num_epochs": num_epochs}})
+        pinned_paths.add("solver.num_epochs")
 
     # A config (YAML path, bundled name, or MayakuConfig) means "train exactly
     # this recipe": auto-config is turned off so the config is used verbatim and
-    # never silently re-tuned. Without a config, the recipe is derived from the
-    # dataset (auto-config on, but never overwriting ``pinned_paths``).
-    if config is not None:
-        cfg = merge_overrides(cfg, {"auto_config": {"enabled": False}})
+    # never silently re-tuned. Without a config (the weights= fine-tune path),
+    # the recipe is derived from THIS dataset, so auto-config is forced on — the
+    # architecture still comes from the checkpoint sidecar, but its baked-in
+    # auto_config flag (set at the model's original training time) must not
+    # disable re-tuning for the new dataset. Either way ``pinned_paths`` is
+    # never overwritten.
+    cfg = merge_overrides(cfg, {"auto_config": {"enabled": config is None}})
 
     # --- No-val short-circuit (after overrides, so eval_period is final) --
     eval_after = val_json is not None
@@ -285,7 +301,7 @@ def train(
                 detector_weights,  # weights
                 pretrained_backbone,
                 device,
-                None,  # max_iter (cfg already carries it)
+                None,  # num_epochs (cfg already carries it)
                 20,  # log_period default
                 val_json if forward_val else None,
                 val_images if forward_val else None,
@@ -345,13 +361,13 @@ def train(
         "weights_path": cfg.model.backbone.weights_path,
         "num_classes": cfg.model.roi_heads.num_classes,
         "num_gpus": num_gpus,
-        "max_iter": cfg.solver.max_iter,
+        "num_epochs": cfg.solver.num_epochs,
         "ims_per_batch": cfg.solver.ims_per_batch,
         "grad_accum_steps": cfg.solver.grad_accum_steps,
-        # ``ims_per_batch`` is per-rank; cross-rank effective batch is
-        # this value × num_gpus × grad_accum_steps. Apply the linear LR
-        # scaling rule against the cross-rank value when scaling up.
-        "effective_batch_size": cfg.solver.ims_per_batch * cfg.solver.grad_accum_steps,
+        # Single-rank effective batch (ims_per_batch × grad_accum_steps); the
+        # cross-rank total is this × num_gpus. Apply the linear LR scaling rule
+        # against the cross-rank value when scaling up.
+        "effective_batch_size": cfg.solver.effective_batch(),
         "base_lr": cfg.solver.base_lr,
         "ema_enabled": cfg.solver.ema_enabled,
         "final_weights": str(final_weights),
