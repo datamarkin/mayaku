@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mayaku.tuning.sizing import resolve_canvas, snap_max_content
+from mayaku.tuning.sizing import multi_scale_canvases, resolve_canvas, snap_max_content
 
 BUDGET = 640 * 640  # 409,600 — the size_budget=640 square-equivalent budget
 
@@ -77,6 +77,49 @@ def test_resolve_canvas_reports_grid_headroom() -> None:
     (h, w), use = resolve_canvas(640, aspect=5.0, uniform=True)
     assert h * w <= 640 * 640
     assert use < 1.0
+
+
+def test_multi_scale_top_is_exactly_the_deploy_canvas() -> None:
+    # The full-scale rung must equal the deploy canvas verbatim so train
+    # geometry == deploy — even when the deploy canvas is 128-aligned and the
+    # ladder steps on a finer 32 grid.
+    for deploy in [(640, 640), (512, 768), (512, 640), (384, 1024)]:
+        ladder = multi_scale_canvases(deploy)
+        assert ladder[-1] == deploy
+        assert deploy in ladder
+
+
+def test_multi_scale_is_32_aligned_dense_ladder() -> None:
+    # The square-640 ladder is the regression case: the old 128 grid gave only
+    # {384, 512, 640} (3 rungs); the 32 grid restores a dense ladder.
+    ladder = multi_scale_canvases((640, 640), scale_min=0.5)
+    assert all(h % 32 == 0 and w % 32 == 0 for h, w in ladder)
+    # Floor rounds UP to the 32 grid, so the smallest rung (480) stays at or
+    # above scale_min of the budget — 480² = 0.5625·budget ≥ 0.5.
+    assert ladder == [(480, 480), (512, 512), (544, 544), (576, 576), (608, 608), (640, 640)]
+
+
+def test_multi_scale_rungs_never_exceed_deploy_area() -> None:
+    deploy = (512, 768)
+    area = deploy[0] * deploy[1]
+    ladder = multi_scale_canvases(deploy, scale_min=0.4)
+    assert all(h * w <= area for h, w in ladder)
+    # Ascending by area, de-duplicated.
+    areas = [h * w for h, w in ladder]
+    assert areas == sorted(areas)
+    assert len(set(ladder)) == len(ladder)
+
+
+def test_multi_scale_scale_min_one_is_single_canvas() -> None:
+    # scale_min=1.0 → no scale-down augmentation, just the deploy canvas.
+    assert multi_scale_canvases((640, 640), scale_min=1.0) == [(640, 640)]
+
+
+def test_multi_scale_rejects_bad_scale_min() -> None:
+    with pytest.raises(ValueError, match="scale_min"):
+        multi_scale_canvases((640, 640), scale_min=0.0)
+    with pytest.raises(ValueError, match="scale_min"):
+        multi_scale_canvases((640, 640), scale_min=1.5)
 
 
 def test_rejects_bad_inputs() -> None:
