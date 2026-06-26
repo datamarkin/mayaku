@@ -93,7 +93,7 @@ def test_run_train_runs_the_loop_and_writes_checkpoints(
             image_root=toy_workspace["images"],
             output_dir=out,
             device="cpu",
-            max_iter=2,
+            num_epochs=2,
         )
     # PeriodicCheckpointer ran (period=2 → save at iter 2 + final).
     checkpoints = sorted(p.name for p in out.glob("*.pth"))
@@ -153,9 +153,7 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
         solver=SolverConfig(
             base_lr=1e-4,
             ims_per_batch=2,
-            max_iter=2,
-            warmup_iters=1,
-            steps=(1,),
+            num_epochs=2,
             checkpoint_period=2,
         ),
         input=InputConfig(
@@ -165,7 +163,7 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
     )
     out = tmp_path / "run"
     with pytest.warns(UserWarning, match="freeze_at"):
-        run_train(cfg, coco_gt_json=gt, image_root=imgs, output_dir=out, device="cpu", max_iter=2)
+        run_train(cfg, coco_gt_json=gt, image_root=imgs, output_dir=out, device="cpu", num_epochs=2)
     sd = torch.load(out / "model_final.pth", map_location="cpu", weights_only=True)
     # Re-resolved to the 16:9 canvas — NOT the inherited [640, 640].
     assert sd["mayaku"]["config"]["input"]["canvas_hw"] == [512, 768]
@@ -200,7 +198,7 @@ def test_run_train_pretrained_backbone_passes_through(
         output_dir=out,
         device="cpu",
         pretrained_backbone=True,
-        max_iter=1,
+        num_epochs=1,
     )
     assert captured["backbone_weights"] == "DEFAULT"
 
@@ -218,7 +216,7 @@ def test_run_train_pretrained_and_weights_are_mutually_exclusive(
             device="cpu",
             pretrained_backbone=True,
             weights=toy_workspace["weights"],
-            max_iter=1,
+            num_epochs=1,
         )
 
 
@@ -245,7 +243,7 @@ def test_run_train_eval_period_requires_val_paths(
             image_root=toy_workspace["images"],
             output_dir=out,
             device="cpu",
-            max_iter=2,
+            num_epochs=2,
         )
 
 
@@ -262,7 +260,7 @@ def test_run_train_warns_when_val_paths_supplied_but_eval_period_zero(
             image_root=toy_workspace["images"],
             output_dir=out,
             device="cpu",
-            max_iter=1,
+            num_epochs=1,
             val_json=toy_workspace["json"],
             val_image_root=toy_workspace["images"],
         )
@@ -278,7 +276,7 @@ def test_run_train_accepts_mayaku_config_object(
 
     cfg = load_yaml(toy_workspace["cfg"])
     # Pretend the user is patching a few fields in code.
-    cfg = cfg.model_copy(update={"solver": cfg.solver.model_copy(update={"max_iter": 1})})
+    cfg = cfg.model_copy(update={"solver": cfg.solver.model_copy(update={"num_epochs": 1})})
     out = tmp_path / "train_obj_out"
     with pytest.warns(UserWarning, match="freeze_at"):
         run_train(
@@ -306,7 +304,7 @@ def test_run_train_dumps_resolved_config_for_path_input_too(
             image_root=toy_workspace["images"],
             output_dir=out,
             device="cpu",
-            max_iter=1,
+            num_epochs=1,
         )
     assert (out / "config.yaml").exists()
 
@@ -348,7 +346,7 @@ def test_run_train_finetune_drops_class_count_mismatched_layers(
         output_dir=out,
         weights=fake_path,
         device="cpu",
-        max_iter=1,
+        num_epochs=1,
     )
     captured = capsys.readouterr().out
     assert "dropped 4 shape-mismatched key(s)" in captured
@@ -369,7 +367,7 @@ def test_run_train_periodic_eval_runs_evaluator(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """End-to-end smoke: eval_period=1 over max_iter=2 → at least one
+    """End-to-end smoke: eval_period=1 over num_epochs=2 → at least one
     eval line lands in stdout and the COCOEvaluator dumps its JSON."""
     cfg_with_eval = _cfg_with_eval_period(toy_workspace, tmp_path, period=1)
     out = tmp_path / "train_eval_smoke"
@@ -380,7 +378,7 @@ def test_run_train_periodic_eval_runs_evaluator(
             image_root=toy_workspace["images"],
             output_dir=out,
             device="cpu",
-            max_iter=2,
+            num_epochs=2,
             val_json=toy_workspace["json"],
             val_image_root=toy_workspace["images"],
         )

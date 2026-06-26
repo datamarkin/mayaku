@@ -102,7 +102,7 @@ def test_merge_overrides_replaces_leaf_values() -> None:
     out = merge_overrides(cfg, {"solver": {"base_lr": 0.001}})
     assert out.solver.base_lr == 0.001
     # Other solver fields preserved.
-    assert out.solver.max_iter == cfg.solver.max_iter
+    assert out.solver.num_epochs == cfg.solver.num_epochs
     # Other top-level sections untouched.
     assert out.input == cfg.input
 
@@ -116,9 +116,9 @@ def test_merge_overrides_does_not_mutate_input() -> None:
 
 def test_merge_overrides_runs_validation() -> None:
     cfg = MayakuConfig()
-    # Override that would violate the warmup<max_iter invariant must raise.
-    with pytest.raises(ValidationError, match="warmup_iters"):
-        merge_overrides(cfg, {"solver": {"max_iter": 100, "steps": (50,)}})
+    # An out-of-bounds override must raise (num_epochs must be > 0).
+    with pytest.raises(ValidationError):
+        merge_overrides(cfg, {"solver": {"num_epochs": 0}})
 
 
 def test_merge_overrides_can_change_meta_architecture() -> None:

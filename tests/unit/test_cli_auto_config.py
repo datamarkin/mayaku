@@ -112,10 +112,8 @@ def _base_cfg(num_classes: int = 5, *, auto_config_enabled: bool = True) -> Maya
             base_lr=1e-4,
             momentum=0.0,
             ims_per_batch=1,
-            max_iter=5,
-            warmup_iters=1,
+            num_epochs=2,
             warmup_factor=0.5,
-            steps=(1,),
             checkpoint_period=2,
         ),
         # num_workers=0 sidesteps multiprocessing pickle issues that
@@ -171,10 +169,8 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
             "base_lr": 1e-4,  # user-set, must survive
             "momentum": 0.0,
             "ims_per_batch": 1,
-            "max_iter": 5,
-            "warmup_iters": 0,
+            "num_epochs": 1,
             "warmup_factor": 0.5,
-            "steps": [3],
             "checkpoint_period": 5,
         },
         "dataloader": {"num_workers": 0},
@@ -186,7 +182,7 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
 
     out = tmp_path / "run"
     # We don't care about the train loop succeeding; we care that
-    # auto-config rewrote the cfg before model build. max_iter=1 keeps
+    # auto-config rewrote the cfg before model build. num_epochs=1 keeps
     # the actual training cheap.
     with pytest.warns(UserWarning, match="freeze_at"):
         run_train(
@@ -195,7 +191,7 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,
+            num_epochs=1,
         )
 
     # Resolved config got dumped — read it back and confirm the
@@ -214,8 +210,8 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
     )
     # User-set base_lr SURVIVED.
     assert resolved.solver.base_lr == 1e-4
-    # max_iter was CLI-overridden to 5 — preserved.
-    assert resolved.solver.max_iter == 5
+    # num_epochs was CLI-overridden to 1 — preserved.
+    assert resolved.solver.num_epochs == 1
 
     # The [auto-config] report fired in stdout.
     captured = capsys.readouterr().out
@@ -246,10 +242,8 @@ def test_auto_config_skipped_when_disabled(tmp_path: Path) -> None:
             "base_lr": 1e-4,
             "momentum": 0.0,
             "ims_per_batch": 1,
-            "max_iter": 5,
-            "warmup_iters": 0,
+            "num_epochs": 1,
             "warmup_factor": 0.5,
-            "steps": [3],
             "checkpoint_period": 5,
         },
         "dataloader": {"num_workers": 0},
@@ -268,7 +262,7 @@ def test_auto_config_skipped_when_disabled(tmp_path: Path) -> None:
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,
+            num_epochs=1,
         )
 
     resolved = load_yaml(out / "config.yaml")
@@ -300,10 +294,8 @@ def test_auto_config_skipped_below_min_images_threshold(tmp_path: Path) -> None:
             "base_lr": 1e-4,
             "momentum": 0.0,
             "ims_per_batch": 1,
-            "max_iter": 5,
-            "warmup_iters": 0,
+            "num_epochs": 1,
             "warmup_factor": 0.5,
-            "steps": [3],
             "checkpoint_period": 5,
         },
         "dataloader": {"num_workers": 0},
@@ -321,7 +313,7 @@ def test_auto_config_skipped_below_min_images_threshold(tmp_path: Path) -> None:
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,
+            num_epochs=1,
         )
 
     resolved = load_yaml(out / "config.yaml")
@@ -361,7 +353,7 @@ def test_forwarded_user_set_paths_survive_auto_config_on_object_path(
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,  # keeps training cheap + pins solver.max_iter
+            num_epochs=1,  # keeps training cheap + pins solver.num_epochs
             user_set_paths={"solver.base_lr"},
         )
 
@@ -370,5 +362,5 @@ def test_forwarded_user_set_paths_survive_auto_config_on_object_path(
     assert resolved.solver.base_lr == 7e-5
     # Unprotected field was auto-derived from the dataset (4 categories).
     assert resolved.model.roi_heads.num_classes == 4
-    # CLI max_iter pin also survived.
-    assert resolved.solver.max_iter == 5
+    # CLI num_epochs pin also survived.
+    assert resolved.solver.num_epochs == 1

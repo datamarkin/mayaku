@@ -124,10 +124,8 @@ def _tiny_cfg() -> MayakuConfig:
         solver=SolverConfig(
             base_lr=1e-4,
             momentum=0.0,
-            max_iter=10,
-            warmup_iters=2,
+            num_epochs=10,
             warmup_factor=0.5,
-            steps=(8,),
             checkpoint_period=5,
         ),
     )
@@ -147,7 +145,7 @@ def test_simple_trainer_runs_and_drops_loss(device: torch.device) -> None:
     cfg = _tiny_cfg()
     model = build_faster_rcnn(cfg).to(device)
     optimizer = build_optimizer(model, cfg.solver)
-    scheduler = build_lr_scheduler(optimizer, cfg.solver)
+    scheduler = build_lr_scheduler(optimizer, cfg.solver, max_iter=10, warmup_iters=2)
     loader = _toy_loader(device)
 
     trainer = SimpleTrainer(model, loader, optimizer, grad_clip_norm=10.0)
@@ -155,7 +153,7 @@ def test_simple_trainer_runs_and_drops_loss(device: torch.device) -> None:
 
     # Before training: capture the initial averaged loss.
     initial = _avg_loss(model, loader[0])
-    trainer.train(start_iter=0, max_iter=cfg.solver.max_iter)
+    trainer.train(start_iter=0, max_iter=10)
     final = _avg_loss(model, loader[0])
 
     assert torch.isfinite(torch.tensor(final)).item()

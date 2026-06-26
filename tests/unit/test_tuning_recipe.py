@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
-
 import pytest
 
 from mayaku.config import MayakuConfig
@@ -114,17 +112,14 @@ def test_derive_overrides_scales_lr_with_ims_per_batch() -> None:
     assert overrides["solver"]["base_lr"] == pytest.approx(1e-3 * 2.0)
 
 
-def test_derive_overrides_emits_valid_schedule() -> None:
+def test_derive_overrides_emits_epoch_budget() -> None:
     stats = _stats(num_images=2_000)
     overrides = derive_overrides(stats, MayakuConfig())
-    sched = overrides["solver"]
-    max_iter = sched["max_iter"]
-    steps = sched["steps"]
-    warmup = sched["warmup_iters"]
-    # SolverConfig._check_schedule invariants.
-    assert warmup < max_iter
-    assert all(0 < s < max_iter for s in steps)
-    assert all(b > a for a, b in itertools.pairwise(steps))
+    # Schedule length is a dataset-adaptive epoch budget (resolved to iters
+    # at train time), not raw iteration counts.
+    assert overrides["solver"]["num_epochs"] > 0
+    assert "max_iter" not in overrides["solver"]
+    assert "steps" not in overrides["solver"]
 
 
 def test_derive_overrides_enables_repeat_factor_sampler_when_imbalanced() -> None:
@@ -157,7 +152,7 @@ def test_derive_overrides_emits_pydantic_valid_payload() -> None:
     overrides = derive_overrides(stats, MayakuConfig())
     merged = merge_overrides(MayakuConfig(), overrides)
     assert merged.model.roi_heads.num_classes == 12
-    assert merged.solver.lr_scheduler_name == "WarmupCosineLR"
+    assert merged.solver.num_epochs > 0
     assert merged.solver.ema_enabled is True
 
 
@@ -171,8 +166,8 @@ def test_collect_set_paths_flat() -> None:
 
 
 def test_collect_set_paths_nested() -> None:
-    paths = collect_set_paths({"solver": {"base_lr": 0.01, "max_iter": 1000}})
-    assert paths == {"solver.base_lr", "solver.max_iter"}
+    paths = collect_set_paths({"solver": {"base_lr": 0.01, "num_epochs": 30}})
+    assert paths == {"solver.base_lr", "solver.num_epochs"}
 
 
 def test_collect_set_paths_treats_lists_as_leaves() -> None:
@@ -195,9 +190,9 @@ def test_collect_set_paths_empty() -> None:
 
 
 def test_filter_unset_drops_user_set_leaves() -> None:
-    overrides = {"solver": {"base_lr": 0.01, "max_iter": 1000}}
+    overrides = {"solver": {"base_lr": 0.01, "num_epochs": 30}}
     out = filter_unset(overrides, {"solver.base_lr"})
-    assert out == {"solver": {"max_iter": 1000}}
+    assert out == {"solver": {"num_epochs": 30}}
 
 
 def test_filter_unset_prunes_empty_subdicts() -> None:
@@ -210,7 +205,7 @@ def test_filter_unset_prunes_empty_subdicts() -> None:
 
 
 def test_filter_unset_passes_through_when_no_overlap() -> None:
-    overrides = {"solver": {"max_iter": 1000}}
+    overrides = {"solver": {"num_epochs": 30}}
     out = filter_unset(overrides, {"input.color_jitter_prob"})
     assert out == overrides
 

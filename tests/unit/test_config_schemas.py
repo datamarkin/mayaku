@@ -22,14 +22,14 @@ from mayaku.config.schemas import (
 # ---------------------------------------------------------------------------
 
 
-def test_defaults_match_3x_schedule_and_rgb_pixel_stats() -> None:
+def test_defaults_match_schedule_and_rgb_pixel_stats() -> None:
     cfg = MayakuConfig()
     # ADR 002: pixel mean/std are RGB-order.
     assert cfg.model.pixel_mean == (123.675, 116.280, 103.530)
     assert cfg.model.pixel_std == (58.395, 57.120, 57.375)
-    # Spec §6.3: 3x schedule numbers.
-    assert cfg.solver.max_iter == 270_000
-    assert cfg.solver.steps == (210_000, 250_000)
+    # Epoch-based schedule defaults.
+    assert cfg.solver.num_epochs == 16
+    assert cfg.solver.warmup_fraction == 0.03
     assert cfg.solver.base_lr == 0.02
     assert cfg.solver.ims_per_batch == 16
     # Device default is "auto", not "cuda" (BPR §4).
@@ -188,27 +188,17 @@ def test_resolved_device_auto_returns_a_concrete_kind() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_solver_warmup_must_fit_inside_max_iter() -> None:
-    with pytest.raises(ValidationError, match="warmup_iters"):
-        SolverConfig(max_iter=500, warmup_iters=500, steps=(100,))
+def test_solver_num_epochs_and_warmup_fraction_bounds() -> None:
+    with pytest.raises(ValidationError):
+        SolverConfig(num_epochs=0)  # must be > 0
+    with pytest.raises(ValidationError):
+        SolverConfig(warmup_fraction=1.0)  # must be < 1
+    SolverConfig(num_epochs=12, warmup_fraction=0.03)  # OK
 
 
-def test_solver_steps_must_be_strictly_ascending_and_below_max_iter() -> None:
-    # Use small warmup so max_iter=1000 doesn't trip the warmup<max_iter check.
-    with pytest.raises(ValidationError, match="steps"):
-        SolverConfig(max_iter=1000, warmup_iters=10, steps=(500, 500))
-    with pytest.raises(ValidationError, match="steps"):
-        SolverConfig(max_iter=1000, warmup_iters=10, steps=(2000,))
-    SolverConfig(max_iter=1000, warmup_iters=10, steps=(500, 800))  # OK
-
-
-def test_solver_momentum_and_gamma_bounds() -> None:
+def test_solver_momentum_bounds() -> None:
     with pytest.raises(ValidationError):
         SolverConfig(momentum=1.0)
-    with pytest.raises(ValidationError):
-        SolverConfig(gamma=1.0)
-    with pytest.raises(ValidationError):
-        SolverConfig(gamma=0.0)
 
 
 def test_solver_optimizer_name_accepts_sgd_and_adamw() -> None:

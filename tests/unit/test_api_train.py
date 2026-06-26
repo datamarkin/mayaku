@@ -62,7 +62,7 @@ def test_train_returns_result_dict_and_writes_artefacts(
     assert (out / "train" / "metadata.json").exists()
     meta = json.loads((out / "train" / "metadata.json").read_text())
     assert meta["backbone"] == "resnet50"
-    assert meta["max_iter"] == 2
+    assert meta["num_epochs"] == 2
     assert meta["effective_batch_size"] == 1
     assert meta["final_box_ap"] == result["final_box_ap"]
 
