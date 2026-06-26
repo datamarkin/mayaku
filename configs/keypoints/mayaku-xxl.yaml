@@ -42,7 +42,7 @@ model:
 input:
   resize_mode: letterbox
   size_budget: 800   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)
-  train_scale_min: 0.5   # multi-scale letterbox train: budget fraction floor → full deploy canvas
+  train_scale_min: 0.64   # multi-scale letterbox train: budget fraction floor → full deploy canvas
   random_flip: horizontal
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
@@ -60,12 +60,7 @@ solver:
   eps: 1.0e-8
   llrd_enabled: true
   llrd_decay: 0.9
-  lr_scheduler_name: WarmupCosineLR
-  max_iter: 90000
-  steps: [60000, 80000]
-  warmup_iters: 1500
-  warmup_factor: 0.001
-  warmup_method: linear
+  num_epochs: 12
   ims_per_batch: 2
   grad_accum_steps: 8
   clip_gradients_enabled: true
