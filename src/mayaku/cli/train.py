@@ -701,7 +701,14 @@ def run_train(
         # ``mayaku eval`` workaround on large val sets.
         assert val_json is not None and val_image_root is not None  # validated above
         val_loader = _build_val_loader(cfg, val_json, val_image_root)
-        evaluator = COCOEvaluator(val_json, output_dir=output_dir / "eval")
+        # Decode predictions against the val GT by the *train* class identity
+        # (matched by name), so a val split that numbers/orders its categories
+        # differently can't silently misalign AP (C7).
+        evaluator = COCOEvaluator(
+            val_json,
+            output_dir=output_dir / "eval",
+            class_names=metadata.thing_classes,
+        )
         eval_model = ema.shadow if ema is not None else unwrapped_model
         hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)

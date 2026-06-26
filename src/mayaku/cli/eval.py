@@ -71,6 +71,15 @@ def run_eval(
     the checkpoint, so eval matches training without a separate config file.
     """
     cfg, model = load_detector(weights)
+    # The model's authoritative class identity (contiguous index → name) lives in
+    # the checkpoint sidecar; the evaluator decodes predictions to the GT's
+    # category_id by name, so a GT split that numbers its categories differently
+    # can't silently misalign AP (C7).
+    from mayaku.cli._weights import resolve_weights
+    from mayaku.utils.checkpoint import class_names_from_checkpoint
+
+    weights_path = resolve_weights(weights)
+    class_names = class_names_from_checkpoint(weights_path) if weights_path is not None else None
     if device is not None:
         if device == "mps":
             apply_mps_environment()
@@ -162,7 +171,7 @@ def run_eval(
         collate_fn=trivial_batch_collator,
     )
 
-    evaluator = COCOEvaluator(coco_gt_json, output_dir=output_dir)
+    evaluator = COCOEvaluator(coco_gt_json, output_dir=output_dir, class_names=class_names)
     metrics = inference_on_dataset(model, loader, evaluator)
     if output_dir is not None:
         Path(output_dir).mkdir(parents=True, exist_ok=True)

@@ -29,6 +29,7 @@ import contextlib
 import io
 import json
 import time
+import warnings
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,18 @@ class COCOEvaluator(DatasetEvaluator):
         kpt_oks_sigmas: 17 OKS sigmas for COCO Person keypoints. Defaults
             to the standard COCO Person sigmas; pass a tuple for custom
             datasets.
+        class_names: The model's *training* class names in contiguous-index
+            order (index ``i`` == ``class_names[i]``) — the model's
+            authoritative class identity. Pass ``metadata.thing_classes``
+            (in-train eval) or the checkpoint sidecar's ``class_names``
+            (standalone eval). When given, predictions are decoded to the GT's
+            ``category_id`` **by name**, so the GT JSON may number/order its
+            categories differently from training without corrupting AP. A
+            trained class absent from the GT is **warned about and dropped**
+            (its predictions are scored as undetected) rather than silently
+            mis-scored. When ``None`` (raw/test callers) the decode falls back
+            to the GT's ``sorted(category_ids)`` positionally — correct only if
+            the GT's category set/order matches what the model trained on.
     """
 
     # Standard COCO Person OKS sigmas (`pycocotools.cocoeval` defaults).
@@ -194,11 +207,13 @@ class COCOEvaluator(DatasetEvaluator):
         tasks: Sequence[str] | None = None,
         output_dir: str | Path | None = None,
         kpt_oks_sigmas: Sequence[float] | None = None,
+        class_names: Sequence[str] | None = None,
     ) -> None:
         self.coco_gt_json = str(coco_gt_json)
         self.tasks = tuple(tasks) if tasks is not None else None
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.kpt_oks_sigmas = tuple(kpt_oks_sigmas or self.DEFAULT_KPT_OKS_SIGMAS)
+        self.class_names = tuple(class_names) if class_names is not None else None
         self._predictions: list[dict[str, Any]] = []
         # Defer COCO-GT load until evaluate() to keep reset/process
         # cheap and to avoid IO on workers that won't run COCOeval.
@@ -296,16 +311,52 @@ class COCOEvaluator(DatasetEvaluator):
         return self._coco_gt
 
     def _get_class_id_map(self) -> dict[int, int]:
-        """Contiguous-class-index → original COCO ``category_id``.
+        """Contiguous-class-index → ground-truth COCO ``category_id``.
 
-        Mirrors the dataloader's ``sorted(coco.cats.keys())`` remap
-        (`src/mayaku/data/datasets/coco.py:_build_metadata_from_coco`),
-        so the model's contiguous class predictions get translated back
-        to the integers ``COCOeval`` expects.
+        The model predicts a contiguous index ``i`` whose meaning is fixed at
+        training time: ``i`` == the i-th entry of the train split's
+        ``thing_classes``. To score against the GT we must translate ``i`` back
+        to the GT JSON's ``category_id`` for the *same* class.
+
+        Two modes:
+
+        * ``class_names`` given (the model's training class identity): map by
+          **name** — ``i`` → the GT category whose name == ``class_names[i]``.
+          Robust to the GT JSON numbering/ordering its categories differently
+          from the train split. A trained class absent from the GT is warned
+          about and **dropped** (omitted from the map, so its predictions are
+          scored as undetected) — never silently mis-scored against another id.
+        * ``class_names`` ``None``: fall back to the dataloader's positional
+          remap, ``enumerate(sorted(coco.cats.keys()))`` — correct only when the
+          GT's category set/order matches training.
         """
-        if self._class_id_map is None:
-            cats = self._load_gt().cats
-            self._class_id_map = {i: cid for i, cid in enumerate(sorted(cats.keys()))}
+        if self._class_id_map is not None:
+            return self._class_id_map
+
+        cats = self._load_gt().cats
+        if self.class_names is None:
+            self._class_id_map = dict(enumerate(sorted(cats.keys())))
+            return self._class_id_map
+
+        name_to_id: dict[str, int] = {cat["name"]: cid for cid, cat in cats.items()}
+        class_id_map: dict[int, int] = {}
+        missing: list[str] = []
+        for i, name in enumerate(self.class_names):
+            if name in name_to_id:
+                class_id_map[i] = name_to_id[name]
+            else:
+                missing.append(name)
+        if missing:
+            warnings.warn(
+                f"Train/val category mismatch: {len(missing)} trained class(es) "
+                f"{missing} are absent from the evaluation GT ({self.coco_gt_json}) "
+                "and their predictions are dropped (scored as undetected). GT "
+                f"categories are {sorted(name_to_id)}. Classes are matched by name "
+                "— the GT split's category ids/order need not match training, but a "
+                "class the model knows must appear by name in the GT to be scored.",
+                stacklevel=2,
+            )
+        self._class_id_map = class_id_map
         return self._class_id_map
 
 

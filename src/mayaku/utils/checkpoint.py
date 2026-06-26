@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "build_sidecar",
+    "class_names_from_checkpoint",
     "config_from_checkpoint",
     "git_hash",
     "load_checkpoint",
@@ -133,6 +134,20 @@ def config_from_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, dict[st
             "the architecture from the checkpoint's embedded sidecar."
         )
     return MayakuConfig.model_validate(config), state
+
+
+def class_names_from_checkpoint(checkpoint_path: Path) -> list[str] | None:
+    """Read the model's training ``class_names`` from a self-describing checkpoint.
+
+    Returns the ordered class list embedded in the ``"mayaku"`` sidecar
+    (contiguous index ``i`` == ``class_names[i]``) — the model's authoritative
+    class identity, used by the evaluator to decode predictions to GT
+    ``category_id`` by name. ``None`` when the checkpoint has no sidecar or no
+    recorded names (an older or externally produced ``.pth``).
+    """
+    sidecar, _ = load_checkpoint(checkpoint_path)
+    names = sidecar.get("class_names") if sidecar else None
+    return list(names) if isinstance(names, list) else None
 
 
 def build_sidecar(
