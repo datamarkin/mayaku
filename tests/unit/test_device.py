@@ -66,6 +66,52 @@ def test_amp_dtype_matrix() -> None:
     assert Device("cpu").amp_dtype is None
 
 
+def test_resolve_amp_dtype_cpu_disables() -> None:
+    # No autocast path on CPU regardless of request.
+    assert Device("cpu").resolve_amp_dtype("bf16") is None
+    assert Device("cpu").resolve_amp_dtype("fp16") is None
+
+
+def test_resolve_amp_dtype_mps_honors_fp16_only() -> None:
+    # Metal reduced-precision training is validated for fp16 only: an
+    # explicit fp16 opt-in is honored, but a bf16 request falls back to
+    # fp32 (None) rather than the unvalidated bf16-on-Metal path.
+    assert Device("mps").resolve_amp_dtype("fp16") == "fp16"
+    assert Device("mps").resolve_amp_dtype("bf16") is None
+
+
+def test_resolve_amp_dtype_cuda_keeps_bf16_on_native_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda including_emulation=True: True)
+    assert Device("cuda").resolve_amp_dtype("bf16") == "bf16"
+
+
+def test_resolve_amp_dtype_cuda_downgrades_bf16_without_native_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pre-Ampere (T4 / V100): emulated bf16 is slow with no accuracy gain,
+    # so fall back to fp16. We probe with including_emulation=False so the
+    # emulation default doesn't mask the lack of hardware bf16.
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda including_emulation=True: False)
+    assert Device("cuda").resolve_amp_dtype("bf16") == "fp16"
+
+
+def test_resolve_amp_dtype_cuda_fp16_never_probes_bf16(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An fp16 request is kept verbatim and must not consult bf16 support.
+    probed = []
+
+    def _spy(including_emulation: bool = True) -> bool:
+        probed.append(including_emulation)
+        return True
+
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", _spy)
+    assert Device("cuda").resolve_amp_dtype("fp16") == "fp16"
+    assert probed == []
+
+
 def test_dist_backend_matrix() -> None:
     assert Device("cuda").dist_backend == "nccl"
     assert Device("mps").dist_backend == "gloo"

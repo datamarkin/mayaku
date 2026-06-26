@@ -17,9 +17,11 @@ Notes:
       validated end-to-end on this codebase. Users who want fp16 on
       MPS can pass ``dtype=torch.float16`` to :func:`autocast` directly
       via the solver config (``solver.amp_dtype: float16``).
-      ``bfloat16`` on CUDA Ampere+ is a future toggle and not exposed yet
-      to keep the v1 surface small (see open question recorded in
-      ``PROJECT_STATUS.md``).
+    * The config's ``solver.amp_dtype`` is an *intent*, not a guarantee.
+      :meth:`resolve_amp_dtype` clamps it to what the live hardware can
+      actually deliver — keeping bf16 only on GPUs with native bfloat16
+      (Ampere+), downgrading to fp16 elsewhere, and never running bf16 on
+      MPS (Metal reduced-precision training is validated for fp16 only).
 """
 
 from __future__ import annotations
@@ -72,6 +74,35 @@ class Device:
         if self.kind == "mps":
             return torch.float32
         return None
+
+    def resolve_amp_dtype(self, requested: str) -> str | None:
+        """Clamp a requested AMP dtype to what this hardware can deliver.
+
+        ``solver.amp_dtype`` is a *ceiling*, not a promise: the bundled
+        recipes ask for ``"bf16"`` because it's the best choice on modern
+        accelerators, but bf16 is wasted on hardware without native
+        bfloat16 tensor cores (pre-Ampere CUDA — T4 / V100 / older Colab),
+        where autocast emulates it slowly with no accuracy gain. This
+        resolves the request against the live backend and returns the
+        dtype string to autocast with, or ``None`` when AMP should be
+        turned off entirely for this device.
+
+        - **CPU**: ``None`` — no autocast path.
+        - **MPS**: ``"fp16"`` is honored (the documented opt-in);
+          ``"bf16"`` returns ``None`` — Metal reduced-precision training
+          is validated for fp16 only, so a bf16 request falls back to
+          fp32 rather than an unvalidated path.
+        - **CUDA**: ``"bf16"`` is kept only when the GPU reports
+          *hardware* bf16 (``is_bf16_supported(including_emulation=False)``);
+          otherwise it falls back to ``"fp16"``. ``"fp16"`` is always kept.
+        """
+        if not self.supports_amp:
+            return None
+        if self.kind == "mps":
+            return "fp16" if requested == "fp16" else None
+        if requested == "bf16" and not torch.cuda.is_bf16_supported(including_emulation=False):
+            return "fp16"
+        return requested
 
     @property
     def dist_backend(self) -> str:

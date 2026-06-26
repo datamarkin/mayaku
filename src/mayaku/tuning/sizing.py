@@ -9,9 +9,18 @@ maximizes real letterbox content for the data's native aspect while staying
 Why max-content-under-budget (not closest-aspect, not long-edge): it's a strict
 Pareto win over square letterbox — equal-or-more real resolution at equal-or-less
 compute on every aspect — and the never-exceed ceiling gives a hard compute /
-memory bound (no OOM past the square baseline). Default ``align=128`` is
-torch.compile-safe (and a superset of the FPN stride-32 minimum), so one resolved
-size is valid on every backend.
+memory bound (no OOM past the square baseline).
+
+Two alignment grids, on purpose:
+    * **Deploy / eval / export** use ``align=128`` (the default): torch.compile-
+      safe and ANE/TensorRT-friendly, so the single shipped size specialises
+      best on every backend.
+    * **Training** uses ``align=32`` (:func:`multi_scale_canvases`): the FPN
+      stride floor and what the detector already pads to internally
+      (``size_divisibility``). The finer grid gives a dense multi-scale ladder
+      (e.g. 480/512/.../640 instead of the coarse 128-grid 384/512/640) — the
+      coarse grid leaves ~2 AP on the table. The top rung is still pinned to the
+      128-aligned deploy canvas, so train geometry == deploy at full scale.
 """
 
 from __future__ import annotations
@@ -27,33 +36,39 @@ __all__ = [
 
 
 def multi_scale_canvases(
-    budget: int,
-    aspect: float,
+    deploy_canvas: tuple[int, int],
     *,
     scale_min: float = 0.5,
-    steps: int = 4,
-    align: int = 128,
+    align: int = 32,
 ) -> list[tuple[int, int]]:
-    """Multi-scale letterbox canvases for training, from a budget + aspect.
+    """Multi-scale letterbox canvases for training, anchored on the deploy canvas.
 
-    The top (full ``budget``) is the deploy canvas — train geometry == deploy;
-    smaller ones (down to ``scale_min`` of the budget) are scale-down
-    augmentation. Each maximizes content under its own budget. Returns a
-    de-duplicated list ascending by area.
+    The top rung is exactly ``deploy_canvas`` (the 128-aligned deploy / export
+    geometry), so train geometry == deploy at full scale. Smaller rungs step the
+    long edge DOWN by ``align`` — 32, the FPN stride floor the detector already
+    pads to — to roughly ``scale_min`` of the deploy *area*, each snapped to a
+    max-content canvas at the deploy aspect. The fine 32 grid yields a dense
+    ladder (e.g. 480/512/.../640) where the coarse 128 grid would give only
+    384/512/640; that coarseness costs ~2 AP. Returns a de-duplicated list
+    ascending by area; the deploy canvas is always the last entry.
     """
     if not 0.0 < scale_min <= 1.0:
         raise ValueError(f"scale_min must be in (0, 1]; got {scale_min}")
-    fracs = (
-        [scale_min + (1.0 - scale_min) * i / (steps - 1) for i in range(steps)]
-        if steps > 1
-        else [1.0]
-    )
-    out: list[tuple[int, int]] = []
-    for f in fracs:
-        canvas = snap_max_content(max(align * align, int(budget * f)), aspect, align=align)
-        if canvas not in out:
-            out.append(canvas)
-    return out
+    h, w = deploy_canvas
+    area = h * w
+    aspect = w / h
+    long_edge = max(h, w)
+    # scale_min is an *area* fraction, so the long-edge floor is its sqrt;
+    # round that floor UP to the grid so the smallest rung never dips below
+    # scale_min of the budget.
+    min_long = max(align, math.ceil(scale_min**0.5 * long_edge / align) * align)
+    canvases: set[tuple[int, int]] = {deploy_canvas}
+    for side in range(min_long, long_edge, align):
+        frac = side / long_edge
+        canvases.add(
+            snap_max_content(max(align * align, int(area * frac * frac)), aspect, align=align)
+        )
+    return sorted(canvases, key=lambda hw: hw[0] * hw[1])
 
 
 def resolve_canvas(

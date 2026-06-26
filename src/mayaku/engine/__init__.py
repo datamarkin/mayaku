@@ -31,7 +31,7 @@ from mayaku.engine.evaluator import (
     inference_on_dataset,
     instances_to_coco_json,
 )
-from mayaku.engine.optim import build_lr_scheduler, build_optimizer
+from mayaku.engine.optim import build_lr_scheduler, build_optimizer, resolve_schedule
 from mayaku.engine.trainer import AMPTrainer, SimpleTrainer, TrainerBase
 
 __all__ = [
@@ -63,5 +63,6 @@ __all__ = [
     "is_main_process",
     "launch",
     "resolve_ddp_device",
+    "resolve_schedule",
     "synchronize",
 ]

@@ -62,6 +62,7 @@ from mayaku.engine import (
     get_world_size,
     init_from_env_if_needed,
     is_main_process,
+    resolve_schedule,
 )
 from mayaku.tuning import (
     analyze_dataset,
@@ -86,11 +87,12 @@ def run_train(
     weights: Path | None = None,
     pretrained_backbone: bool = False,
     device: str | None = None,
-    max_iter: int | None = None,
+    num_epochs: int | None = None,
     log_period: int = 20,
     val_json: Path | None = None,
     val_image_root: Path | None = None,
     resume: Path | None = None,
+    user_set_paths: set[str] | None = None,
 ) -> None:
     """Train a detector.
 
@@ -120,16 +122,19 @@ def run_train(
             "schedule) from a checkpoint, so there is nothing left to initialise."
         )
 
-    # Track which YAML paths the user explicitly set. Auto-config later
+    # Track which config paths the user explicitly set. Auto-config later
     # uses this to skip any field the user already pinned, so explicit
-    # values always win over the dataset-derived recipe. Python-direct
-    # callers (``config`` is a constructed MayakuConfig) start with an
-    # empty set — auto-config will fill in everything except CLI flags
-    # which we mark below.
-    user_set_paths: set[str]
+    # values always win over the dataset-derived recipe. Two sources feed
+    # it: ``user_set_paths`` forwarded by the caller (``mayaku.api`` passes
+    # the user's ``overrides`` + ``size_budget`` here so they survive
+    # auto-config), and — when ``config`` is a YAML path — the leaves of
+    # that YAML. A constructed ``MayakuConfig`` carries no such record, so
+    # only the caller-forwarded set protects it.
+    # Fresh copy so the later ``.add("solver.num_epochs")`` never mutates the
+    # caller's set.
+    user_set_paths = set(user_set_paths) if user_set_paths is not None else set()
     if isinstance(config, MayakuConfig):
         cfg = config
-        user_set_paths = set()
     else:
         text = Path(config).read_text(encoding="utf-8")
         raw_yaml = yaml.safe_load(text) or {}
@@ -139,16 +144,16 @@ def run_train(
                 f"got {type(raw_yaml).__name__}"
             )
         raw_dict = dict(raw_yaml)
-        user_set_paths = collect_set_paths(raw_dict)
+        user_set_paths |= collect_set_paths(raw_dict)
         cfg = MayakuConfig.model_validate(raw_dict)
 
-    if max_iter is not None:
+    if num_epochs is not None:
         cfg = cfg.model_copy(
-            update={"solver": cfg.solver.model_copy(update={"max_iter": max_iter})}
+            update={"solver": cfg.solver.model_copy(update={"num_epochs": num_epochs})}
         )
-        # CLI --max-iter is an explicit user choice; preserve it through
-        # auto-config even though the value didn't come from the YAML.
-        user_set_paths.add("solver.max_iter")
+        # An explicit --epochs is a user choice; preserve it through auto-config
+        # even though the value didn't come from the YAML.
+        user_set_paths.add("solver.num_epochs")
 
     # Periodic eval requires both the dataset paths *and* an enabled
     # period; rejecting the half-configured cases up front means users
@@ -252,9 +257,10 @@ def run_train(
     # build / sampler below, so they must be identical across ranks.
     def _derive(meta: Any, dicts: list[dict[str, Any]]) -> dict[str, Any]:
         # Dataset-aware auto-config. The recipe layer fills in fine-tune-
-        # relevant fields (anchor sizes/ARs, num_classes, base_lr, schedule,
-        # mosaic / mixup probs, sampler choice) that the user did NOT set
-        # explicitly. Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
+        # relevant heuristics (anchor sizes/ARs, base_lr, schedule, mosaic /
+        # mixup probs, sampler choice) that the user did NOT set explicitly.
+        # (num_classes is handled separately in the body — it's structural, not
+        # a heuristic.) Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
         # ``auto_config.enabled = False`` both short-circuit with no overrides.
         overrides: Mapping[str, Any] | None = None
         stats: Any = None
@@ -265,7 +271,7 @@ def run_train(
                 resize_short_edge=cfg.input.min_size_test,
                 resize_max_edge=cfg.input.max_size_test,
             )
-            proposed = derive_overrides(stats, cfg, user_set_paths)
+            proposed = derive_overrides(stats, cfg)
             overrides = filter_unset(proposed, user_set_paths) or None
         # RFS repeat factors, decided against the *post*-auto-config dataloader
         # (auto-config may select RepeatFactorTrainingSampler). Computed on
@@ -324,6 +330,34 @@ def run_train(
         cfg = merge_overrides(cfg, derived["overrides"])
         if is_main_process():
             _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths)
+
+    # When auto-config is on (the fine-tune / API default), the class count is a
+    # STRUCTURAL fact of the dataset — derive it from the COCO categories
+    # regardless of dataset size (unlike the LR/anchor/schedule heuristics, which
+    # need MIN_IMAGES_FOR_AUTO_CONFIG worth of data). This is what makes a
+    # weights-only fine-tune on a new class count reinit the head: the rebuilt
+    # head is sized to the new dataset, so the old class-specific layers
+    # shape-mismatch and `_load_for_finetune` drops + reinitialises them. With
+    # auto-config off (manual / replication) the config is used verbatim, and a
+    # user-pinned num_classes always wins.
+    if cfg.auto_config.enabled and "model.roi_heads.num_classes" not in user_set_paths:
+        n_classes = len(metadata.thing_classes)
+        if cfg.model.roi_heads.num_classes != n_classes:
+            cfg = merge_overrides(cfg, {"model": {"roi_heads": {"num_classes": n_classes}}})
+            if is_main_process():
+                print(f"[train] num_classes set from dataset categories: {n_classes}", flush=True)
+
+    # Resolve the epoch budget to iteration counts now that the dataset size is
+    # known. One epoch = ceil(num_images / global_batch) optimizer steps, where
+    # global_batch spans grad-accum and all DDP ranks. The scheduler, LLRD
+    # snapshot milestones, and the trainer loop all run on these resolved ints
+    # (max_iter / warmup_iters are derived, not config fields).
+    max_iter, warmup_iters = resolve_schedule(
+        cfg.solver.num_epochs,
+        len(dataset_dicts),
+        cfg.solver.effective_batch(world_size),
+        cfg.solver.warmup_fraction,
+    )
     # Bake the resolved letterbox canvas into cfg so the resize aug (train + eval)
     # and the checkpoint sidecar all carry the exact (H, W) the model deploys at.
     if derived["canvas"] is not None:
@@ -383,7 +417,9 @@ def run_train(
     # scheduler captures base LRs from the freshly-built optimizer, so it
     # must be constructed *before* the resumed optimizer state is loaded.
     optimizer = build_optimizer(model, cfg.solver)
-    scheduler = build_lr_scheduler(optimizer, cfg.solver)
+    scheduler = build_lr_scheduler(
+        optimizer, cfg.solver, max_iter=max_iter, warmup_iters=warmup_iters
+    )
     if resume_ckpt is not None:
         if "optimizer" in resume_ckpt:
             optimizer.load_state_dict(resume_ckpt["optimizer"])
@@ -505,14 +541,34 @@ def run_train(
         cfg.solver.clip_gradients_value if cfg.solver.clip_gradients_enabled else None
     )
     grad_clip_type = cfg.solver.clip_gradients_type
+    # amp_dtype in the config is an intent; the device clamps it to what the
+    # hardware can actually deliver (bf16 only on native-bf16 GPUs, never on
+    # MPS) and returns None when AMP can't run here at all.
+    requested_amp = cfg.solver.amp_dtype
+    amp_dtype: str | None = None
+    if cfg.solver.amp_enabled:
+        amp_dtype = dev.resolve_amp_dtype(requested_amp)
+        if amp_dtype != requested_amp and is_main_process():
+            if amp_dtype is None:
+                print(
+                    f"[train] AMP ({requested_amp}) unavailable on {dev.kind}; training in fp32.",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[train] amp_dtype {requested_amp!r} unsupported on this {dev.kind} device; "
+                    f"using {amp_dtype!r} instead.",
+                    flush=True,
+                )
+
     trainer: SimpleTrainer
-    if cfg.solver.amp_enabled and dev.supports_amp:
+    if amp_dtype is not None:
         trainer = AMPTrainer(
             model,
             loader,
             optimizer,
             dev,
-            amp_dtype=cfg.solver.amp_dtype,
+            amp_dtype=amp_dtype,
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
             grad_accum_steps=cfg.solver.grad_accum_steps,
@@ -589,11 +645,7 @@ def run_train(
         # through warmup + cosine. Only meaningful when LLRD actually
         # splits the optimizer into per-layer groups.
         if cfg.solver.llrd_enabled:
-            milestones = (
-                cfg.solver.warmup_iters,
-                cfg.solver.max_iter // 2,
-                cfg.solver.max_iter,
-            )
+            milestones = (warmup_iters, max_iter // 2, max_iter)
             hooks.append(LRSnapshotHook(optimizer, milestones))
 
     # EMA — register AFTER the live-model checkpointer so the EMA update
@@ -653,7 +705,7 @@ def run_train(
         eval_model = ema.shadow if ema is not None else unwrapped_model
         hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
-    trainer.train(start_iter=start_iter, max_iter=cfg.solver.max_iter)
+    trainer.train(start_iter=start_iter, max_iter=max_iter)
 
 
 def run_train_worker(
@@ -664,11 +716,12 @@ def run_train_worker(
     weights: Path | None,
     pretrained_backbone: bool,
     device: str | None,
-    max_iter: int | None,
+    num_epochs: int | None,
     log_period: int,
     val_json: Path | None,
     val_image_root: Path | None,
     resume: Path | None = None,
+    user_set_paths: set[str] | None = None,
 ) -> None:
     """Positional-arg adapter for :func:`mayaku.engine.launch`.
 
@@ -684,11 +737,12 @@ def run_train_worker(
         weights=weights,
         pretrained_backbone=pretrained_backbone,
         device=device,
-        max_iter=max_iter,
+        num_epochs=num_epochs,
         log_period=log_period,
         val_json=val_json,
         val_image_root=val_image_root,
         resume=resume,
+        user_set_paths=user_set_paths,
     )
 
 

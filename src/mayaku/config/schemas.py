@@ -20,10 +20,9 @@ report:
   ``MODEL.DEVICE = "cuda"`` (see ``BACKEND_PORTABILITY_REPORT.md`` §4)
   would break anyone running on MPS; ``"auto"`` resolves through
   :meth:`mayaku.backends.device.Device.auto` at construction time.
-* **3x is the default schedule.** ``SolverConfig`` ships with the
-  spec §6.3 numbers (``max_iter=270000``, ``steps=(210000, 250000)``,
-  ``base_lr=0.02`` from ``Base-RCNN-FPN.yaml``). 1x and other
-  schedules are constructed via :mod:`mayaku.config.schedules`.
+* **Training length is in epochs.** ``SolverConfig.num_epochs`` sets the
+  number of passes over the dataset; the engine resolves it to an iteration
+  count at train time, and the LR follows a single warmup→cosine decay.
 
 All models are frozen and reject unknown fields. Use
 ``model.model_copy(update={...})`` to derive a variant.
@@ -606,11 +605,14 @@ class InputConfig(_BaseModel):
     #                     the fixed-size deploy geometry (host un-letterboxes preds).
     # The mayaku-* family uses "letterbox"; kept switchable as the proven fallback.
     resize_mode: Literal["shortest_edge", "letterbox"] = "shortest_edge"
-    # Multi-scale letterbox training: the smallest budget fraction (one canvas
-    # drawn per iteration, from this fraction up to the full deploy canvas). The
-    # deploy canvas is always the top — train geometry == deploy. Derived from the
-    # budget; replaces the old explicit ``train_sizes`` list.
-    train_scale_min: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
+    # Multi-scale letterbox training: the smallest budget (AREA) fraction; one
+    # canvas is drawn per image, from this fraction up to the full deploy canvas
+    # on a 32-aligned grid. The deploy canvas is always the top — train geometry
+    # == deploy. Default 0.64 reproduces Detectron2's proven scale envelope: D2
+    # trains short-edge [640, 800] and tests at 800, i.e. a smallest scale of
+    # (640/800)**2 = 0.64 of the deploy AREA. Replaces the old explicit
+    # ``train_sizes`` list.
+    train_scale_min: Annotated[float, Field(gt=0.0, le=1.0)] = 0.64
     mask_format: Literal["polygon", "bitmask"] = "polygon"
     random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 
@@ -681,11 +683,9 @@ class InputConfig(_BaseModel):
 class SolverConfig(_BaseModel):
     """Optimizer and LR schedule.
 
-    Defaults are the **3x schedule** from `DETECTRON2_TECHNICAL_SPEC.md`
-    §6.3: ``ims_per_batch=16``, ``base_lr=0.02``, ``max_iter=270000``,
-    ``steps=(210000, 250000)``, ``warmup_iters=1000``,
-    ``warmup_factor=1/1000``. Use :func:`mayaku.config.schedules.schedule_1x`
-    or ``schedule_3x`` to construct the canonical variants.
+    Training length is set in epochs (:attr:`num_epochs`) and the LR follows a
+    single warmup→cosine decay; the engine resolves epochs to an iteration
+    count at train time from the dataset size and effective batch.
     """
 
     ims_per_batch: Annotated[int, Field(gt=0)] = 16
@@ -696,12 +696,17 @@ class SolverConfig(_BaseModel):
     # ``base_lr`` should be tuned against the effective batch, not the micro.
     grad_accum_steps: Annotated[int, Field(ge=1)] = 1
     base_lr: Annotated[float, Field(gt=0.0)] = 0.02
-    lr_scheduler_name: Literal["WarmupMultiStepLR", "WarmupCosineLR"] = "WarmupMultiStepLR"
-    steps: tuple[int, ...] = (210_000, 250_000)
-    max_iter: Annotated[int, Field(gt=0)] = 270_000
-    warmup_iters: Annotated[int, Field(ge=0)] = 1000
+    # Training length is expressed in epochs (passes over the dataset). The
+    # engine resolves it to an iteration count at train time from the dataset
+    # size and effective batch (``num_images / (ims_per_batch * grad_accum *
+    # world_size)`` iters per epoch). The LR follows a single warmup→cosine
+    # decay over the full run; ``warmup_fraction`` is the share of total
+    # iterations spent warming up from ``warmup_factor * base_lr`` to
+    # ``base_lr``. Default 16 epochs is a sane fine-tune length for any dataset;
+    # auto-config picks a dataset-adaptive value when enabled.
+    num_epochs: Annotated[int, Field(gt=0)] = 16
+    warmup_fraction: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.03
     warmup_factor: Annotated[float, Field(gt=0.0, le=1.0)] = 1.0 / 1000.0
-    warmup_method: Literal["linear", "constant"] = "linear"
 
     # Optimizer choice. ``"SGD"`` (default) is the D2-replication path
     # and pairs with ``momentum`` / ``nesterov`` below. ``"AdamW"`` is
@@ -716,7 +721,6 @@ class SolverConfig(_BaseModel):
 
     weight_decay: Annotated[float, Field(ge=0.0)] = 1e-4
     weight_decay_norm: Annotated[float, Field(ge=0.0)] = 0.0
-    gamma: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.1
 
     # Layer-wise learning rate decay (LLRD). When enabled, each backbone
     # parameter's LR is scaled by ``llrd_decay ** ((num_layers + 2) - layer_id - 1)``
@@ -732,10 +736,12 @@ class SolverConfig(_BaseModel):
     llrd_enabled: bool = False
     llrd_decay: Annotated[float, Field(gt=0.0, le=1.0)] = 0.8
     amp_enabled: bool = False
-    # Resolved at Step 13 (engine). ``"fp16"`` is the safe cross-backend
-    # default; ``"bf16"`` is recommended on CUDA Ampere+ where it gives a
-    # wider dynamic range and lets us drop GradScaler. MPS does not yet
-    # support bf16 autocast (verify per-PT-version before flipping).
+    # An *intent*, not a guarantee: ``Device.resolve_amp_dtype`` clamps this
+    # to the live hardware at train time. ``"bf16"`` is ideal on CUDA Ampere+
+    # (wider dynamic range, lets us drop GradScaler) and is what the bundled
+    # recipes ask for; it falls back to ``"fp16"`` on pre-Ampere CUDA and to
+    # fp32 (AMP off) on MPS, which is validated for fp16 only. ``"fp16"`` is
+    # the safe cross-backend default.
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
     checkpoint_period: Annotated[int, Field(gt=0)] = 5000
     clip_gradients_enabled: bool = False
@@ -766,21 +772,12 @@ class SolverConfig(_BaseModel):
     ema_decay: Annotated[float, Field(ge=0.0, le=1.0)] = 0.9999
     ema_tau: Annotated[float, Field(gt=0.0)] = 2000.0
 
-    @model_validator(mode="after")
-    def _check_schedule(self) -> SolverConfig:
-        if self.warmup_iters >= self.max_iter:
-            raise ValueError(
-                f"warmup_iters ({self.warmup_iters}) must be < max_iter ({self.max_iter})"
-            )
-        for s in self.steps:
-            if not 0 < s < self.max_iter:
-                raise ValueError(
-                    f"steps entries must satisfy 0 < step < max_iter; got {s} "
-                    f"with max_iter={self.max_iter}"
-                )
-        if any(b <= a for a, b in zip(self.steps, self.steps[1:], strict=False)):
-            raise ValueError(f"steps must be strictly ascending; got {self.steps}")
-        return self
+    def effective_batch(self, world_size: int = 1) -> int:
+        """Images per optimizer step: ``ims_per_batch * grad_accum_steps``,
+        times ``world_size`` for the cross-rank total. ``base_lr`` should be
+        tuned against this, and one epoch is ``ceil(num_images / this)`` steps.
+        """
+        return self.ims_per_batch * self.grad_accum_steps * world_size
 
 
 class TestConfig(_BaseModel):
@@ -821,14 +818,16 @@ class AutoConfig(_BaseModel):
     construction and overrides fine-tune-relevant fields that the user
     did NOT explicitly set in the source YAML:
 
-    * ``model.roi_heads.num_classes`` — from the dataset's category count
+    * ``model.roi_heads.num_classes`` — from the dataset's category count.
+      This one is STRUCTURAL: applied at any dataset size (the head must
+      match the data), unlike the heuristics below which need
+      ``MIN_IMAGES_FOR_AUTO_CONFIG`` worth of data.
     * ``model.anchor_generator.sizes`` / ``aspect_ratios`` — k-means on
       GT box √area and w/h (skipped if <50 boxes)
     * ``model.backbone.freeze_at`` — from dataset size bucket
-    * ``solver.base_lr`` / ``max_iter`` / ``steps`` / ``warmup_iters`` /
-      ``lr_scheduler_name`` / ``ema_enabled`` / ``ema_decay`` / ``ema_tau``
-      — from dataset size bucket, anchored to the D2 scratch recipe and
-      applying both batch-scaling and the 10× fine-tune drop
+    * ``solver.base_lr`` / ``num_epochs`` / ``ema_enabled`` / ``ema_decay`` /
+      ``ema_tau`` — from dataset size bucket, anchored to the scratch recipe
+      and applying both batch-scaling and the 10× fine-tune drop
     * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
       dataset size bucket
     * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to

@@ -261,10 +261,8 @@ def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
             base_lr=1e-4,
             momentum=0.0,
             ims_per_batch=1,
-            max_iter=2,
-            warmup_iters=1,
+            num_epochs=2,  # 1-image toy → 2 iters
             warmup_factor=0.5,
-            steps=(1,),
             checkpoint_period=2,
         ),
     )

@@ -46,7 +46,7 @@ def test_freeze_warning_fires_when_no_init_source(
             image_root=cast(Path, toy_workspace["images"]),
             output_dir=tmp_path / "out_no_init",
             device="cpu",
-            max_iter=1,
+            num_epochs=1,
         )
 
 
@@ -74,7 +74,7 @@ def test_freeze_warning_suppressed_by_weights_path(
             image_root=cast(Path, toy_workspace["images"]),
             output_dir=tmp_path / "out_with_weights_path",
             device="cpu",
-            max_iter=1,
+            num_epochs=1,
         )
     matching = [w for w in captured if _FREEZE_WARN_MATCH in str(w.message)]
     assert matching == [], f"freeze warning should be suppressed; got {matching}"

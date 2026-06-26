@@ -78,6 +78,7 @@ from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
 from mayaku.data import resolve_dataset
 from mayaku.engine import launch, resolve_ddp_device
+from mayaku.tuning import collect_set_paths
 from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
 
 __all__ = ["train"]
@@ -94,6 +95,7 @@ def train(
     val_images: Path | None = None,
     output_dir: Path | None = None,
     size_budget: int | None = None,
+    num_epochs: int | None = None,
     overrides: Mapping[str, Any] | None = None,
     device: DeviceSetting = "auto",
     num_gpus: int = 1,
@@ -130,6 +132,20 @@ def train(
     lower it for speed). It's equivalent to
     ``overrides={"input": {"size_budget": ...}}`` and wins over both the config
     and ``overrides``.
+
+    ``num_epochs`` is the training-length dial — the number of passes over the
+    dataset (the engine resolves it to an iteration count from the dataset size
+    and batch). Equivalent to ``overrides={"solver": {"num_epochs": ...}}`` and
+    wins over the config and auto-config. Leave it unset to let auto-config pick
+    a dataset-adaptive value (or fall back to the schema default of 16).
+
+    **Auto-config vs. manual recipe.** When you pass a ``config`` (YAML path,
+    bundled name, or :class:`MayakuConfig`), it is used *verbatim* — auto-config
+    is off, so the recipe you wrote is never silently re-tuned. With no
+    ``config`` (the ``weights`` + ``data`` path), the recipe is derived from
+    your dataset (schedule, LR, anchors, num_classes, augmentation). In both
+    cases anything you pass via ``overrides`` or ``size_budget`` is applied last
+    and always wins — auto-config never overwrites a field you set explicitly.
 
     See the module docstring for full parameter semantics and the
     auto-detection rules (pretrained-backbone derivation, no-val
@@ -178,14 +194,37 @@ def train(
     # is the checkpoint to load when ``weights`` was given, else None.
     cfg, config_stem, detector_weights = _resolve_model_source(config, weights)
 
-    # --- Apply overrides --------------------------------------------------
+    # --- Apply user overrides + record which fields the user pinned --------
+    # Everything the user passes here is an explicit choice that must survive
+    # auto-config. The values are merged into ``cfg`` now; their dotted paths
+    # go into ``pinned_paths`` so the dataset-derived recipe (which runs inside
+    # run_train on the no-config path) skips them and the user's value wins.
+    pinned_paths: set[str] = set()
     if overrides:
         cfg = merge_overrides(cfg, overrides)
+        pinned_paths |= collect_set_paths(overrides)
     # size_budget is the first-class form of the most common knob; applied last
     # so the explicit arg wins over the config and overrides. Schema validation
     # (positive, stride-32 multiple) runs inside merge_overrides.
     if size_budget is not None:
         cfg = merge_overrides(cfg, {"input": {"size_budget": size_budget}})
+        pinned_paths.add("input.size_budget")
+    # num_epochs is the first-class training-length knob (passes over the
+    # dataset). Like size_budget, an explicit value wins over the config and
+    # auto-config.
+    if num_epochs is not None:
+        cfg = merge_overrides(cfg, {"solver": {"num_epochs": num_epochs}})
+        pinned_paths.add("solver.num_epochs")
+
+    # A config (YAML path, bundled name, or MayakuConfig) means "train exactly
+    # this recipe": auto-config is turned off so the config is used verbatim and
+    # never silently re-tuned. Without a config (the weights= fine-tune path),
+    # the recipe is derived from THIS dataset, so auto-config is forced on — the
+    # architecture still comes from the checkpoint sidecar, but its baked-in
+    # auto_config flag (set at the model's original training time) must not
+    # disable re-tuning for the new dataset. Either way ``pinned_paths`` is
+    # never overwritten.
+    cfg = merge_overrides(cfg, {"auto_config": {"enabled": config is None}})
 
     # --- No-val short-circuit (after overrides, so eval_period is final) --
     eval_after = val_json is not None
@@ -240,6 +279,7 @@ def train(
             val_json=val_json if forward_val else None,
             val_image_root=val_images if forward_val else None,
             resume=resume_path,
+            user_set_paths=pinned_paths,
         )
     else:
         # Multi-GPU DDP: spawn ``num_gpus`` workers via :func:`launch`.
@@ -261,11 +301,12 @@ def train(
                 detector_weights,  # weights
                 pretrained_backbone,
                 device,
-                None,  # max_iter (cfg already carries it)
+                None,  # num_epochs (cfg already carries it)
                 20,  # log_period default
                 val_json if forward_val else None,
                 val_images if forward_val else None,
                 resume_path,
+                pinned_paths,
             ),
         )
     train_seconds = time.time() - train_start
@@ -320,13 +361,13 @@ def train(
         "weights_path": cfg.model.backbone.weights_path,
         "num_classes": cfg.model.roi_heads.num_classes,
         "num_gpus": num_gpus,
-        "max_iter": cfg.solver.max_iter,
+        "num_epochs": cfg.solver.num_epochs,
         "ims_per_batch": cfg.solver.ims_per_batch,
         "grad_accum_steps": cfg.solver.grad_accum_steps,
-        # ``ims_per_batch`` is per-rank; cross-rank effective batch is
-        # this value × num_gpus × grad_accum_steps. Apply the linear LR
-        # scaling rule against the cross-rank value when scaling up.
-        "effective_batch_size": cfg.solver.ims_per_batch * cfg.solver.grad_accum_steps,
+        # Single-rank effective batch (ims_per_batch × grad_accum_steps); the
+        # cross-rank total is this × num_gpus. Apply the linear LR scaling rule
+        # against the cross-rank value when scaling up.
+        "effective_batch_size": cfg.solver.effective_batch(),
         "base_lr": cfg.solver.base_lr,
         "ema_enabled": cfg.solver.ema_enabled,
         "final_weights": str(final_weights),

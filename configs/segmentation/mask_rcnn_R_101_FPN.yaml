@@ -1,5 +1,5 @@
-# R-101-FPN Mask R-CNN — 1x schedule (90k iters).
-# Use this to validate the R-101 recipe quickly before committing to 3x compute.
+# R-101-FPN Mask R-CNN — 3x schedule (270k iters). Production target.
+# Train after mask_rcnn_R_101_FPN_1x.yaml validates ≥ +1 AP over the D2 baseline.
 #
 # Recipe: cosine LR, EMA, color jitter, Mosaic + MixUp + CopyPaste.
 # CopyPaste requires bitmask format (set below).
@@ -7,7 +7,7 @@
 # config ships as FrozenBN+freeze_at=2 for fine-tuning compatibility.
 #
 # D2 3x baseline: d2_baseline/segmentation/mask_rcnn_R_101_FPN_3x.yaml
-# D2 published 3x: 42.9 box AP / 38.6 mask AP. Target with this recipe at 1x: ≥ +1 AP both.
+# D2 published 3x: 42.9 box AP / 38.6 mask AP. Target with this recipe: ≥ +2 AP both.
 model:
   meta_architecture: mask_rcnn
   mask_on: true
@@ -38,15 +38,10 @@ input:
   copy_paste_prob: 0.5
 
 solver:
-  ims_per_batch: 8
-  grad_accum_steps: 2
+  ims_per_batch: 16
+  grad_accum_steps: 1
   base_lr: 0.02
-  max_iter: 90_000
-  steps: [60_000, 80_000]
-  warmup_iters: 1_000
-  warmup_factor: 0.001
-  warmup_method: linear
-  lr_scheduler_name: WarmupCosineLR
+  num_epochs: 36
   ema_enabled: true
   ema_decay: 0.9999
   ema_tau: 2_000.0

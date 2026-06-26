@@ -9,7 +9,7 @@ argument plumbing).
 
 Subcommands:
 
-* ``mayaku train [CONFIG] [--weights] (--data | --json --images) [--val-json --val-images] [--output] [--device] [--max-iter] [--num-gpus]``
+* ``mayaku train [CONFIG] [--weights] (--data | --json --images) [--val-json --val-images] [--output] [--device] [--epochs] [--num-gpus]``
 * ``mayaku eval CONFIG --weights --json --images [--output] [--device]``
 * ``mayaku predict CONFIG IMAGE [--weights] [--output] [--device]``
 * ``mayaku export TARGET CONFIG --weights --output``
@@ -76,8 +76,8 @@ def _train(
         None, "--output", file_okay=False, help="Run directory. Default ./runs/<config_stem>/."
     ),
     device: str = typer.Option("auto", "--device", help="cpu/mps/cuda; default = auto"),
-    max_iter: int | None = typer.Option(
-        None, "--max-iter", help="Override solver.max_iter (smoke runs)."
+    epochs: int | None = typer.Option(
+        None, "--epochs", help="Number of passes over the dataset (overrides the recipe)."
     ),
     num_gpus: int = typer.Option(
         1,
@@ -116,7 +116,6 @@ def _train(
     # `train` is only needed when this command runs, so import it here.
     from mayaku.api import train
 
-    overrides = {"solver": {"max_iter": max_iter}} if max_iter is not None else None
     # Install the MPS op-fallback tracker at the shell-CLI boundary only;
     # library callers (``mayaku.train`` from Python) manage it themselves.
     with track_mps_fallbacks(label="train"):
@@ -130,7 +129,7 @@ def _train(
                 val_json=val_json,
                 val_images=val_images,
                 output_dir=output,
-                overrides=overrides,
+                num_epochs=epochs,
                 device=cast(DeviceSetting, device),
                 num_gpus=num_gpus,
                 resume=resume,

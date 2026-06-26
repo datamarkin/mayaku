@@ -114,7 +114,7 @@ def test_train_then_resume_end_to_end(toy_workspace: dict[str, Any], tmp_path: P
         train_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
-        overrides={"solver": {"max_iter": 2, "checkpoint_period": 1}},
+        overrides={"solver": {"num_epochs": 2, "checkpoint_period": 1}},
     )
     ckpt = out / "train" / "model_iter_0000001.pth"
     assert ckpt.is_file()
@@ -131,7 +131,7 @@ def test_train_then_resume_end_to_end(toy_workspace: dict[str, Any], tmp_path: P
         train_images=toy_workspace["images"],
         output_dir=out2,
         device="cpu",
-        overrides={"solver": {"max_iter": 3, "checkpoint_period": 1}},
+        overrides={"solver": {"num_epochs": 3, "checkpoint_period": 1}},
         resume=ckpt,
     )
     assert result["output_dir"] == out2

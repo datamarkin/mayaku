@@ -112,10 +112,8 @@ def _base_cfg(num_classes: int = 5, *, auto_config_enabled: bool = True) -> Maya
             base_lr=1e-4,
             momentum=0.0,
             ims_per_batch=1,
-            max_iter=5,
-            warmup_iters=1,
+            num_epochs=2,
             warmup_factor=0.5,
-            steps=(1,),
             checkpoint_period=2,
         ),
         # num_workers=0 sidesteps multiprocessing pickle issues that
@@ -171,10 +169,8 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
             "base_lr": 1e-4,  # user-set, must survive
             "momentum": 0.0,
             "ims_per_batch": 1,
-            "max_iter": 5,
-            "warmup_iters": 0,
+            "num_epochs": 1,
             "warmup_factor": 0.5,
-            "steps": [3],
             "checkpoint_period": 5,
         },
         "dataloader": {"num_workers": 0},
@@ -186,7 +182,7 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
 
     out = tmp_path / "run"
     # We don't care about the train loop succeeding; we care that
-    # auto-config rewrote the cfg before model build. max_iter=1 keeps
+    # auto-config rewrote the cfg before model build. num_epochs=1 keeps
     # the actual training cheap.
     with pytest.warns(UserWarning, match="freeze_at"):
         run_train(
@@ -195,7 +191,7 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,
+            num_epochs=1,
         )
 
     # Resolved config got dumped — read it back and confirm the
@@ -214,8 +210,8 @@ def test_auto_config_overrides_num_classes_and_anchors_via_yaml(
     )
     # User-set base_lr SURVIVED.
     assert resolved.solver.base_lr == 1e-4
-    # max_iter was CLI-overridden to 5 — preserved.
-    assert resolved.solver.max_iter == 5
+    # num_epochs was CLI-overridden to 1 — preserved.
+    assert resolved.solver.num_epochs == 1
 
     # The [auto-config] report fired in stdout.
     captured = capsys.readouterr().out
@@ -246,10 +242,8 @@ def test_auto_config_skipped_when_disabled(tmp_path: Path) -> None:
             "base_lr": 1e-4,
             "momentum": 0.0,
             "ims_per_batch": 1,
-            "max_iter": 5,
-            "warmup_iters": 0,
+            "num_epochs": 1,
             "warmup_factor": 0.5,
-            "steps": [3],
             "checkpoint_period": 5,
         },
         "dataloader": {"num_workers": 0},
@@ -268,7 +262,7 @@ def test_auto_config_skipped_when_disabled(tmp_path: Path) -> None:
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,
+            num_epochs=1,
         )
 
     resolved = load_yaml(out / "config.yaml")
@@ -300,10 +294,8 @@ def test_auto_config_skipped_below_min_images_threshold(tmp_path: Path) -> None:
             "base_lr": 1e-4,
             "momentum": 0.0,
             "ims_per_batch": 1,
-            "max_iter": 5,
-            "warmup_iters": 0,
+            "num_epochs": 1,
             "warmup_factor": 0.5,
-            "steps": [3],
             "checkpoint_period": 5,
         },
         "dataloader": {"num_workers": 0},
@@ -321,10 +313,96 @@ def test_auto_config_skipped_below_min_images_threshold(tmp_path: Path) -> None:
             image_root=fixture["images"],
             output_dir=out,
             device="cpu",
-            max_iter=5,
+            num_epochs=1,
         )
 
     resolved = load_yaml(out / "config.yaml")
-    # With only 3 images auto-config refuses to run; defaults unchanged.
-    assert resolved.model.roi_heads.num_classes == 80
+    # With only 3 images auto-config's HEURISTICS refuse to run — anchors stay
+    # the default ladder...
     assert resolved.model.anchor_generator.sizes == ((32,), (64,), (128,), (256,), (512,))
+    # ...but num_classes is STRUCTURAL: with auto-config enabled it's derived
+    # from the dataset categories (2 here) even below the image threshold, so a
+    # weights-only fine-tune always reinitialises the head. (C3 fix.)
+    assert resolved.model.roi_heads.num_classes == 2
+
+
+# ---------------------------------------------------------------------------
+# Forwarded user_set_paths protect fields on the MayakuConfig-object path
+# (the path mayaku.api.train uses) — regression for auto-config silently
+# overwriting the user's overrides / size_budget.
+# ---------------------------------------------------------------------------
+
+
+def test_forwarded_user_set_paths_survive_auto_config_on_object_path(
+    tmp_path: Path,
+) -> None:
+    """A constructed config carries no set-path record, so without the
+    forwarded ``user_set_paths`` auto-config would overwrite everything.
+    Forwarding ``{"solver.base_lr"}`` (as mayaku.api does for the user's
+    overrides) must keep base_lr while still letting auto-config correct
+    the *unprotected* num_classes from the dataset.
+    """
+    fixture = _fake_coco(num_images=30, num_classes=4, tmp_path=tmp_path)
+
+    # num_classes is wrong on purpose and NOT protected → auto-config fixes it.
+    # base_lr is the user's pin → must survive.
+    cfg = _base_cfg(num_classes=99, auto_config_enabled=True)
+    cfg = cfg.model_copy(update={"solver": cfg.solver.model_copy(update={"base_lr": 7e-5})})
+
+    out = tmp_path / "run"
+    with pytest.warns(UserWarning, match="freeze_at"):
+        run_train(
+            cfg,  # a MayakuConfig OBJECT, like mayaku.api.train forwards
+            coco_gt_json=fixture["json"],
+            image_root=fixture["images"],
+            output_dir=out,
+            device="cpu",
+            num_epochs=1,  # keeps training cheap + pins solver.num_epochs
+            user_set_paths={"solver.base_lr"},
+        )
+
+    resolved = load_yaml(out / "config.yaml")
+    # Protected pin survived auto-config.
+    assert resolved.solver.base_lr == 7e-5
+    # Unprotected field was auto-derived from the dataset (4 categories).
+    assert resolved.model.roi_heads.num_classes == 4
+    # CLI num_epochs pin also survived.
+    assert resolved.solver.num_epochs == 1
+
+
+# ---------------------------------------------------------------------------
+# C3: a weights-only fine-tune on a NEW class count reinitialises the head
+# ---------------------------------------------------------------------------
+
+
+def test_weights_finetune_reinits_head_for_new_class_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A checkpoint trained with 80 classes, fine-tuned on a 3-class dataset:
+    num_classes is derived from the data, the head is rebuilt to 3 classes, and
+    the old 80-class class-specific layers are dropped + reinitialised. (C3.)"""
+    fixture = _fake_coco(num_images=12, num_classes=3, tmp_path=tmp_path)
+
+    # An 80-class (COCO-style) checkpoint, saved as a bare state_dict.
+    weights = tmp_path / "coco80.pth"
+    _prebuild_weights(_base_cfg(num_classes=80), weights)
+
+    # Fine-tune config still says 80, but auto-config is on and the dataset has
+    # 3 categories → the head must be resized + reinitialised.
+    cfg = _base_cfg(num_classes=80, auto_config_enabled=True)
+    out = tmp_path / "run"
+    run_train(
+        cfg,
+        coco_gt_json=fixture["json"],
+        image_root=fixture["images"],
+        output_dir=out,
+        device="cpu",
+        weights=weights,
+        num_epochs=1,
+    )
+
+    resolved = load_yaml(out / "config.yaml")
+    # Head resized to the dataset's class count...
+    assert resolved.model.roi_heads.num_classes == 3
+    # ...and _load_for_finetune dropped the mismatched 80-class layers to reinit.
+    assert "train from random init" in capsys.readouterr().out
