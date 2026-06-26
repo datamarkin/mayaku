@@ -79,10 +79,12 @@ def test_derive_overrides_empty_for_tiny_datasets() -> None:
     assert derive_overrides(stats, MayakuConfig()) == {}
 
 
-def test_derive_overrides_sets_num_classes_from_dataset() -> None:
+def test_derive_overrides_does_not_set_num_classes() -> None:
+    # num_classes is structural (derived from the dataset unconditionally by
+    # run_train), not a tuning heuristic — auto-config must NOT emit it.
     stats = _stats(num_classes=12)
     overrides = derive_overrides(stats, MayakuConfig())
-    assert overrides["model"]["roi_heads"]["num_classes"] == 12
+    assert "roi_heads" not in overrides.get("model", {})
 
 
 def test_derive_overrides_sets_anchors_when_enough_boxes() -> None:
@@ -151,7 +153,8 @@ def test_derive_overrides_emits_pydantic_valid_payload() -> None:
     stats = _stats(num_images=2_000, num_boxes=500, num_classes=12)
     overrides = derive_overrides(stats, MayakuConfig())
     merged = merge_overrides(MayakuConfig(), overrides)
-    assert merged.model.roi_heads.num_classes == 12
+    # num_classes is set by run_train (structural), not by derive_overrides.
+    assert merged.model.anchor_generator.sizes != ((32,), (64,), (128,), (256,), (512,))
     assert merged.solver.num_epochs > 0
     assert merged.solver.ema_enabled is True
 

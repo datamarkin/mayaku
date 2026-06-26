@@ -317,9 +317,13 @@ def test_auto_config_skipped_below_min_images_threshold(tmp_path: Path) -> None:
         )
 
     resolved = load_yaml(out / "config.yaml")
-    # With only 3 images auto-config refuses to run; defaults unchanged.
-    assert resolved.model.roi_heads.num_classes == 80
+    # With only 3 images auto-config's HEURISTICS refuse to run — anchors stay
+    # the default ladder...
     assert resolved.model.anchor_generator.sizes == ((32,), (64,), (128,), (256,), (512,))
+    # ...but num_classes is STRUCTURAL: with auto-config enabled it's derived
+    # from the dataset categories (2 here) even below the image threshold, so a
+    # weights-only fine-tune always reinitialises the head. (C3 fix.)
+    assert resolved.model.roi_heads.num_classes == 2
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +368,41 @@ def test_forwarded_user_set_paths_survive_auto_config_on_object_path(
     assert resolved.model.roi_heads.num_classes == 4
     # CLI num_epochs pin also survived.
     assert resolved.solver.num_epochs == 1
+
+
+# ---------------------------------------------------------------------------
+# C3: a weights-only fine-tune on a NEW class count reinitialises the head
+# ---------------------------------------------------------------------------
+
+
+def test_weights_finetune_reinits_head_for_new_class_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A checkpoint trained with 80 classes, fine-tuned on a 3-class dataset:
+    num_classes is derived from the data, the head is rebuilt to 3 classes, and
+    the old 80-class class-specific layers are dropped + reinitialised. (C3.)"""
+    fixture = _fake_coco(num_images=12, num_classes=3, tmp_path=tmp_path)
+
+    # An 80-class (COCO-style) checkpoint, saved as a bare state_dict.
+    weights = tmp_path / "coco80.pth"
+    _prebuild_weights(_base_cfg(num_classes=80), weights)
+
+    # Fine-tune config still says 80, but auto-config is on and the dataset has
+    # 3 categories → the head must be resized + reinitialised.
+    cfg = _base_cfg(num_classes=80, auto_config_enabled=True)
+    out = tmp_path / "run"
+    run_train(
+        cfg,
+        coco_gt_json=fixture["json"],
+        image_root=fixture["images"],
+        output_dir=out,
+        device="cpu",
+        weights=weights,
+        num_epochs=1,
+    )
+
+    resolved = load_yaml(out / "config.yaml")
+    # Head resized to the dataset's class count...
+    assert resolved.model.roi_heads.num_classes == 3
+    # ...and _load_for_finetune dropped the mismatched 80-class layers to reinit.
+    assert "train from random init" in capsys.readouterr().out
