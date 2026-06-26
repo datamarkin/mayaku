@@ -134,7 +134,6 @@ class UniQueryHead(nn.Module):
         batch_size = features[0].shape[0]
         device = features[0].device
 
-        num_proposals = num_proposals_override or self.num_proposals
         num_stages = num_stages_override or self.num_stages
 
         # ``images_whwh`` (B, 4) = per-image [W, H, W, H] content size, used to
@@ -160,12 +159,25 @@ class UniQueryHead(nn.Module):
             k = bboxes.shape[1]
             proposal_features = qgn_out["feats"].reshape(1, batch_size * k, -1)
         else:
+            # Learned proposals are a permutation-invariant set (nn.Embedding
+            # rows with no intrinsic ranking), so there is no principled way to
+            # keep a subset at inference — slicing the first k would drop
+            # arbitrary specialized queries. The proposal dial is only
+            # meaningful on the QGN path (k = top-k by objectness); reject it
+            # here rather than silently degrade.
+            if num_proposals_override is not None:
+                raise ValueError(
+                    "num_proposals_override requires the QGN proposal path; the "
+                    "learned-proposal path (uniquery_generator=None) has no proposal "
+                    "ranking to select by. Enable the QGN generator, or retrain with "
+                    "uniquery_head.num_proposals set to the desired count."
+                )
             # Convert learned cxcywh proposals to absolute xyxy
-            proposal_boxes_xyxy = _cxcywh_to_xyxy(self.init_proposal_boxes.weight[:num_proposals])
+            proposal_boxes_xyxy = _cxcywh_to_xyxy(self.init_proposal_boxes.weight)
             bboxes = proposal_boxes_xyxy[None] * images_whwh[:, None, :]  # (B, N, 4)
 
             # Expand proposal features: original uses [None].repeat(1, bs, 1)
-            proposal_features = self.init_proposal_features.weight[:num_proposals]
+            proposal_features = self.init_proposal_features.weight
             proposal_features = proposal_features[None].repeat(1, batch_size, 1)  # (1, B*N, d)
 
         # Append DN queries (training only). They flow through the same stages,
