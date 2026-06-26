@@ -59,6 +59,17 @@ class Augmentation:
     def get_transform(self, image: npt.NDArray[Any]) -> Transform:
         raise NotImplementedError
 
+    def reseed(self, rng: np.random.Generator) -> None:
+        """Adopt ``rng`` as this augmentation's sampling stream.
+
+        Called once per DataLoader worker so each worker draws from an
+        independent, seed-derived stream instead of replaying the
+        construction-time ``Generator``. Stochastic augmentations sample from
+        ``self.rng``; deterministic ones carry it unused. Subclasses storing
+        their RNG elsewhere override this.
+        """
+        self.rng = rng
+
 
 class ResizeShortestEdge(Augmentation):
     """Resize so the short edge equals one of ``short_edge_lengths`` and

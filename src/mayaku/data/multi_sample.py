@@ -129,6 +129,14 @@ class MultiSampleMappedDataset:
         self._augs: list[MultiSampleAugmentation] = list(multi_sample_augs)
         self._rng = rng if rng is not None else np.random.default_rng()
 
+    def reseed(self, rng: np.random.Generator) -> None:
+        """Point both the multi-sample sampler and the per-sample mapper at
+        ``rng`` (one shared per-worker stream). See
+        :meth:`DatasetMapper.reseed`.
+        """
+        self._rng = rng
+        self._mapper.reseed(rng)
+
     def __len__(self) -> int:
         return len(self._dataset_dicts)
 

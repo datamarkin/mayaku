@@ -107,6 +107,18 @@ class DatasetMapper:
             flip_indices = metadata.keypoint_flip_indices
         self._aug_list = AugmentationList(list(augmentations), flip_indices=flip_indices)
 
+    def reseed(self, rng: np.random.Generator) -> None:
+        """Give every augmentation a fresh per-worker RNG stream.
+
+        Called once per DataLoader worker (and once in the main process for
+        ``num_workers=0``) so each worker draws from an independent,
+        seed-derived stream instead of replaying the augmentation objects'
+        shared construction-time ``Generator`` state. See
+        :meth:`mayaku.data.transforms.augmentation.Augmentation.reseed`.
+        """
+        for aug in self._aug_list.augmentations:
+            aug.reseed(rng)
+
     def __call__(self, dataset_dict: dict[str, Any]) -> dict[str, Any]:
         # Detectron2 deepcopies the dict so downstream mutation doesn't
         # bleed back into the dataset cache. When the input came from a

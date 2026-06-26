@@ -9,12 +9,14 @@ hand off to :class:`SimpleTrainer` (or :class:`AMPTrainer` when
 
 from __future__ import annotations
 
+import functools
 import re
 import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
@@ -500,6 +502,9 @@ def run_train(
         mapped = MultiSampleMappedDataset(dataset_dicts, mapper, multi_sample_augs)
     else:
         mapped = _MappedList(dataset_dicts, mapper)
+    # Single training seed: both the samplers and the per-worker augmentation
+    # RNGs derive from it, so a run is reproducible from this one value.
+    seed = 0
     # Samplers are rank-aware: each rank reads a strided slice of the
     # shuffled index stream so no two ranks see the same image in the
     # same effective batch. ``num_replicas`` / ``rank`` default to 1/0
@@ -507,16 +512,22 @@ def run_train(
     sampler: TrainingSampler | RepeatFactorTrainingSampler
     if repeat_factors is not None:
         sampler = RepeatFactorTrainingSampler(
-            repeat_factors, seed=0, num_replicas=world_size, rank=rank
+            repeat_factors, seed=seed, num_replicas=world_size, rank=rank
         )
     else:
         sampler = TrainingSampler(
             size=len(mapped),
             shuffle=True,
-            seed=0,
+            seed=seed,
             num_replicas=world_size,
             rank=rank,
         )
+    # Seed the augmentation RNGs. With workers, ``worker_init_fn`` reseeds each
+    # to an independent per-(rank, worker) stream (the augmentation objects were
+    # built once in the main process and would otherwise replay identical
+    # streams). ``num_workers=0`` has no workers, so this main-process reseed is
+    # the live one; with workers it is the deterministic base they overwrite.
+    mapped.reseed(np.random.default_rng(np.random.SeedSequence([seed, rank])))
     # ``prefetch_factor`` is only a valid DataLoader arg when there are
     # worker processes (num_workers > 0); passing it with num_workers=0
     # raises. Buffering num_workers x prefetch_factor samples lets the
@@ -526,6 +537,9 @@ def run_train(
     if cfg.dataloader.num_workers > 0:
         loader_kwargs["prefetch_factor"] = cfg.dataloader.prefetch_factor
         loader_kwargs["persistent_workers"] = True
+        loader_kwargs["worker_init_fn"] = functools.partial(
+            _seed_worker_augmentations, base_seed=seed, rank=rank
+        )
     dl = DataLoader(
         mapped,
         sampler=sampler,
@@ -942,11 +956,35 @@ class _MappedList:
         self._dataset_dicts = dataset_dicts
         self._mapper = mapper
 
+    def reseed(self, rng: np.random.Generator) -> None:
+        """Forward to the mapper so its augmentations get a fresh per-worker
+        stream. See :meth:`mayaku.data.mapper.DatasetMapper.reseed`.
+        """
+        self._mapper.reseed(rng)
+
     def __len__(self) -> int:
         return len(self._dataset_dicts)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         return self._mapper(self._dataset_dicts[idx])
+
+
+def _seed_worker_augmentations(_worker_id: int, *, base_seed: int, rank: int) -> None:
+    """DataLoader ``worker_init_fn``: give each worker an independent
+    augmentation RNG.
+
+    The augmentation objects are built once in the main process, so without
+    this every worker inherits the *same* ``Generator`` state and replays
+    identical flip/scale/jitter/mosaic decisions. ``SeedSequence`` derives a
+    provably-independent stream per ``(rank, worker)``; ``reseed`` points the
+    worker's whole augmentation pipeline at it. Seeded once per worker
+    (``persistent_workers=True``), so the stream advances across epochs.
+    """
+    info = torch.utils.data.get_worker_info()
+    assert info is not None  # only ever called inside a DataLoader worker
+    ss = np.random.SeedSequence([base_seed, rank, info.id])
+    dataset: Any = info.dataset  # _MappedList / MultiSampleMappedDataset
+    dataset.reseed(np.random.default_rng(ss))
 
 
 def _unwrap_single(batch: list[Any]) -> Any:
