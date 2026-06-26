@@ -53,12 +53,7 @@ solver:
   ims_per_batch: 2
   grad_accum_steps: 8
   base_lr: 0.02
-  max_iter: 90_000
-  steps: [60_000, 80_000]
-  warmup_iters: 1_000
-  warmup_factor: 0.001
-  warmup_method: linear
-  lr_scheduler_name: WarmupCosineLR
+  num_epochs: 12
   amp_enabled: false
   amp_dtype: fp16
   ema_enabled: true

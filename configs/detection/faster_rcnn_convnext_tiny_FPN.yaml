@@ -72,12 +72,7 @@ solver:
 
   ims_per_batch: 8
   grad_accum_steps: 2          # effective batch = 16
-  max_iter: 90_000
-  steps: [60_000, 80_000]      # cosine ignores these but the schema requires a valid tuple
-  warmup_iters: 1_500
-  warmup_factor: 0.001
-  warmup_method: linear
-  lr_scheduler_name: WarmupCosineLR
+  num_epochs: 12
 
   # AdamW typically clips with max_norm ~ 0.1 — much tighter than SGD's
   # 5.0 because Adam-style updates are already moment-normalised.

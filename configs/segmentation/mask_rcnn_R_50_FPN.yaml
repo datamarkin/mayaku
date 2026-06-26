@@ -1,21 +1,22 @@
-# X-101-32x8d-FPN Mask R-CNN — 1x schedule (90k iters).
-# Top of the segmentation model zoo; ~2× compute per iter vs R-101.
-# At 12 GB GPU: ims_per_batch=2, grad_accum_steps=8. At 80 GB: ims_per_batch=8.
+# R-50-FPN Mask R-CNN — 3x schedule (270k iters). Production target.
+# Train after mask_rcnn_R_50_FPN_1x.yaml validates ≥ +1 AP over the D2 baseline.
 #
 # Recipe: cosine LR, EMA, color jitter, Mosaic + MixUp + CopyPaste.
 # CopyPaste requires bitmask format (set below).
 # Backbone trained as BN+freeze_at=0 (tools/train_mayaku.py injects this);
 # config ships as FrozenBN+freeze_at=2 for fine-tuning compatibility.
 #
-# D2 3x baseline: d2_baseline/segmentation/mask_rcnn_X_101_32x8d_FPN_3x.yaml
-# D2 published 3x: 44.3 box AP / 39.5 mask AP. Target with this recipe at 1x: ≥ +1 AP both.
+# D2 3x baseline: d2_baseline/segmentation/mask_rcnn_R_50_FPN_3x.yaml
+# D2 published 3x: 41.2 box AP / 37.3 mask AP. Target with this recipe: ≥ +2 AP both.
 model:
   meta_architecture: mask_rcnn
   mask_on: true
   backbone:
-    name: resnext101_32x8d
+    name: resnet50
     norm: FrozenBN
     freeze_at: 2
+    # See faster_rcnn_R_50_FPN_1x_modern.yaml for why these match torchvision
+    # IMAGENET1K_V2 instead of D2's caffe2 layout.
     stride_in_1x1: false
   roi_heads:
     num_classes: 80
@@ -39,17 +40,14 @@ input:
   copy_paste_prob: 0.5
 
 solver:
-  # X-101 mask RCNN is the heaviest config. At 12 GB: ims_per_batch=2, grad_accum_steps=8.
-  # At 80 GB (H100): ims_per_batch=8, grad_accum_steps=2.
-  ims_per_batch: 8
-  grad_accum_steps: 2
+  # Effective batch size = ims_per_batch * grad_accum_steps. For a 24 GB
+  # GPU keep ims_per_batch=16, grad_accum_steps=1 (the default).
+  # For a 12 GB GPU drop ims_per_batch to 8 and set grad_accum_steps=2 —
+  # gradients are mathematically identical, AP target unchanged.
+  ims_per_batch: 16
+  grad_accum_steps: 1
   base_lr: 0.02
-  max_iter: 90_000
-  steps: [60_000, 80_000]
-  warmup_iters: 1_000
-  warmup_factor: 0.001
-  warmup_method: linear
-  lr_scheduler_name: WarmupCosineLR
+  num_epochs: 36
   ema_enabled: true
   ema_decay: 0.9999
   ema_tau: 2_000.0

@@ -1,16 +1,14 @@
-# R-101-FPN Mask R-CNN — 3x schedule (270k iters). Production target.
-# Train after mask_rcnn_R_101_FPN_1x.yaml validates ≥ +1 AP over the D2 baseline.
+# R-101-FPN Faster R-CNN — 3x schedule (270k iters). Production target.
+# Train after faster_rcnn_R_101_FPN_1x.yaml validates ≥ +1 AP over the D2 baseline.
 #
-# Recipe: cosine LR, EMA, color jitter, Mosaic + MixUp + CopyPaste.
-# CopyPaste requires bitmask format (set below).
+# Recipe: cosine LR, EMA, color jitter, Mosaic + MixUp. Same as R-50 3x.
 # Backbone trained as BN+freeze_at=0 (tools/train_mayaku.py injects this);
 # config ships as FrozenBN+freeze_at=2 for fine-tuning compatibility.
 #
-# D2 3x baseline: d2_baseline/segmentation/mask_rcnn_R_101_FPN_3x.yaml
-# D2 published 3x: 42.9 box AP / 38.6 mask AP. Target with this recipe: ≥ +2 AP both.
+# D2 3x baseline: d2_baseline/detection/faster_rcnn_R_101_FPN_3x.yaml
+# D2 published 3x: 42.0 box AP. Target with this recipe: ≥ 44 AP.
 model:
-  meta_architecture: mask_rcnn
-  mask_on: true
+  meta_architecture: faster_rcnn
   backbone:
     name: resnet101
     norm: FrozenBN
@@ -22,31 +20,23 @@ model:
     num_conv: 0
     num_fc: 2
     fc_dim: 1024
-  roi_mask_head: {}
   pixel_std: [58.395, 57.120, 57.375]
 
 input:
   min_size_test: 800
   max_size_test: 1333
-  mask_format: bitmask
   color_jitter_enabled: true
   color_jitter_brightness: 0.4
   color_jitter_contrast: 0.4
   color_jitter_saturation: 0.7
   color_jitter_hue: 0.015
   color_jitter_prob: 0.5
-  copy_paste_prob: 0.5
 
 solver:
   ims_per_batch: 16
   grad_accum_steps: 1
   base_lr: 0.02
-  max_iter: 270_000
-  steps: [210_000, 250_000]
-  warmup_iters: 1_000
-  warmup_factor: 0.001
-  warmup_method: linear
-  lr_scheduler_name: WarmupCosineLR
+  num_epochs: 36
   ema_enabled: true
   ema_decay: 0.9999
   ema_tau: 2_000.0
