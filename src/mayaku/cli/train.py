@@ -541,14 +541,34 @@ def run_train(
         cfg.solver.clip_gradients_value if cfg.solver.clip_gradients_enabled else None
     )
     grad_clip_type = cfg.solver.clip_gradients_type
+    # amp_dtype in the config is an intent; the device clamps it to what the
+    # hardware can actually deliver (bf16 only on native-bf16 GPUs, never on
+    # MPS) and returns None when AMP can't run here at all.
+    requested_amp = cfg.solver.amp_dtype
+    amp_dtype: str | None = None
+    if cfg.solver.amp_enabled:
+        amp_dtype = dev.resolve_amp_dtype(requested_amp)
+        if amp_dtype != requested_amp and is_main_process():
+            if amp_dtype is None:
+                print(
+                    f"[train] AMP ({requested_amp}) unavailable on {dev.kind}; training in fp32.",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[train] amp_dtype {requested_amp!r} unsupported on this {dev.kind} device; "
+                    f"using {amp_dtype!r} instead.",
+                    flush=True,
+                )
+
     trainer: SimpleTrainer
-    if cfg.solver.amp_enabled and dev.supports_amp:
+    if amp_dtype is not None:
         trainer = AMPTrainer(
             model,
             loader,
             optimizer,
             dev,
-            amp_dtype=cfg.solver.amp_dtype,
+            amp_dtype=amp_dtype,
             grad_clip_norm=grad_clip_norm,
             grad_clip_type=grad_clip_type,
             grad_accum_steps=cfg.solver.grad_accum_steps,

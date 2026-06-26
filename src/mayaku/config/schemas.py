@@ -733,10 +733,12 @@ class SolverConfig(_BaseModel):
     llrd_enabled: bool = False
     llrd_decay: Annotated[float, Field(gt=0.0, le=1.0)] = 0.8
     amp_enabled: bool = False
-    # Resolved at Step 13 (engine). ``"fp16"`` is the safe cross-backend
-    # default; ``"bf16"`` is recommended on CUDA Ampere+ where it gives a
-    # wider dynamic range and lets us drop GradScaler. MPS does not yet
-    # support bf16 autocast (verify per-PT-version before flipping).
+    # An *intent*, not a guarantee: ``Device.resolve_amp_dtype`` clamps this
+    # to the live hardware at train time. ``"bf16"`` is ideal on CUDA Ampere+
+    # (wider dynamic range, lets us drop GradScaler) and is what the bundled
+    # recipes ask for; it falls back to ``"fp16"`` on pre-Ampere CUDA and to
+    # fp32 (AMP off) on MPS, which is validated for fp16 only. ``"fp16"`` is
+    # the safe cross-backend default.
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
     checkpoint_period: Annotated[int, Field(gt=0)] = 5000
     clip_gradients_enabled: bool = False
