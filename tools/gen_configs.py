@@ -156,7 +156,7 @@ def render(tier: Tier, task: str) -> str:
         "input:\n"
         "  resize_mode: letterbox\n"
         f"  size_budget: {tier.size_budget}   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)\n"
-        "  train_scale_min: 0.5   # multi-scale letterbox train: budget fraction floor → full deploy canvas\n"
+        "  train_scale_min: 0.64   # multi-scale letterbox train: budget fraction floor → full deploy canvas\n"
         "  random_flip: horizontal\n"
         "  color_jitter_enabled: true\n"
         "  color_jitter_brightness: 0.4\n"
