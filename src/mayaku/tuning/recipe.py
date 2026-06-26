@@ -181,8 +181,12 @@ def derive_overrides(
     bucket = size_bucket(stats.num_images)
 
     # ----- model -----
+    # NB: num_classes is NOT set here — it's a structural fact of the dataset,
+    # not a tuning heuristic, so run_train derives it from the COCO categories
+    # whenever auto-config is enabled, at any dataset size (bypassing the
+    # MIN_IMAGES_FOR_AUTO_CONFIG floor; with auto-config off the config is used
+    # verbatim).
     model_overrides: dict[str, Any] = {
-        "roi_heads": {"num_classes": stats.num_classes},
         "backbone": {"freeze_at": bucket.freeze_at},
     }
     if stats.num_boxes >= MIN_BOXES_FOR_ANCHOR_TUNE:

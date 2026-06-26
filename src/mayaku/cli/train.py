@@ -257,9 +257,10 @@ def run_train(
     # build / sampler below, so they must be identical across ranks.
     def _derive(meta: Any, dicts: list[dict[str, Any]]) -> dict[str, Any]:
         # Dataset-aware auto-config. The recipe layer fills in fine-tune-
-        # relevant fields (anchor sizes/ARs, num_classes, base_lr, schedule,
-        # mosaic / mixup probs, sampler choice) that the user did NOT set
-        # explicitly. Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
+        # relevant heuristics (anchor sizes/ARs, base_lr, schedule, mosaic /
+        # mixup probs, sampler choice) that the user did NOT set explicitly.
+        # (num_classes is handled separately in the body — it's structural, not
+        # a heuristic.) Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
         # ``auto_config.enabled = False`` both short-circuit with no overrides.
         overrides: Mapping[str, Any] | None = None
         stats: Any = None
@@ -329,6 +330,22 @@ def run_train(
         cfg = merge_overrides(cfg, derived["overrides"])
         if is_main_process():
             _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths)
+
+    # When auto-config is on (the fine-tune / API default), the class count is a
+    # STRUCTURAL fact of the dataset — derive it from the COCO categories
+    # regardless of dataset size (unlike the LR/anchor/schedule heuristics, which
+    # need MIN_IMAGES_FOR_AUTO_CONFIG worth of data). This is what makes a
+    # weights-only fine-tune on a new class count reinit the head: the rebuilt
+    # head is sized to the new dataset, so the old class-specific layers
+    # shape-mismatch and `_load_for_finetune` drops + reinitialises them. With
+    # auto-config off (manual / replication) the config is used verbatim, and a
+    # user-pinned num_classes always wins.
+    if cfg.auto_config.enabled and "model.roi_heads.num_classes" not in user_set_paths:
+        n_classes = len(metadata.thing_classes)
+        if cfg.model.roi_heads.num_classes != n_classes:
+            cfg = merge_overrides(cfg, {"model": {"roi_heads": {"num_classes": n_classes}}})
+            if is_main_process():
+                print(f"[train] num_classes set from dataset categories: {n_classes}", flush=True)
 
     # Resolve the epoch budget to iteration counts now that the dataset size is
     # known. One epoch = ceil(num_images / global_batch) optimizer steps, where

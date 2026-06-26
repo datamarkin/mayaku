@@ -813,7 +813,10 @@ class AutoConfig(_BaseModel):
     construction and overrides fine-tune-relevant fields that the user
     did NOT explicitly set in the source YAML:
 
-    * ``model.roi_heads.num_classes`` — from the dataset's category count
+    * ``model.roi_heads.num_classes`` — from the dataset's category count.
+      This one is STRUCTURAL: applied at any dataset size (the head must
+      match the data), unlike the heuristics below which need
+      ``MIN_IMAGES_FOR_AUTO_CONFIG`` worth of data.
     * ``model.anchor_generator.sizes`` / ``aspect_ratios`` — k-means on
       GT box √area and w/h (skipped if <50 boxes)
     * ``model.backbone.freeze_at`` — from dataset size bucket
