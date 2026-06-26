@@ -4,13 +4,13 @@
 The 18 family configs (6 tiers × {detection, segmentation, keypoints}) are *derived* from
 the :data:`TIERS` table below, not hand-maintained. A tier supplies five inputs
 — backbone, ``hidden_dim``, ``num_stages``, ``size_budget``, and whether it is a
-real-time tier — and every other family-varying field is computed from them so
+real-time tier — and every other family-varying field is derived from them so
 the invariants can never drift:
 
     fpn.out_channels        = hidden_dim          (FPN must feed the head width)
-    head.dim_feedforward    = 4 * hidden_dim       (Sparse R-CNN ratio)
-    head.dim_dynamic        = hidden_dim / 4        (Sparse R-CNN ratio)
-    head.pooler_sampling_ratio = 1 if real-time else 0   (TRT-fp16 vs adaptive)
+    head.dim_feedforward    = 2048                 (absolute; Sparse R-CNN, NOT hidden-scaled)
+    head.dim_dynamic        = 64                   (absolute; Sparse R-CNN, NOT hidden-scaled)
+    head.pooler_sampling_ratio = 1 if real-time else 2   (fixed samples/bin: real-time vs accuracy)
     mask.conv_dim           = hidden_dim           (scale the mask head too)
 
 Everything else (solver, dataloader, costs, num_proposals, num_heads, pooler 7,
@@ -48,7 +48,7 @@ class Tier:
     hidden_dim: int  # 128 (real-time) | 256 (accuracy)
     num_stages: int  # QGN cascade depth
     size_budget: int  # fixed square letterbox size for inference + export
-    realtime: bool  # True -> pooler_sampling_ratio 1; False -> 0
+    realtime: bool  # True -> pooler_sampling_ratio 1; False -> 2
     desc: str  # one-phrase positioning, used in the header comment
     params: str  # detection param estimate, used in the header comment
 
@@ -180,8 +180,11 @@ def render(tier: Tier, task: str) -> str:
         "  llrd_enabled: true\n"
         "  llrd_decay: 0.9\n"
         "  num_epochs: 12\n"
-        "  ims_per_batch: 2\n"
-        "  grad_accum_steps: 8\n"
+        "  # Effective batch = ims_per_batch * grad_accum_steps = 16. Micro-batch is a\n"
+        "  # memory knob (numerics unchanged): 8x2 saturates a 24GB GPU at tiny/640-768;\n"
+        "  # drop to 4x4 or 2x8 for the base tiers, larger size_budget, or smaller GPUs.\n"
+        "  ims_per_batch: 8\n"
+        "  grad_accum_steps: 2\n"
         "  clip_gradients_enabled: true\n"
         "  clip_gradients_value: 1.0\n"
         "  clip_gradients_type: norm\n"
@@ -199,7 +202,7 @@ def render(tier: Tier, task: str) -> str:
         "  precise_bn_enabled: false\n"
         "\n"
         "dataloader:\n"
-        "  num_workers: 4\n"
+        "  num_workers: 16\n"
         "  aspect_ratio_grouping: true\n"
         "  sampler_train: TrainingSampler\n"
         "  filter_empty_annotations: true\n"
