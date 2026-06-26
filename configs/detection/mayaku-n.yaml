@@ -58,10 +58,10 @@ solver:
   llrd_decay: 0.9
   num_epochs: 12
   # Effective batch = ims_per_batch * grad_accum_steps = 16. Micro-batch is a
-  # memory knob (numerics unchanged): 8x2 saturates a 24GB GPU at tiny/640-768;
-  # drop to 4x4 or 2x8 for the base tiers, larger size_budget, or smaller GPUs.
-  ims_per_batch: 8
-  grad_accum_steps: 2
+  # memory knob (numerics unchanged): 4x4 is a balanced default across GPUs;
+  # raise to 8x2 on a big GPU for speed, drop to 2x8 for base tiers / large size_budget.
+  ims_per_batch: 4
+  grad_accum_steps: 4
   clip_gradients_enabled: true
   clip_gradients_value: 1.0
   clip_gradients_type: norm
@@ -79,7 +79,7 @@ test:
   precise_bn_enabled: false
 
 dataloader:
-  num_workers: 16
+  num_workers: 6
   aspect_ratio_grouping: true
   sampler_train: TrainingSampler
   filter_empty_annotations: true
