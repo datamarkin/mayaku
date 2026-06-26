@@ -174,6 +174,17 @@ class TestUniQuery:
         assert hasattr(inst, "scores")
         assert hasattr(inst, "pred_classes")
 
+    def test_num_proposals_override_rejected_on_learned_path(self) -> None:
+        # The learned-proposal path (no QGN) has no proposal ranking, so the
+        # inference proposal dial would slice an arbitrary first-k. It must
+        # error rather than silently degrade. (The QGN path applies top-k by
+        # objectness and is exercised in TestUniQueryGenerator.)
+        model = build_uniquery(_make_cfg(num_proposals=20), backbone_weights=None)
+        model.eval()
+        model.inference_num_proposals = 5
+        with torch.no_grad(), pytest.raises(ValueError, match="QGN proposal path"):
+            model([{"image": torch.randn(3, 256, 256)}])
+
     def test_gradient_flow(self) -> None:
         cfg = _make_cfg(num_proposals=5, num_stages=3)
         model = build_uniquery(cfg, backbone_weights=None)
