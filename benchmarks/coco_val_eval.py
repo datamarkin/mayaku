@@ -2,10 +2,10 @@
 
 from pathlib import Path
 
-from mayaku import configs
 from mayaku.cli.eval import run_eval
 
-CONFIG       = configs.path("faster_rcnn_R_50_FPN_3x")
+_REPO = Path(__file__).resolve().parents[1]
+CONFIG       = _REPO / "configs" / "detection" / "faster_rcnn_R_50_FPN_3x.yaml"
 WEIGHTS    = Path("ema-model_iter_0090000.pth")
 COCO_GT_JSON = Path("instances_val2017.json")
 COCO_IMAGES  = Path("val2017")

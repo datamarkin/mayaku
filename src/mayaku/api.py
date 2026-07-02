@@ -70,7 +70,6 @@ from typing import Any
 
 import torch
 
-from mayaku import configs
 from mayaku.cli._weights import resolve_weights
 from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train, run_train_worker
@@ -421,23 +420,27 @@ def _resolve_model_source(
         cfg, _ = config_from_checkpoint(weights_path)
         return cfg, weights_path.stem, weights_path
     raise ValueError(
-        "Provide config= (a YAML path, bundled name, or MayakuConfig) or "
+        "Provide config= (a YAML path or MayakuConfig) or "
         "weights= (a bundled model name or a trained .pth) so the model "
         "architecture is defined."
     )
 
 
 def _load_config(config: str | Path | MayakuConfig) -> tuple[MayakuConfig, str]:
-    """Load an explicit ``config``: object, file path, or bundled name."""
+    """Load an explicit ``config``: a ``MayakuConfig`` object or a YAML file path.
+
+    ``config`` is a maintainer escape hatch for defining/training a new
+    architecture; end-user flows use ``weights=`` and never pass it. Bundled
+    config *names* are no longer resolved — configs are maintainer references
+    under ``configs/`` and are passed by path.
+    """
     if isinstance(config, MayakuConfig):
         return config, "mayaku_run"
     path = Path(config)
     if path.exists():
         return load_yaml(path), path.stem
-    try:
-        bundled = configs.path(str(config))
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"config {str(config)!r} is neither an existing file nor a bundled config name"
-        ) from None
-    return load_yaml(bundled), bundled.stem
+    raise FileNotFoundError(
+        f"config file not found: {config}. Pass a .yaml path or a MayakuConfig — "
+        "bundled config names are no longer resolved (configs are maintainer "
+        "references under configs/)."
+    )

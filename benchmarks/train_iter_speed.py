@@ -8,10 +8,10 @@ keep ITERS large enough to dwarf it.
 
 from pathlib import Path
 
-from mayaku import configs
 from mayaku.api import train
 
-CONFIG       = configs.path("faster_rcnn_R_50_FPN_3x")
+_REPO = Path(__file__).resolve().parents[1]
+CONFIG       = _REPO / "configs" / "detection" / "faster_rcnn_R_50_FPN_3x.yaml"
 TRAIN_JSON   = Path("instances_val2017.json")
 TRAIN_IMAGES = Path("val2017")
 ITERS = 100

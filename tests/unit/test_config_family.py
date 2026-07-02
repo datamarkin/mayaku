@@ -46,9 +46,9 @@ def test_committed_config_matches_generator(path: Path, want: str) -> None:
 @pytest.mark.parametrize("tier", gen.TIERS, ids=[t.name for t in gen.TIERS])
 @pytest.mark.parametrize("task", ["detection", "segmentation", "keypoints"])
 def test_derived_invariants_hold(task: str, tier) -> None:
-    from mayaku import configs
+    from mayaku.config import load_yaml
 
-    cfg = configs.load(f"{task}/mayaku-{tier.name}")
+    cfg = load_yaml(_REPO / "configs" / task / f"mayaku-{tier.name}.yaml")
     head = cfg.model.uniquery_head
     assert cfg.model.fpn.out_channels == head.hidden_dim == tier.hidden_dim
     # Head capacity is ABSOLUTE (Sparse R-CNN), not scaled with hidden_dim — the
