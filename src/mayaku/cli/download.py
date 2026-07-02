@@ -1,4 +1,4 @@
-"""``mayaku download`` — fetch hosted model artifacts on demand.
+"""``mayaku download`` — fetch hosted model checkpoints on demand.
 
 Thin wrapper around :func:`mayaku.utils.download.download_model`.
 ``run_download`` is the in-process entry point so tests / notebooks can
@@ -13,7 +13,6 @@ from typing import Any
 
 from mayaku.utils.download import (
     DEFAULT_MANIFEST_URL,
-    VARIANTS,
     download_model,
     list_models,
 )
@@ -24,7 +23,6 @@ __all__ = ["run_download"]
 def run_download(
     name: str | None = None,
     *,
-    target: str | None = None,
     cache_dir: Path | None = None,
     manifest_url: str = DEFAULT_MANIFEST_URL,
     do_list: bool = False,
@@ -36,10 +34,9 @@ def run_download(
     Modes:
 
     * ``do_list=True`` — print the model index and return it.
-    * ``do_all=True`` — fetch every variant of every model. Mostly
-      useful for setting up a fresh deployment box.
-    * ``name`` set, ``target`` set — fetch that single variant.
-    * ``name`` set, ``target`` None — fetch all variants for that name.
+    * ``do_all=True`` — fetch every model's checkpoint. Useful for setting up a
+      fresh deployment box.
+    * ``name`` set — fetch that model's checkpoint.
     """
     if do_list:
         index = list_models(manifest_url=manifest_url)
@@ -47,53 +44,31 @@ def run_download(
 
     if do_all:
         index = list_models(manifest_url=manifest_url)
-        results: dict[str, dict[str, str]] = {}
+        results: dict[str, str] = {}
         for _task, names in index.items():
             for n in names:
-                results.setdefault(n, {})
-                for v in VARIANTS:
-                    try:
-                        path = download_model(
-                            n,
-                            target=v,
-                            cache_dir=cache_dir,
-                            manifest_url=manifest_url,
-                            verify_sha256=verify_sha256,
-                        )
-                        results[n][v] = str(path)
-                    except Exception as e:
-                        results[n][v] = f"ERROR: {e}"
+                try:
+                    path = download_model(
+                        n,
+                        cache_dir=cache_dir,
+                        manifest_url=manifest_url,
+                        verify_sha256=verify_sha256,
+                    )
+                    results[n] = str(path)
+                except Exception as e:
+                    results[n] = f"ERROR: {e}"
         return {"downloaded": results}
 
     if name is None:
         raise ValueError("pass --list, --all, or a model name")
 
-    if target is None:
-        # All variants for this model.
-        results_single: dict[str, str] = {}
-        for v in VARIANTS:
-            try:
-                path = download_model(
-                    name,
-                    target=v,
-                    cache_dir=cache_dir,
-                    manifest_url=manifest_url,
-                    verify_sha256=verify_sha256,
-                )
-                results_single[v] = str(path)
-            except Exception as e:
-                results_single[v] = f"ERROR: {e}"
-        return {"name": name, "downloaded": results_single}
-
-    # Single variant.
     path = download_model(
         name,
-        target=target,
         cache_dir=cache_dir,
         manifest_url=manifest_url,
         verify_sha256=verify_sha256,
     )
-    return {"name": name, "target": target, "path": str(path)}
+    return {"name": name, "path": str(path)}
 
 
 def render_index(index: dict[str, list[str]]) -> str:

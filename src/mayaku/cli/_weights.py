@@ -34,8 +34,8 @@ def resolve_weights(weights: str | Path | None) -> Path | None:
     * ``None`` → ``None`` (caller decides whether weights are required).
     * Existing path → that path.
     * Bare model name (no directory separator), optionally with a cosmetic
-      ``.pth`` suffix → fetched and cached via :func:`download_model`
-      (target = ``"pth"``). The ``.pth`` is stripped for the lookup.
+      ``.pth`` suffix → fetched and cached via :func:`download_model`. The
+      ``.pth`` is stripped for the lookup.
     * Anything else → ``FileNotFoundError`` with a helpful message.
     """
     if weights is None:
@@ -52,7 +52,7 @@ def resolve_weights(weights: str | Path | None) -> Path | None:
     if _NAME_RE.fullmatch(name):
         # Looks like a model name. Try the hub.
         try:
-            return download_model(name, target="pth")
+            return download_model(name)
         except DownloadError as e:
             raise FileNotFoundError(
                 f"--weights {s!r}: not a local path and not in the manifest. "

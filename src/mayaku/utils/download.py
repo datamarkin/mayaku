@@ -1,22 +1,18 @@
-"""Fetch hosted Mayaku model artifacts on demand.
+"""Fetch hosted Mayaku model checkpoints on demand.
 
 The user uploads a regenerated `models/` tree (and ``manifest.json``) to
 ``https://dtmfiles.com/mayaku/v1/models/``. This module is the client
-side: given a model name and a target variant, return a local path to a
-verified, ready-to-use artifact.
+side: given a model name, return a local path to a verified, ready-to-use
+``.pth`` checkpoint.
 
 Cache layout mirrors the URL structure so a wiped cache rehydrates
 identically (under ``<project>/cache/`` by default — see
 :func:`_cache_root`)::
 
-    <project>/cache/mayaku/v1/models/<task>/<config_name>.<ext>
+    <project>/cache/mayaku/v1/models/<task>/<name>/<revision>/<name>.pth
 
-For ``coreml-fp16``: the ``.mlpackage.zip`` is downloaded then extracted
-in place and the resulting ``.mlpackage`` directory is what's returned.
-``.zip`` is kept around for cache-validation.
-
-For ``openvino``: both ``.xml`` and ``.bin`` are fetched together; the
-``.xml`` path is returned (loaders look up the ``.bin`` sibling).
+Only the ``.pth`` checkpoint is hosted; deployment artifacts (onnx/coreml/…) are
+produced locally via ``model.export(...)``.
 """
 
 from __future__ import annotations
@@ -24,18 +20,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import time
 import urllib.request
-import zipfile
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
 __all__ = [
     "DEFAULT_MANIFEST_URL",
-    "DEFAULT_VARIANT",
-    "VARIANTS",
     "DownloadError",
     "ManifestEntry",
     "download_model",
@@ -44,8 +35,6 @@ __all__ = [
 ]
 
 DEFAULT_MANIFEST_URL = "https://dtmfiles.com/mayaku/v1/models/manifest.json"
-DEFAULT_VARIANT = "pth"
-VARIANTS = ("pth", "onnx", "onnx-fixed", "coreml-fp16", "openvino")
 
 _MANIFEST_CACHE_TTL_S = 3600  # re-fetch manifest after 1 hour
 
@@ -54,8 +43,12 @@ class DownloadError(RuntimeError):
     """Raised when a download or hash verification fails."""
 
 
-# Public alias for type checkers / documentation.
+# Type aliases for the two manifest dict shapes (documentation only; both are
+# ``dict[str, Any]`` at runtime). ``ManifestEntry`` is a model's entry
+# (``{task, latest, revisions}``); ``CheckpointEntry`` is a revision's
+# ``{path, size, sha256}``.
 ManifestEntry = dict[str, Any]
+CheckpointEntry = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +141,8 @@ def list_revisions(name: str, *, manifest_url: str = DEFAULT_MANIFEST_URL) -> li
     return sorted(info["revisions"])
 
 
-def _select_revision(
-    info: ManifestEntry, revision: str | None, name: str
-) -> tuple[dict[str, Any], str]:
-    """Resolve ``(variants, resolved_revision)`` from a model entry.
+def _select_revision(info: ManifestEntry, revision: str | None, name: str) -> CheckpointEntry:
+    """Resolve the ``{path, size, sha256}`` checkpoint entry for a model.
 
     ``revision=None`` selects the ``info["latest"]`` pointer.
     """
@@ -160,7 +151,7 @@ def _select_revision(
     if rev not in revisions:
         available = ", ".join(sorted(revisions)) or "(none)"
         raise DownloadError(f"revision {rev!r} not available for {name!r}. Available: {available}")
-    return revisions[rev]["variants"], rev
+    return cast(CheckpointEntry, revisions[rev])
 
 
 # ---------------------------------------------------------------------------
@@ -213,24 +204,6 @@ def _download(
     tmp.replace(out)
 
 
-def _extract_zip_in_place(zip_path: Path) -> Path:
-    """Extract a `.mlpackage.zip` into the same directory; return the .mlpackage dir."""
-    # Conservative: re-extract every call but skip if the directory's already there
-    # with the right shape — the manifest hash on the .zip is the source of truth.
-    target_dir = zip_path.with_suffix("")  # drop .zip → .mlpackage
-    if target_dir.exists() and any(target_dir.rglob("Manifest.json")):
-        return target_dir
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(zip_path.parent)
-    if not target_dir.exists():
-        raise DownloadError(
-            f"zip {zip_path.name} did not produce expected directory {target_dir.name}"
-        )
-    return target_dir
-
-
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
@@ -241,15 +214,6 @@ def _resolve_url(base_url: str, rel_path: str) -> str:
     return f"{base_url.rstrip('/')}/{rel_path.lstrip('/')}"
 
 
-def _file_entries(variant: ManifestEntry) -> Iterable[tuple[str, int, str]]:
-    """Yield ``(rel_path, size, sha256)`` for each file in a variant entry."""
-    if "files" in variant:
-        for f in variant["files"]:
-            yield f["path"], f["size"], f["sha256"]
-    else:
-        yield variant["path"], variant["size"], variant["sha256"]
-
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -257,7 +221,6 @@ def _file_entries(variant: ManifestEntry) -> Iterable[tuple[str, int, str]]:
 
 def download_model(
     name: str,
-    target: str = DEFAULT_VARIANT,
     *,
     revision: str | None = None,
     cache_dir: Path | None = None,
@@ -265,64 +228,39 @@ def download_model(
     verify_sha256: bool = True,
     quiet: bool = False,
 ) -> Path:
-    """Download (if missing) and return the local path to a Mayaku artifact.
+    """Download (if missing) and return the local path to a model's ``.pth``.
 
     ``name`` is a model name like ``"mayaku-s"`` (or a config name like
-    ``"faster_rcnn_R_50_FPN_3x"``). ``target`` is one of :data:`VARIANTS`.
-    ``revision`` pins a specific published snapshot; ``None`` resolves the
-    manifest's ``latest`` pointer for the model (or the sole artifact set
-    for legacy flat-schema models).
+    ``"faster_rcnn_R_50_FPN_3x"``). ``revision`` pins a specific published
+    snapshot; ``None`` resolves the manifest's ``latest`` pointer for the model.
 
-    Returns the path the user actually loads:
-
-    * ``pth`` / ``onnx`` / ``onnx-fixed`` → the file itself.
-    * ``coreml-fp16`` → the extracted ``.mlpackage`` directory.
-    * ``openvino`` → the ``.xml`` file (loaders look up the ``.bin`` sibling).
-
-    Idempotent — a cache hit (size + sha256 match) skips the network.
+    Returns the local path to the fetched file. Idempotent — a cache hit
+    (size + sha256 match) skips the network.
     """
-    if target not in VARIANTS:
-        raise ValueError(f"unknown target {target!r}; expected one of {VARIANTS}")
-
     cache_root = cache_dir or _cache_root()
     manifest = _fetch_manifest(manifest_url)
     base_url = manifest["base_url"]
     info = _model_entry(manifest, name)
-    variants, resolved_rev = _select_revision(info, revision, name)
-    if target not in variants:
-        available = ", ".join(sorted(variants))
-        raise DownloadError(
-            f"variant {target!r} not available for {name!r}@{resolved_rev}. Available: {available}"
-        )
+    entry = _select_revision(info, revision, name)
 
-    variant = variants[target]
-    primary_rel: str | None = None
-    for rel_path, size, sha in _file_entries(variant):
-        local = cache_root / rel_path
-        url = _resolve_url(base_url, rel_path)
-        if verify_sha256 and _verify(local, sha, expected_size=size):
-            if not quiet:
-                print(f"[mayaku.download] cache hit  {rel_path}", flush=True)
-        else:
-            if not quiet:
-                size_mb = size / 1e6
-                print(f"[mayaku.download] fetching   {rel_path}  ({size_mb:.1f} MB)", flush=True)
-            _download(url, local, expected_size=size, progress_label=Path(rel_path).name)
-            if verify_sha256 and not _verify(local, sha, expected_size=size):
-                local.unlink(missing_ok=True)
-                raise DownloadError(
-                    f"sha256 mismatch on {rel_path} after download — server may be serving "
-                    "a stale or corrupted file."
-                )
-        if "primary" in variant and rel_path == variant["primary"]:
-            primary_rel = rel_path
-
-    # Resolve the path to return. The variant dict comes from JSON, so
-    # entries are typed `Any`; the manifest schema guarantees these are
-    # str values.
-    if target == "coreml-fp16":
-        zip_path = cache_root / cast(str, variant["path"])
-        return _extract_zip_in_place(zip_path)
-    if "primary" in variant:
-        return cache_root / cast(str, primary_rel or variant["primary"])
-    return cache_root / cast(str, variant["path"])
+    # The entry comes from JSON (typed `Any`); the manifest schema guarantees
+    # path/sha256 are str and size is int.
+    rel_path = cast(str, entry["path"])
+    size = cast(int, entry["size"])
+    sha = cast(str, entry["sha256"])
+    local = cache_root / rel_path
+    if verify_sha256 and _verify(local, sha, expected_size=size):
+        if not quiet:
+            print(f"[mayaku.download] cache hit  {rel_path}", flush=True)
+    else:
+        if not quiet:
+            print(f"[mayaku.download] fetching   {rel_path}  ({size / 1e6:.1f} MB)", flush=True)
+        _download(_resolve_url(base_url, rel_path), local, expected_size=size,
+                  progress_label=Path(rel_path).name)
+        if verify_sha256 and not _verify(local, sha, expected_size=size):
+            local.unlink(missing_ok=True)
+            raise DownloadError(
+                f"sha256 mismatch on {rel_path} after download — server may be serving "
+                "a stale or corrupted file."
+            )
+    return local

@@ -30,7 +30,7 @@ from mayaku.cli.eval import run_eval
 from mayaku.cli.export import run_export
 from mayaku.cli.predict import run_predict
 from mayaku.config.schemas import DeviceSetting
-from mayaku.utils.download import DEFAULT_MANIFEST_URL, VARIANTS
+from mayaku.utils.download import DEFAULT_MANIFEST_URL
 
 app = typer.Typer(
     name="mayaku",
@@ -267,11 +267,6 @@ def _download(
             "Omit and pass --list / --all instead."
         ),
     ),
-    target: str | None = typer.Option(
-        None,
-        "--target",
-        help=f"Variant to fetch. One of {', '.join(VARIANTS)}. Omit to fetch all variants for NAME.",
-    ),
     cache_dir: Path | None = typer.Option(
         None,
         "--cache-dir",
@@ -286,16 +281,15 @@ def _download(
         False, "--list", help="Print every model name in the manifest, grouped by task."
     ),
     download_all: bool = typer.Option(
-        False, "--all", help="Fetch every variant of every model. Used for fresh-deploy setup."
+        False, "--all", help="Fetch every model's checkpoint. Used for fresh-deploy setup."
     ),
     no_verify: bool = typer.Option(
         False, "--no-verify", help="Skip the SHA256 verification step (not recommended)."
     ),
 ) -> None:
-    """Fetch hosted Mayaku model artifacts from the manifest."""
+    """Fetch hosted Mayaku model checkpoints from the manifest."""
     payload = run_download(
         name=name,
-        target=target,
         cache_dir=cache_dir,
         manifest_url=manifest_url,
         do_list=list_models,
