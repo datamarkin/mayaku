@@ -1,18 +1,20 @@
 """Fetch hosted Mayaku model checkpoints on demand.
 
 The user uploads a regenerated `models/` tree (and ``manifest.json``) to
-``https://dtmfiles.com/mayaku/v1/models/``. This module is the client
-side: given a model name, return a local path to a verified, ready-to-use
-``.pth`` checkpoint.
+``https://dtmfiles.com/mayaku/v1/models/``. This module is the client side:
+given a model name, return a local path to a verified ``.pth`` checkpoint.
 
-Cache layout mirrors the URL structure so a wiped cache rehydrates
-identically (under ``<project>/cache/`` by default — see
-:func:`_cache_root`)::
+**Download-to-project, file-first.**
+``download_model("mayaku-s")`` returns ``./mayaku-s.pth`` if it's already there —
+no network, no manifest, no re-hash — so a model lands visibly next to your
+script and re-runs load instantly and offline. Only on a miss does it fetch the
+manifest (in memory), resolve the name, download atomically, verify the sha256,
+and write ``./mayaku-s.pth``. The download directory defaults to the current
+directory; override with ``MAYAKU_CACHE_DIR`` (e.g. a shared dir on CI/Docker).
 
-    <project>/cache/mayaku/v1/models/<task>/<name>/<revision>/<name>.pth
-
-Only the ``.pth`` checkpoint is hosted; deployment artifacts (onnx/coreml/…) are
-produced locally via ``model.export(...)``.
+Consequences (deliberate): a downloaded model never auto-updates to a newer
+revision — delete the file to refresh. Only the ``.pth`` is hosted; deployment
+artifacts (onnx/coreml/…) are produced locally via ``model.export(...)``.
 """
 
 from __future__ import annotations
@@ -36,52 +38,25 @@ __all__ = [
 
 DEFAULT_MANIFEST_URL = "https://dtmfiles.com/mayaku/v1/models/manifest.json"
 
-_MANIFEST_CACHE_TTL_S = 3600  # re-fetch manifest after 1 hour
-
 
 class DownloadError(RuntimeError):
     """Raised when a download or hash verification fails."""
 
 
-# Type aliases for the two manifest dict shapes (documentation only; both are
-# ``dict[str, Any]`` at runtime). ``ManifestEntry`` is a model's entry
-# (``{task, latest, revisions}``); ``CheckpointEntry`` is a revision's
-# ``{path, size, sha256}``.
+# A model's manifest entry: ``{task, latest, revisions}`` (documentation alias;
+# ``dict[str, Any]`` at runtime).
 ManifestEntry = dict[str, Any]
-CheckpointEntry = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Cache layout
+# Download directory
 # ---------------------------------------------------------------------------
 
 
-def _project_root() -> Path:
-    """Nearest enclosing project root, walked up from the CWD.
-
-    A "root" is the closest ancestor (including the CWD) that holds a
-    ``pyproject.toml`` or a ``.git``. Falls back to the CWD when no marker
-    is found, so the cache always lands somewhere visible next to where
-    you're working — never in a hidden home directory.
-    """
-    cwd = Path.cwd()
-    for directory in (cwd, *cwd.parents):
-        if (directory / "pyproject.toml").exists() or (directory / ".git").exists():
-            return directory
-    return cwd
-
-
-def _cache_root(version: str = "v1") -> Path:
-    """Visible cache root: ``<project>/cache/mayaku/<version>/models``.
-
-    Lands under the project root (see :func:`_project_root`) rather than a
-    hidden ``~/.cache`` so downloaded artifacts are easy to find and clear.
-    Set ``MAYAKU_CACHE_DIR`` to override the base directory (e.g. a shared
-    cache on CI); the ``mayaku/<version>/models`` suffix is still appended.
-    """
+def _download_dir() -> Path:
+    """Download directory: ``$MAYAKU_CACHE_DIR`` if set, else the cwd (see module docstring)."""
     override = os.environ.get("MAYAKU_CACHE_DIR")
-    base = Path(override).expanduser() if override else _project_root() / "cache"
-    return base / "mayaku" / version / "models"
+    return Path(override).expanduser() if override else Path.cwd()
 
 
 # ---------------------------------------------------------------------------
@@ -89,26 +64,17 @@ def _cache_root(version: str = "v1") -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_manifest(manifest_url: str, *, force: bool = False) -> dict[str, Any]:
-    """Get the manifest, with a 1-hour disk cache to avoid repeat HTTPS round-trips."""
-    cache_path = _cache_root() / "manifest.json"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+def _fetch_manifest(manifest_url: str) -> dict[str, Any]:
+    """GET + parse the manifest, in memory.
 
-    if not force and cache_path.exists():
-        age = time.time() - cache_path.stat().st_mtime
-        if age < _MANIFEST_CACHE_TTL_S:
-            return cast(dict[str, Any], json.loads(cache_path.read_text()))
-
+    Fetched only on a cache miss (and by ``list_models`` / ``list_revisions``),
+    so there's nothing to cache on disk — a present checkpoint never reaches here.
+    """
     try:
         with urllib.request.urlopen(manifest_url, timeout=30) as resp:
             data = resp.read()
     except OSError as e:
-        if cache_path.exists():
-            # Stale cache is better than failing offline.
-            return cast(dict[str, Any], json.loads(cache_path.read_text()))
         raise DownloadError(f"failed to fetch manifest from {manifest_url}: {e}") from e
-
-    cache_path.write_bytes(data)
     return cast(dict[str, Any], json.loads(data))
 
 
@@ -141,47 +107,24 @@ def list_revisions(name: str, *, manifest_url: str = DEFAULT_MANIFEST_URL) -> li
     return sorted(info["revisions"])
 
 
-def _select_revision(info: ManifestEntry, revision: str | None, name: str) -> CheckpointEntry:
-    """Resolve the ``{path, size, sha256}`` checkpoint entry for a model.
-
-    ``revision=None`` selects the ``info["latest"]`` pointer.
-    """
-    revisions = info["revisions"]
-    rev = revision or info["latest"]
-    if rev not in revisions:
-        available = ", ".join(sorted(revisions)) or "(none)"
-        raise DownloadError(f"revision {rev!r} not available for {name!r}. Available: {available}")
-    return cast(CheckpointEntry, revisions[rev])
-
-
 # ---------------------------------------------------------------------------
 # Download primitives
 # ---------------------------------------------------------------------------
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _verify(path: Path, expected_sha256: str, *, expected_size: int | None = None) -> bool:
-    if not path.exists():
-        return False
-    if expected_size is not None and path.stat().st_size != expected_size:
-        return False
-    return _sha256(path) == expected_sha256
-
-
 def _download(
-    url: str, out: Path, *, expected_size: int | None = None, progress_label: str | None = None
+    url: str,
+    out: Path,
+    *,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
 ) -> None:
-    """Stream `url` to `out` with a coarse progress line if size is known."""
+    """Stream ``url`` to a temp file (hashing as it goes), verify size + sha256,
+    then atomically rename to ``out`` — so ``out`` exists only once fully
+    downloaded and verified."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".part")
-    label = progress_label or out.name
+    digest = hashlib.sha256()
     try:
         with urllib.request.urlopen(url, timeout=60) as resp, tmp.open("wb") as f:
             total = expected_size or int(resp.headers.get("Content-Length", "0") or 0)
@@ -189,18 +132,28 @@ def _download(
             last_print = time.perf_counter()
             for chunk in iter(lambda: resp.read(1 << 16), b""):
                 f.write(chunk)
+                digest.update(chunk)
                 done += len(chunk)
                 now = time.perf_counter()
                 if now - last_print > 1.0 and total:
-                    pct = 100 * done / total
                     print(
-                        f"  [download] {label}  {pct:5.1f}%  ({done / 1e6:.1f} / {total / 1e6:.1f} MB)",
+                        f"  [download] {out.name}  {100 * done / total:5.1f}%  "
+                        f"({done / 1e6:.1f} / {total / 1e6:.1f} MB)",
                         flush=True,
                     )
                     last_print = now
     except OSError as e:
         tmp.unlink(missing_ok=True)
         raise DownloadError(f"failed to download {url}: {e}") from e
+
+    if (expected_size is not None and tmp.stat().st_size != expected_size) or (
+        expected_sha256 is not None and digest.hexdigest() != expected_sha256
+    ):
+        tmp.unlink(missing_ok=True)
+        raise DownloadError(
+            f"integrity check failed for {out.name} after download — the server may "
+            "be serving a stale or corrupted file."
+        )
     tmp.replace(out)
 
 
@@ -226,41 +179,38 @@ def download_model(
     cache_dir: Path | None = None,
     manifest_url: str = DEFAULT_MANIFEST_URL,
     verify_sha256: bool = True,
-    quiet: bool = False,
 ) -> Path:
-    """Download (if missing) and return the local path to a model's ``.pth``.
+    """Return the path to ``<download-dir>/<name>.pth``, downloading on a miss.
 
-    ``name`` is a model name like ``"mayaku-s"`` (or a config name like
-    ``"faster_rcnn_R_50_FPN_3x"``). ``revision`` pins a specific published
-    snapshot; ``None`` resolves the manifest's ``latest`` pointer for the model.
-
-    Returns the local path to the fetched file. Idempotent — a cache hit
-    (size + sha256 match) skips the network.
+    ``name`` is a bare model name; a trailing ``.pth`` is accepted and stripped
+    (it's the stored filename, not part of the name), so callers needn't. File-
+    first (see the module docstring): a present file is returned as-is and
+    silently, so ``verify_sha256`` only guards the fresh download. ``revision``
+    pins a snapshot on the miss path (``None`` → the manifest's ``latest``); the
+    name-keyed file can't honor a pin on a hit.
     """
-    cache_root = cache_dir or _cache_root()
-    manifest = _fetch_manifest(manifest_url)
-    base_url = manifest["base_url"]
-    info = _model_entry(manifest, name)
-    entry = _select_revision(info, revision, name)
+    if name.lower().endswith(".pth"):  # cosmetic — the stored file is always <name>.pth
+        name = name[:-4]
+    local = (cache_dir or _download_dir()) / f"{name}.pth"
+    if local.exists():
+        return local
 
-    # The entry comes from JSON (typed `Any`); the manifest schema guarantees
-    # path/sha256 are str and size is int.
-    rel_path = cast(str, entry["path"])
+    manifest = _fetch_manifest(manifest_url)
+    info = _model_entry(manifest, name)
+    revisions = info["revisions"]
+    rev = revision or info["latest"]
+    if rev not in revisions:
+        available = ", ".join(sorted(revisions)) or "(none)"
+        raise DownloadError(f"revision {rev!r} not available for {name!r}. Available: {available}")
+
+    # entry is JSON-typed `Any`; the manifest schema guarantees these types.
+    entry = revisions[rev]
     size = cast(int, entry["size"])
-    sha = cast(str, entry["sha256"])
-    local = cache_root / rel_path
-    if verify_sha256 and _verify(local, sha, expected_size=size):
-        if not quiet:
-            print(f"[mayaku.download] cache hit  {rel_path}", flush=True)
-    else:
-        if not quiet:
-            print(f"[mayaku.download] fetching   {rel_path}  ({size / 1e6:.1f} MB)", flush=True)
-        _download(_resolve_url(base_url, rel_path), local, expected_size=size,
-                  progress_label=Path(rel_path).name)
-        if verify_sha256 and not _verify(local, sha, expected_size=size):
-            local.unlink(missing_ok=True)
-            raise DownloadError(
-                f"sha256 mismatch on {rel_path} after download — server may be serving "
-                "a stale or corrupted file."
-            )
+    print(f"[mayaku] downloading {name}  ({size / 1e6:.1f} MB)", flush=True)
+    _download(
+        _resolve_url(manifest["base_url"], cast(str, entry["path"])),
+        local,
+        expected_size=size,
+        expected_sha256=cast(str, entry["sha256"]) if verify_sha256 else None,
+    )
     return local

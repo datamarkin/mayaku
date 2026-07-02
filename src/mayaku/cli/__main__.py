@@ -270,7 +270,7 @@ def _download(
     cache_dir: Path | None = typer.Option(
         None,
         "--cache-dir",
-        help="Override the cache root (default: <project>/cache/mayaku/v1/models).",
+        help="Override the download directory (default: the current directory).",
     ),
     manifest_url: str = typer.Option(
         DEFAULT_MANIFEST_URL,
