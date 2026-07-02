@@ -158,48 +158,6 @@ def _eval(
     images: Path = typer.Option(..., "--images", exists=True, file_okay=False),
     output: Path | None = typer.Option(None, "--output", file_okay=False),
     device: str | None = typer.Option(None, "--device"),
-    backbone_mlpackage: Path | None = typer.Option(
-        None,
-        "--backbone-mlpackage",
-        exists=True,
-        file_okay=False,
-        help=(
-            "Path to a CoreML .mlpackage exported by `mayaku export coreml`. "
-            "Replaces the eager backbone+FPN at eval time; RPN/ROI heads "
-            "still run in PyTorch. macOS only."
-        ),
-    ),
-    coreml_compute_units: str = typer.Option(
-        "CPU_AND_GPU",
-        "--coreml-compute-units",
-        help=(
-            "ALL / CPU_ONLY / CPU_AND_GPU / CPU_AND_NE. Only used with "
-            "--backbone-mlpackage. Default CPU_AND_GPU is fastest on R-CNN "
-            "graphs because the FPN's top-down `add` ops force ANE↔GPU "
-            "transitions whose cost exceeds ANE's per-conv speedup. See "
-            "docs/decisions/004-coreml-export-positioning.md."
-        ),
-    ),
-    backbone_onnx: Path | None = typer.Option(
-        None,
-        "--backbone-onnx",
-        exists=True,
-        dir_okay=False,
-        help=(
-            "Path to a .onnx file exported by `mayaku export onnx`. "
-            "Replaces the eager backbone+FPN at eval time; RPN/ROI heads "
-            "still run in PyTorch. Cross-platform via onnxruntime."
-        ),
-    ),
-    onnx_providers: str | None = typer.Option(
-        None,
-        "--onnx-providers",
-        help=(
-            "Comma-separated ORT execution providers in order of "
-            "preference (e.g. 'CoreMLExecutionProvider,CPUExecutionProvider'). "
-            "Defaults to onnxruntime's auto-selection. Only used with --backbone-onnx."
-        ),
-    ),
 ) -> None:
     """Run COCO evaluation; print the per-task metrics dict."""
     with track_mps_fallbacks(label="eval"):
@@ -209,10 +167,6 @@ def _eval(
             image_root=images,
             output_dir=output,
             device=device,
-            backbone_mlpackage=backbone_mlpackage,
-            coreml_compute_units=coreml_compute_units,
-            backbone_onnx=backbone_onnx,
-            onnx_providers=onnx_providers,
         )
     typer.echo(json.dumps(metrics, indent=2))
 
