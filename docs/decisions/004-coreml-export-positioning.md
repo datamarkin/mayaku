@@ -3,6 +3,13 @@
 Status: accepted
 Date: 2026-04-26
 
+> **Update (2026-07):** the backbone-swap hybrid-eval tooling this ADR used to
+> measure — `mayaku eval --backbone-mlpackage` and the `CoreMLBackbone` runtime —
+> has been removed. Deploy geometry is now: a `.pth` runs eager Torch, and a
+> `.mlpackage` runs whole via its native runtime. The positioning conclusion
+> below (ANE's speedup evaporates at R-CNN input shapes) is unchanged; only the
+> in-repo measurement path is gone.
+
 ## Context
 
 Round-1 of `examples/coreml_speed_check.py` reported the CoreML hybrid

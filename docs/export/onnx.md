@@ -118,37 +118,3 @@ features = dict(zip(["p2","p3","p4","p5","p6"],
 For GPU runtimes use `CUDAExecutionProvider` (NVIDIA) or the
 `CoreMLExecutionProvider` if you want ONNX-via-CoreML on Apple Silicon
 without writing a separate `.mlpackage`.
-
-## Running COCO eval against the exported artefact
-
-`mayaku eval` accepts `--backbone-onnx` to swap the eager backbone+FPN
-for an `.onnx` model loaded via `ONNXBackbone`, while keeping
-RPN/ROI/postprocess in PyTorch. Mirrors the
-[CoreML hybrid eval](coreml.md). `--onnx-providers` is a
-comma-separated, ordered list of ORT execution providers.
-
-```bash
-# Export at a square shape that fits both image orientations
-# after ResizeShortestEdge.
-mayaku export onnx configs/faster_rcnn_R50_FPN_3x.yaml \
-    --weights model.pth --output model.onnx \
-    --sample-height 1344 --sample-width 1344
-
-# Eval (Apple Silicon — CoreMLExecutionProvider is the fastest ORT
-# path, falls back to CPUExecutionProvider if CoreML can't run an op).
-mayaku eval configs/faster_rcnn_R50_FPN_3x.yaml \
-    --weights model.pth \
-    --backbone-onnx model.onnx \
-    --onnx-providers CoreMLExecutionProvider,CPUExecutionProvider \
-    --device mps \
-    --json /path/to/instances_val2017.json \
-    --images /path/to/val2017
-```
-
-For Faster R-CNN R50-FPN against the D2-converted weights the ORT
-path matches eager AP (40.23 vs 40.22) at 3.0 it/s vs eager 5.7
-it/s — see ADR 003 §1d for the full benchmark and a comparison
-against the native CoreML path. On Apple Silicon, **native CoreML
-is faster than going through ORT's CoreML EP** (5.2 vs 3.0 it/s),
-so prefer `--backbone-mlpackage` for macOS deployment and reserve
-the ONNX path for cross-platform / CUDA hosts.

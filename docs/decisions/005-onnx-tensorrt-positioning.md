@@ -3,6 +3,12 @@
 Status: accepted
 Date: 2026-04-27
 
+> **Update (2026-07):** the backbone-swap hybrid-eval tooling this ADR
+> references — `mayaku eval --backbone-onnx`, the `ONNXBackbone` /
+> `TensorRTBackbone` runtimes, and `from_pretrained(target=...)` — has been
+> removed. Exporters (`mayaku export onnx/tensorrt/openvino`) are unchanged; only
+> the runtime backbone-swap is gone. The positioning conclusions below stand.
+
 ## Context
 
 ADR 004 found that on Apple Silicon, CoreML's runtime delivers

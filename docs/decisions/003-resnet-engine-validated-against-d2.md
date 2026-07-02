@@ -3,6 +3,11 @@
 Status: proposed (validation runs pending)
 Date: 2026-04-26
 
+> **Update (2026-07):** some validations below used the backbone-swap hybrid-eval
+> path (`mayaku eval --backbone-mlpackage` / `--backbone-onnx`, `CoreMLBackbone` /
+> `ONNXBackbone`), which has since been removed. Those command examples no longer
+> run; the D2-parity conclusions they supported are unaffected.
+
 ## Context
 
 Mayaku's ResNet-based detector stack (Faster / Mask / Keypoint R-CNN

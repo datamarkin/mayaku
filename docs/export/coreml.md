@@ -125,50 +125,6 @@ wrapper, then call `model.prediction(image: cvPixelBuffer)`. Pair the
 graph output with a Swift port of `mayaku.inference.postprocess` (NMS
 via Accelerate / Metal Performance Shaders, mask paste via vImage).
 
-## Running COCO eval against the exported artefact
-
-`mayaku eval` accepts `--backbone-mlpackage` to swap the eager
-backbone+FPN for the loaded `.mlpackage` while keeping RPN/ROI
-heads/postprocess in PyTorch — a hybrid eval that lets you sanity-
-check the CoreML conversion over a full dataset, not just one image.
-
-```bash
-# Export fp16 at a square shape so both landscape and portrait
-# images fit after ResizeShortestEdge (short edge 800, long edge
-# ≤ 1333 padded to 1344). Pass --coreml-precision fp16 — required
-# for any NE/GPU acceleration.
-mayaku export coreml configs/faster_rcnn_R50_FPN_3x.yaml \
-    --weights model.pth --output model.mlpackage \
-    --sample-height 1344 --sample-width 1344 \
-    --coreml-precision fp16
-
-# Eval. CPU_AND_GPU outperforms ALL on this graph; --device mps lets
-# the PyTorch RPN/ROI heads run on Metal so they're not the
-# bottleneck.
-mayaku eval configs/faster_rcnn_R50_FPN_3x.yaml \
-    --weights model.pth \
-    --backbone-mlpackage model.mlpackage \
-    --coreml-compute-units CPU_AND_GPU \
-    --json /path/to/instances_val2017.json \
-    --images /path/to/val2017 \
-    --device mps
-```
-
-`--coreml-compute-units` accepts `ALL`, `CPU_ONLY`, `CPU_AND_GPU`,
-or `CPU_AND_NE`. For this graph `CPU_AND_GPU` is fastest — see the
-trade-off table above and benchmark for your specific model.
-
-For Faster R-CNN R50-FPN evaluated against the D2-converted weights,
-this hybrid path matches the eager AP within 0.01 (40.23 CoreML vs
-40.22 eager) at 5.2 it/s vs eager 5.7 it/s — see
-`docs/decisions/003-resnet-engine-validated-against-d2.md`
-Validations 1c and 1c.1 for the full benchmark. The hybrid is a
-correctness gate, not a speed win — the per-image MPS↔CPU device
-transfer in `CoreMLBackbone.forward` absorbs the standalone
-backbone speedup. For real production speed run
-preprocess/postprocess natively in Swift via the typed wrapper
-Xcode generates from the `.mlpackage`.
-
 ## Known limitations
 
 - **Conversion still requires `torch.jit.trace`.** PyTorch warns that

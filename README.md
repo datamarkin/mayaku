@@ -100,7 +100,7 @@ public proxy for how well a model learns *your* data.
 ### COCO val2017
 
 Competitive on the standard benchmark, trained with this library. The ConvNeXt-tiny number
-is a **measured floor** — a 1x schedule with **no backbone pretraining**; with pretraining
+is a **measured floor** — a short schedule with **no backbone pretraining**; with pretraining
 we expect **50+ AP**.
 
 | Model | Params (M) |  COCO box AP | FPS <!--device--> |
@@ -176,7 +176,8 @@ beats PyTorch eager; on GPU targets the export *artifact* is the value — see
 
 Have Detectron2 R-CNN checkpoints — your own fine-tunes or the model zoo? Convert them to
 Mayaku format once and pick up Apple Silicon support, clean exports, and no CUDA kernels.
-Converted weights reproduce D2's published COCO numbers within ±0.1 AP.
+The converted weights load into the matching Mayaku architecture for inference, eval, and
+fine-tuning.
 
 ```bash
 python tools/convert_d2_checkpoint.py your_model_final.pkl -o your_model.pth
