@@ -59,10 +59,6 @@ def run_eval(
     image_root: Path,
     output_dir: Path | None = None,
     device: str | None = None,
-    backbone_mlpackage: Path | None = None,
-    coreml_compute_units: str = "CPU_AND_GPU",
-    backbone_onnx: Path | None = None,
-    onnx_providers: str | None = None,
 ) -> dict[str, Any]:
     """Run COCO evaluation.
 
@@ -84,57 +80,6 @@ def run_eval(
         if device == "mps":
             apply_mps_environment()
         model = model.to(torch.device(device))
-
-    if backbone_mlpackage is not None:
-        # Hybrid eval: CoreML for backbone+FPN, PyTorch for RPN/ROI/postprocess.
-        # The exported `.mlpackage` is a fixed-shape graph; CoreMLBackbone
-        # pads each input up to the export shape and crops the FPN
-        # outputs back so the rest of the model sees its expected dict.
-        # Square (1344, 1344) covers both landscape and portrait
-        # orientations — ResizeShortestEdge can produce either, with
-        # the long edge ≤ max_size_test (1333), padded up to 1344.
-        from mayaku.inference.export import CoreMLBackbone
-
-        prev_size_div = getattr(model.backbone, "size_divisibility", 32)
-        coreml_backbone = CoreMLBackbone(
-            backbone_mlpackage,
-            input_height=1344,
-            input_width=1344,
-            size_divisibility=prev_size_div,
-            compute_units=coreml_compute_units,
-        )
-        model.backbone = coreml_backbone
-        print(
-            f"[eval] using CoreML backbone from {backbone_mlpackage} "
-            f"(compute_units={coreml_compute_units})",
-            flush=True,
-        )
-
-    if backbone_onnx is not None:
-        # Same hybrid pattern as the CoreML branch above. ONNX Runtime
-        # is cross-platform; provider selection drives where the
-        # backbone+FPN actually executes.
-        from mayaku.inference.export import ONNXBackbone
-
-        prev_size_div = getattr(model.backbone, "size_divisibility", 32)
-        providers = (
-            tuple(p.strip() for p in onnx_providers.split(",") if p.strip())
-            if onnx_providers
-            else None
-        )
-        onnx_backbone = ONNXBackbone(
-            backbone_onnx,
-            input_height=1344,
-            input_width=1344,
-            size_divisibility=prev_size_div,
-            providers=providers,
-        )
-        model.backbone = onnx_backbone
-        print(
-            f"[eval] using ONNX backbone from {backbone_onnx} "
-            f"(active_providers={onnx_backbone.active_providers})",
-            flush=True,
-        )
 
     metadata = build_coco_metadata(name="cli_eval", json_path=coco_gt_json)
     # Inference mapper drops annotations (is_train=False). The COCO
