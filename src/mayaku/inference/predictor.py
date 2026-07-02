@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -45,7 +44,6 @@ from mayaku.utils.image import read_image
 __all__ = ["Predictor"]
 
 ImageInput = npt.NDArray[np.uint8] | str | Path
-Target = Literal["pytorch", "onnx", "tensorrt"]
 
 
 class Predictor:
@@ -276,7 +274,7 @@ def _resolve_device(model: nn.Module) -> torch.device:
 # Pre-exported artifact suffixes — the "the file is the backend" dispatch.
 # Loading one of these runs the artifact directly (full-graph runtime); not
 # wired yet (see ArtifactPredictor). A ``.pth`` / bare name is an eager
-# checkpoint, optionally backbone-accelerated via ``target=``.
+# checkpoint.
 _ARTIFACT_SUFFIXES = frozenset({".onnx", ".engine", ".mlpackage", ".xml"})
 
 
@@ -284,9 +282,6 @@ def from_pretrained(
     source: str | Path,
     *,
     device: str = "auto",
-    target: Target = "pytorch",
-    fp16: bool = True,
-    pinned: tuple[int, int] = (1344, 1344),
     gpu_preprocess: bool = False,
     pinned_memory: bool = False,
 ) -> Predictor:
@@ -296,19 +291,12 @@ def from_pretrained(
 
     - ``.pth`` (or a bundled model name) → eager Torch checkpoint. Architecture
       + weights come from the checkpoint's embedded sidecar (no config file).
-      ``target="onnx"``/``"tensorrt"`` optionally swaps the backbone to an
-      accelerated runtime; ``fp16`` applies to the TensorRT engine.
     - ``.onnx`` / ``.engine`` / ``.mlpackage`` / ``.xml`` → a pre-exported
       artifact, run directly (not wired yet — the standalone full-graph runtime).
 
     Args:
         source: Path to a ``.pth`` / exported artifact, or a bundled model name.
         device: ``"cpu" | "cuda" | "mps" | "auto"`` (default ``"auto"``).
-        target: Backbone runtime for the ``.pth`` path — ``"pytorch"`` (default),
-            ``"onnx"``, or ``"tensorrt"``.
-        fp16: TensorRT engine precision (``target="tensorrt"`` only).
-        pinned: Fixed input shape the exported backbone is built for
-            (``target in {"onnx","tensorrt"}``).
         gpu_preprocess: Do resize/normalize on-device (shortest-edge only).
         pinned_memory: Use a pinned staging buffer (requires ``gpu_preprocess``).
 
@@ -316,21 +304,18 @@ def from_pretrained(
         >>> from mayaku import from_pretrained
         >>> p = from_pretrained("model.pth")
         >>> dets = p("image.jpg")
-        >>> p = from_pretrained("model.pth", target="tensorrt", fp16=True)
     """
     from mayaku.backends.device import Device
     from mayaku.cli._factory import load_detector
 
     suffix = Path(source).suffix.lower()
     # TODO: when the full-graph ArtifactPredictor lands, dispatch here to it
-    # (`return ArtifactPredictor(source, device=device)`) instead of raising —
-    # the artifact path won't use target/fp16/pinned (those are checkpoint-only).
+    # (`return ArtifactPredictor(source, device=device)`) instead of raising.
     if suffix in _ARTIFACT_SUFFIXES:
         raise NotImplementedError(
             f"Running a pre-exported '{suffix}' artifact directly is not wired yet "
-            "(the standalone full-graph runtime). For now: load the '.pth' and pass "
-            "target='onnx'/'tensorrt' to accelerate the backbone, or run the artifact "
-            "with its native runtime."
+            "(the standalone full-graph runtime). For now, load the '.pth' and run "
+            "eager, or run the artifact with its native runtime."
         )
 
     if device == "auto":
@@ -338,67 +323,9 @@ def from_pretrained(
     # Architecture + weights both come from the checkpoint's sidecar.
     cfg, model = load_detector(source)
     model = model.to(torch.device(device))  # Predictor.__init__ flips to eval()
-    _swap_backbone(model, name=str(source), target=target, fp16=fp16, pinned=pinned)
     return Predictor._from_cfg(
         cfg, model, gpu_preprocess=gpu_preprocess, pinned_memory=pinned_memory
     )
-
-
-def _swap_backbone(
-    model: nn.Module,
-    *,
-    name: str,
-    target: Target,
-    fp16: bool,
-    pinned: tuple[int, int],
-) -> None:
-    """Swap ``model.backbone`` for an ONNX or TensorRT runtime wrapper.
-
-    No-op for ``target="pytorch"``. Lazy-imports the export module so
-    callers who don't ask for an alternate backbone don't pay the import
-    cost.
-    """
-    prev_div = getattr(model.backbone, "size_divisibility", 32)
-    match target:
-        case "pytorch":
-            return
-        case "onnx":
-            from mayaku.inference.export import ONNXBackbone
-            from mayaku.utils.download import download_model
-
-            onnx_path = download_model(name, target="onnx")
-            providers = (
-                ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                if torch.cuda.is_available()
-                else ["CPUExecutionProvider"]
-            )
-            model.backbone = ONNXBackbone(
-                onnx_path,
-                input_height=pinned[0],
-                input_width=pinned[1],
-                size_divisibility=prev_div,
-                providers=providers,
-            )
-        case "tensorrt":
-            from mayaku.inference.export import TensorRTBackbone, TensorRTExporter
-            from mayaku.utils.download import engine_cache_path
-
-            engine_path = engine_cache_path(name, pinned_h=pinned[0], pinned_w=pinned[1], fp16=fp16)
-            if not engine_path.exists():
-                engine_path.parent.mkdir(parents=True, exist_ok=True)
-                sample = torch.zeros(
-                    (1, 3, pinned[0], pinned[1]),
-                    dtype=torch.float32,
-                    device=next(model.parameters()).device,
-                )
-                TensorRTExporter(fp16=fp16).export(model, sample, engine_path)
-            model.backbone = TensorRTBackbone(
-                engine_path, pinned=pinned, size_divisibility=prev_div
-            )
-        case _:
-            raise ValueError(
-                f"unknown target {target!r}; expected one of 'pytorch', 'onnx', 'tensorrt'"
-            )
 
 
 def _to_uint8_rgb(image: ImageInput) -> npt.NDArray[np.uint8]:

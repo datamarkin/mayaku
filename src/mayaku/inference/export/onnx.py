@@ -39,7 +39,7 @@ from torch import Tensor, nn
 
 from mayaku.inference.export.base import ExportResult, ParityResult
 
-__all__ = ["ONNXBackbone", "ONNXExporter"]
+__all__ = ["ONNXExporter"]
 
 DEFAULT_OPSET: int = 17
 
@@ -73,10 +73,7 @@ class ONNXExporter:
             algorithms for the exact shape). With dynamic shapes,
             TRT either falls back to a one-size-fits-all kernel set
             or rebuilds at runtime — both options are slower than
-            PyTorch eager for R-CNN-class graphs. Mayaku's runtime
-            hybrid path (``ONNXBackbone``) already pads each input
-            up to a fixed shape, so the dynamic-shapes flexibility
-            isn't actually needed for the eval pipeline; export with
+            PyTorch eager for R-CNN-class graphs. Export with
             ``dynamic_input_shape=False`` when targeting TRT.
     """
 
@@ -357,105 +354,6 @@ class _FullDetectorAdapter(nn.Module):
 
     def forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         return self.model.export_forward(image)
-
-
-class ONNXBackbone(nn.Module):
-    """Run an ONNX-exported backbone+FPN as a drop-in replacement.
-
-    Mirrors :class:`mayaku.inference.export.coreml.CoreMLBackbone` —
-    same fixed-shape pad/crop pattern, same output dict contract. The
-    only differences are the runtime (ONNX Runtime vs Core ML) and the
-    ``providers`` knob, which selects the execution provider stack.
-
-    Cross-platform — unlike CoreMLBackbone there is no macOS gate.
-    `CoreMLExecutionProvider` is only available on macOS but
-    `CPUExecutionProvider` (and on Linux/CUDA hosts the
-    CUDA / TensorRT providers) work everywhere ONNX Runtime installs.
-    """
-
-    def __init__(
-        self,
-        onnx_path: Path,
-        *,
-        input_height: int = 800,
-        input_width: int = 1344,
-        output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        strides: dict[str, int] | None = None,
-        size_divisibility: int = 32,
-        providers: Sequence[str] | None = None,
-    ) -> None:
-        super().__init__()
-        # Lazy import — onnxruntime is not a hard dependency.
-        try:
-            import onnxruntime as ort
-        except ModuleNotFoundError as e:
-            _ort_install_hint = (
-                "pip install onnxruntime-gpu"
-                if torch.cuda.is_available()
-                else "pip install onnxruntime"
-            )
-            raise ModuleNotFoundError(
-                f"ONNXBackbone requires onnxruntime. Install with: {_ort_install_hint}"
-            ) from e
-
-        self.onnx_path = Path(onnx_path)
-        self.input_shape: tuple[int, int] = (int(input_height), int(input_width))
-        self.output_names: tuple[str, ...] = tuple(output_names)
-        self.strides: dict[str, int] = (
-            dict(strides)
-            if strides is not None
-            else {n: _DEFAULT_STRIDES[n] for n in self.output_names}
-        )
-        self._size_divisibility = int(size_divisibility)
-        # Default to CPUExecutionProvider so ORT never tries to load CUDA
-        # shared libraries (.so/.dll) that may not match the host CUDA version.
-        # Pass providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-        # explicitly if you need GPU-accelerated ORT inference and have
-        # installed onnxruntime-gpu built against your CUDA version.
-        self.providers: tuple[str, ...] = (
-            tuple(providers) if providers is not None else ("CPUExecutionProvider",)
-        )
-        self._session = ort.InferenceSession(str(self.onnx_path), providers=list(self.providers))
-        # Cache the session's actual chosen providers (post-fallback).
-        self.active_providers: tuple[str, ...] = tuple(self._session.get_providers())
-
-    @property
-    def size_divisibility(self) -> int:
-        return self._size_divisibility
-
-    def forward(self, image: Tensor) -> dict[str, Tensor]:
-        if image.dim() != 4 or image.shape[0] != 1:
-            raise ValueError(
-                f"ONNXBackbone.forward expects (1, 3, H, W); got {tuple(image.shape)}."
-            )
-        target_h, target_w = self.input_shape
-        _b, c, h, w = image.shape
-        if h > target_h or w > target_w:
-            raise ValueError(
-                f"Input shape ({h}, {w}) exceeds the exported ONNX "
-                f"shape ({target_h}, {target_w}). Re-export at a "
-                "larger size or constrain input."
-            )
-
-        device = image.device
-        if h == target_h and w == target_w:
-            padded = image
-        else:
-            padded = image.new_zeros((1, c, target_h, target_w))
-            padded[:, :, :h, :w] = image
-
-        ml_out = self._session.run(
-            list(self.output_names), {"image": padded.detach().cpu().numpy()}
-        )
-
-        out: dict[str, Tensor] = {}
-        for name, full_np in zip(self.output_names, ml_out, strict=True):
-            full = torch.from_numpy(full_np).to(device)
-            stride = self.strides[name]
-            crop_h = (h + stride - 1) // stride
-            crop_w = (w + stride - 1) // stride
-            out[name] = full[:, :, :crop_h, :crop_w].contiguous()
-        return out
 
 
 def _is_full_detector(model: nn.Module) -> bool:

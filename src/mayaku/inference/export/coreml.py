@@ -39,13 +39,12 @@ from torch import Tensor, nn
 
 from mayaku.inference.export.base import ExportResult, ParityResult
 
-__all__ = ["CoreMLBackbone", "CoreMLExporter"]
+__all__ = ["CoreMLExporter"]
 
 # Standard FPN output names (`Backbone.output_shape()` from Step 8).
 _DEFAULT_OUT_NAMES: tuple[str, ...] = ("p2", "p3", "p4", "p5", "p6")
 # Strides associated with the default FPN levels above. p6 is
 # `LastLevelMaxPool(stride=2)` of p5 → effective stride 64.
-_DEFAULT_STRIDES: dict[str, int] = {"p2": 4, "p3": 8, "p4": 16, "p5": 32, "p6": 64}
 
 
 class CoreMLExporter:
@@ -272,116 +271,6 @@ def _resolve_backbone(model: nn.Module) -> nn.Module:
 # ---------------------------------------------------------------------------
 # Runtime adapter
 # ---------------------------------------------------------------------------
-
-
-class CoreMLBackbone(nn.Module):
-    """Run a CoreML-exported backbone+FPN as a drop-in replacement.
-
-    Wraps an ``.mlpackage`` produced by :class:`CoreMLExporter`. Presents
-    the same forward contract as ``FPN``: ``forward(image) -> {p2..p6}``
-    on the device of the input. The detector's RPN / ROI heads / postprocess
-    keep running in PyTorch so end-to-end COCO eval needs no other changes.
-
-    The CoreML graph is exported at a single fixed shape
-    (``(input_height, input_width)``). Real eval inputs come padded to a
-    multiple of ``size_divisibility`` (32 for FPN R50), with per-image
-    ``(H_pad, W_pad)`` ≤ the export shape. ``forward`` zero-pads the
-    input up to the export shape, runs the model, and crops each FPN
-    output back to ``(H_pad // stride, W_pad // stride)`` so downstream
-    consumers see the same shapes the eager backbone would produce.
-
-    Runtime is **macOS-only** — ``coremltools.models.MLModel.predict``
-    needs ``Core ML.framework``. Construction itself works anywhere
-    (we lazy-import) but ``forward`` raises on non-Darwin.
-    """
-
-    def __init__(
-        self,
-        mlpackage_path: Path,
-        *,
-        input_height: int = 800,
-        input_width: int = 1344,
-        output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        strides: dict[str, int] | None = None,
-        size_divisibility: int = 32,
-        compute_units: str = "CPU_AND_GPU",
-    ) -> None:
-        super().__init__()
-        if platform.system() != "Darwin":
-            raise RuntimeError(
-                "CoreMLBackbone needs the Core ML runtime, which is "
-                "macOS-only. Use the eager backbone on this host."
-            )
-        # Lazy import so non-mac environments don't pay the cost.
-        try:
-            import coremltools as ct
-        except ModuleNotFoundError as e:
-            raise ModuleNotFoundError(
-                "CoreMLBackbone requires the [coreml] extra: pip install mayaku[coreml]"
-            ) from e
-
-        self.mlpackage_path = Path(mlpackage_path)
-        self.input_shape: tuple[int, int] = (int(input_height), int(input_width))
-        self.output_names: tuple[str, ...] = tuple(output_names)
-        self.strides: dict[str, int] = (
-            dict(strides)
-            if strides is not None
-            else {n: _DEFAULT_STRIDES[n] for n in self.output_names}
-        )
-        self._size_divisibility = int(size_divisibility)
-        self.compute_units = compute_units
-        self._mlmodel = ct.models.MLModel(
-            str(self.mlpackage_path), compute_units=_compute_units(ct, compute_units)
-        )
-
-    # The detector's `_size_divisibility()` reads this attribute via
-    # `getattr(self.backbone, "size_divisibility", 1)`.
-    @property
-    def size_divisibility(self) -> int:
-        return self._size_divisibility
-
-    def forward(self, image: Tensor) -> dict[str, Tensor]:
-        if image.dim() != 4 or image.shape[0] != 1:
-            raise ValueError(
-                "CoreMLBackbone.forward expects (1, 3, H, W); got "
-                f"{tuple(image.shape)}. Eval CLI uses batch_size=1 — "
-                "multi-image batching would require re-export with a "
-                "fixed batch dim."
-            )
-        target_h, target_w = self.input_shape
-        _b, c, h, w = image.shape
-        if h > target_h or w > target_w:
-            raise ValueError(
-                f"Input shape ({h}, {w}) exceeds the exported CoreML "
-                f"shape ({target_h}, {target_w}). Re-export at a "
-                "larger size or ensure ResizeShortestEdge / "
-                "max_size_test honours this bound."
-            )
-
-        device = image.device
-        if h == target_h and w == target_w:
-            padded = image
-        else:
-            padded = image.new_zeros((1, c, target_h, target_w))
-            padded[:, :, :h, :w] = image
-
-        # CoreML's predict() takes numpy on CPU.
-        ml_out = self._mlmodel.predict({"image": padded.detach().cpu().numpy()})
-
-        out: dict[str, Tensor] = {}
-        for name in self.output_names:
-            full = torch.from_numpy(ml_out[name]).to(device)
-            stride = self.strides[name]
-            # The eager FPN's right/bottom output cells are derived from
-            # the same conv chain whether we ran at H_pad or target_h —
-            # cropping just takes the first H_pad/stride rows. p6 uses
-            # LastLevelMaxPool(stride=2) so its tile is half-rounded;
-            # `(h + stride - 1) // stride` covers both the integer and
-            # ceil-stride-2 cases without a special branch.
-            crop_h = (h + stride - 1) // stride
-            crop_w = (w + stride - 1) // stride
-            out[name] = full[:, :, :crop_h, :crop_w].contiguous()
-        return out
 
 
 def _compute_precision(ct_module: object, name: str) -> object:
