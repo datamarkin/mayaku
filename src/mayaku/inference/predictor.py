@@ -79,6 +79,7 @@ class Predictor:
         device: torch.device | None = None,
         gpu_preprocess: bool = False,
         pinned_memory: bool = False,
+        source_stem: str = "model",
     ) -> None:
         if resize_mode not in ("shortest_edge", "letterbox"):
             raise ValueError(
@@ -109,6 +110,9 @@ class Predictor:
         self.device = device or _resolve_device(model)
         self.gpu_preprocess = gpu_preprocess
         self.pinned_memory = pinned_memory
+        # Used to derive a default export filename (``<stem>.<ext>``); set by
+        # from_pretrained from the source name.
+        self._source_stem = source_stem
         self._resize = (
             ResizeShortestEdge(
                 short_edge_lengths=(min_size_test,),
@@ -128,6 +132,7 @@ class Predictor:
         *,
         gpu_preprocess: bool = False,
         pinned_memory: bool = False,
+        source_stem: str = "model",
     ) -> Predictor:
         """Internal seam: map ``cfg.input`` deploy geometry onto the constructor.
 
@@ -149,6 +154,7 @@ class Predictor:
             max_size_test=inp.max_size_test,
             gpu_preprocess=gpu_preprocess,
             pinned_memory=pinned_memory,
+            source_stem=source_stem,
         )
 
     # ------------------------------------------------------------------
@@ -255,6 +261,67 @@ class Predictor:
         """
         return [self(im) for im in images]
 
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    def export(
+        self,
+        format: str,
+        *,
+        output: str | Path | None = None,
+        sample_height: int = 640,
+        sample_width: int = 640,
+        coreml_precision: str = "fp32",
+        onnx_dynamic_input_shape: bool = True,
+    ) -> Path:
+        """Serialise this detector to a deployment target; return the artifact path.
+
+        The in-memory mirror of ``mayaku export <format>`` — writes the same
+        graph (backbone+FPN body for R-CNN, full detector for UniQuery) using the
+        same exporters.
+
+        Args:
+            format: One of ``"onnx" | "coreml" | "openvino" | "tensorrt"``.
+            output: Artifact path. Defaults to ``<model-name>.<ext>`` in the cwd
+                (``.onnx`` / ``.mlpackage`` / ``.xml`` / ``.engine``).
+            sample_height / sample_width: Tracing input size.
+            coreml_precision: ``"fp32"`` (default) or ``"fp16"`` — CoreML only.
+            onnx_dynamic_input_shape: ONNX only; ``False`` bakes the sample shape
+                (use when targeting TensorRT — see ``docs/export/onnx.md``).
+
+        Example:
+            >>> from mayaku import from_pretrained
+            >>> model = from_pretrained("mayaku-s")
+            >>> path = model.export("onnx")            # -> mayaku-s.onnx
+        """
+        from mayaku.inference.export.dispatch import (
+            AVAILABLE_TARGETS,
+            TARGET_SUFFIX,
+            build_sample,
+            export_detector,
+        )
+
+        if format not in AVAILABLE_TARGETS:
+            raise ValueError(
+                f"unknown export format {format!r}; expected one of {AVAILABLE_TARGETS}"
+            )
+        out = (
+            Path(output)
+            if output is not None
+            else Path(f"{self._source_stem}{TARGET_SUFFIX[format]}")
+        )
+        sample = build_sample(sample_height, sample_width)
+        result = export_detector(
+            self.model,
+            format,
+            out,
+            sample=sample,
+            coreml_precision=coreml_precision,
+            onnx_dynamic_input_shape=onnx_dynamic_input_shape,
+        )
+        return result.path
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -324,7 +391,11 @@ def from_pretrained(
     cfg, model = load_detector(source)
     model = model.to(torch.device(device))  # Predictor.__init__ flips to eval()
     return Predictor._from_cfg(
-        cfg, model, gpu_preprocess=gpu_preprocess, pinned_memory=pinned_memory
+        cfg,
+        model,
+        gpu_preprocess=gpu_preprocess,
+        pinned_memory=pinned_memory,
+        source_stem=Path(source).stem,
     )
 
 

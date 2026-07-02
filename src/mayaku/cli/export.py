@@ -8,20 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import torch
-
 from mayaku.cli._factory import load_detector
-from mayaku.inference.export import (
-    CoreMLExporter,
-    ONNXExporter,
-    OpenVINOExporter,
-    TensorRTExporter,
-)
 from mayaku.inference.export.base import ExportResult
+from mayaku.inference.export.dispatch import AVAILABLE_TARGETS, build_sample, export_detector
 
 __all__ = ["run_export"]
-
-_AVAILABLE_TARGETS: tuple[str, ...] = ("onnx", "coreml", "openvino", "tensorrt")
 
 
 def run_export(
@@ -40,38 +31,20 @@ def run_export(
     ``weights`` is a trained ``.pth`` (or a bundled model name); its embedded
     sidecar defines the architecture to export.
     """
-    if target not in _AVAILABLE_TARGETS:
-        raise ValueError(f"unknown export target {target!r}; expected one of {_AVAILABLE_TARGETS}")
+    # Validate before load_detector so a bad target fails fast (a bundled name
+    # would otherwise trigger a weight download first).
+    if target not in AVAILABLE_TARGETS:
+        raise ValueError(f"unknown export target {target!r}; expected one of {AVAILABLE_TARGETS}")
 
     _cfg, model = load_detector(weights)
     model.eval()
 
-    sample = _build_sample(sample_height, sample_width)
-
-    if target == "onnx":
-        return ONNXExporter(dynamic_input_shape=onnx_dynamic_input_shape).export(
-            model, sample, output
-        )
-    if target == "coreml":
-        return CoreMLExporter(compute_precision=coreml_precision).export(model, sample, output)
-    if target == "openvino":
-        return OpenVINOExporter().export(model, sample, output)
-    if target == "tensorrt":
-        return TensorRTExporter().export(model, sample, output)
-
-    # Defensive — every target in _AVAILABLE_TARGETS now has a branch.
-    raise AssertionError(  # pragma: no cover
-        f"unhandled export target {target!r}; "
-        "_AVAILABLE_TARGETS is out of sync with the dispatch above."
+    sample = build_sample(sample_height, sample_width)
+    return export_detector(
+        model,
+        target,
+        output,
+        sample=sample,
+        coreml_precision=coreml_precision,
+        onnx_dynamic_input_shape=onnx_dynamic_input_shape,
     )
-
-
-def _build_sample(h: int, w: int) -> torch.Tensor:
-    """Build a normalised RGB tracing sample on CPU.
-
-    The exporter graph operates on already-normalised tensors (the
-    detector's pixel mean/std subtraction lives outside the exported
-    body). ``zeros`` is a fine tracing input; numerical parity is
-    checked with random data in the test suite.
-    """
-    return torch.zeros(1, 3, h, w, dtype=torch.float32)
