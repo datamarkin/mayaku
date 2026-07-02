@@ -32,12 +32,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import torch
 from torch import Tensor, nn
 
 from mayaku.inference.export.base import ExportResult, ParityResult
+from mayaku.inference.export.full_detector import (
+    FULL_DETECTOR_OUTPUTS,
+    FullDetectorAdapter,
+    _FullDetector,
+    is_full_detector,
+)
 
 __all__ = ["ONNXExporter"]
 
@@ -114,9 +120,9 @@ class ONNXExporter:
         # Full-detector models (UniQuery) expose ``export_forward`` — trace the
         # whole graph (image -> boxes/scores/labels). Everything else exports the
         # backbone+FPN body only (the R-CNN head doesn't trace cleanly).
-        if _is_full_detector(model):
-            adapter: nn.Module = _FullDetectorAdapter(model).eval()
-            out_names: tuple[str, ...] = ("boxes", "scores", "labels")
+        if is_full_detector(model):
+            adapter: nn.Module = FullDetectorAdapter(model).eval()
+            out_names: tuple[str, ...] = FULL_DETECTOR_OUTPUTS
             full = True
         else:
             adapter = _DictToTupleBackbone(_resolve_backbone(model), self.output_names).eval()
@@ -199,7 +205,7 @@ class ONNXExporter:
 
         # Full-detector graphs compare the (boxes, scores, labels) outputs;
         # backbone graphs compare the FPN feature tensors.
-        if _is_full_detector(model):
+        if is_full_detector(model):
             return self._parity_full(model, exported_path, sample, ort=ort, atol=atol, rtol=rtol)
 
         backbone = _resolve_backbone(model)
@@ -263,7 +269,7 @@ class ONNXExporter:
         device = next(iter(model.parameters())).device
         with torch.no_grad():
             eager = cast(_FullDetector, model).export_forward(sample.to(device))
-        names = ("boxes", "scores", "labels")
+        names = FULL_DETECTOR_OUTPUTS
         eager_np = {n: t.detach().cpu().float().numpy() for n, t in zip(names, eager, strict=True)}
 
         sess = ort.InferenceSession(  # type: ignore[attr-defined]
@@ -309,16 +315,6 @@ class ONNXExporter:
 # ---------------------------------------------------------------------------
 
 
-class _FullDetector(Protocol):
-    """A detector exposing the traceable image -> (boxes, scores, labels) graph.
-
-    Used to type the ``export_forward`` call sites; membership is checked at
-    runtime by :func:`_is_full_detector` (``hasattr(model, "export_forward")``).
-    """
-
-    def export_forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]: ...
-
-
 class _DictToTupleBackbone(nn.Module):
     """Wrap a dict-returning backbone so ONNX export sees a fixed tuple.
 
@@ -335,35 +331,6 @@ class _DictToTupleBackbone(nn.Module):
     def forward(self, image: Tensor) -> tuple[Tensor, ...]:
         out = self.backbone(image)
         return tuple(out[name] for name in self.output_names)
-
-
-class _FullDetectorAdapter(nn.Module):
-    """Wrap a full-detector model so ONNX export traces ``export_forward``.
-
-    Exposes the whole image -> ``(boxes, scores, labels)`` graph as a plain
-    ``forward`` for ``torch.onnx.export`` (which traces a ``nn.Module.forward``,
-    not an arbitrary method name).
-    """
-
-    def __init__(self, model: nn.Module) -> None:
-        super().__init__()
-        # Cast once at construction (validated by _is_full_detector upstream) so
-        # forward() reads clean. The object is still an nn.Module at runtime, so
-        # nn.Module registers it as a submodule as usual.
-        self.model: _FullDetector = cast(_FullDetector, model)
-
-    def forward(self, image: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        return self.model.export_forward(image)
-
-
-def _is_full_detector(model: nn.Module) -> bool:
-    """Whether ``model`` exports as one full graph (image -> boxes/scores/labels).
-
-    Models that expose ``export_forward`` (e.g. UniQuery) trace the whole
-    detector; everything else exports the backbone+FPN body only (the R-CNN head
-    doesn't trace cleanly). The exporter and its parity check dispatch on this.
-    """
-    return hasattr(model, "export_forward")
 
 
 def _resolve_backbone(model: nn.Module) -> nn.Module:

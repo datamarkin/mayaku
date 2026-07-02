@@ -24,7 +24,7 @@ from mayaku.models.detectors import (
     build_uniquery,
 )
 from mayaku.tuning.sizing import multi_scale_canvases, resolve_deploy_canvas
-from mayaku.utils.checkpoint import config_from_checkpoint
+from mayaku.utils.checkpoint import read_deploy_checkpoint
 
 __all__ = ["build_detector", "build_resize_augmentation", "load_detector"]
 
@@ -76,19 +76,21 @@ def build_detector(cfg: MayakuConfig, *, backbone_weights: str | None = None) ->
     raise ValueError(f"unknown meta_architecture {arch!r}")
 
 
-def load_detector(weights: Path | str) -> tuple[MayakuConfig, nn.Module]:
+def load_detector(weights: Path | str) -> tuple[MayakuConfig, nn.Module, list[str] | None]:
     """Build a detector from a self-describing checkpoint and load its weights.
 
     ``weights`` is a trained ``.pth`` or a hub model name; either resolves to a
-    checkpoint whose embedded sidecar defines the architecture. The ``.pth`` is
-    read once. The ``num_batches_tracked`` buffers an EMA shadow accumulates are
-    dropped — the deploy model uses FrozenBatchNorm2d, which has no such entry.
-    Returns ``(cfg, model)``; the caller sets eval mode / device as it needs.
+    checkpoint whose embedded sidecar defines the architecture. The
+    ``num_batches_tracked`` buffers an EMA shadow accumulates are dropped — the
+    deploy model uses FrozenBatchNorm2d, which has no such entry. Returns
+    ``(cfg, model, class_names)`` — ``class_names`` is the sidecar's ordered
+    class list (or ``None`` for a checkpoint that recorded none); the caller sets
+    eval mode / device as it needs.
     """
     weights_path = resolve_weights(weights)
     if weights_path is None:  # weights is non-None here; this only narrows the type
         raise ValueError(f"could not resolve a checkpoint from {weights!r}")
-    cfg, state = config_from_checkpoint(weights_path)
+    cfg, class_names, state = read_deploy_checkpoint(weights_path)
     # Deploy builds the architecture only — the checkpoint's state_dict carries
     # every trained weight, so don't re-load the pretrained backbone. Its file
     # lives on the training host and need not exist where we deploy; loading it
@@ -105,4 +107,4 @@ def load_detector(weights: Path | str) -> tuple[MayakuConfig, nn.Module]:
     model = build_detector(cfg)
     state = {k: v for k, v in state.items() if not k.endswith(".num_batches_tracked")}
     model.load_state_dict(state)
-    return cfg, model
+    return cfg, model, class_names

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -40,6 +41,9 @@ from mayaku.data.transforms.augmentation import compute_resized_hw
 from mayaku.inference.postprocess import detector_postprocess, unletterbox_instances
 from mayaku.structures.instances import Instances
 from mayaku.utils.image import read_image
+
+if TYPE_CHECKING:
+    from mayaku.inference.artifact import ArtifactPredictor
 
 __all__ = ["Predictor"]
 
@@ -80,6 +84,8 @@ class Predictor:
         gpu_preprocess: bool = False,
         pinned_memory: bool = False,
         source_stem: str = "model",
+        cfg: MayakuConfig | None = None,
+        class_names: Sequence[str] | None = None,
     ) -> None:
         if resize_mode not in ("shortest_edge", "letterbox"):
             raise ValueError(
@@ -113,6 +119,11 @@ class Predictor:
         # Used to derive a default export filename (``<stem>.<ext>``); set by
         # from_pretrained from the source name.
         self._source_stem = source_stem
+        # Carried so ``export`` can embed the self-describing sidecar (config +
+        # class names) into the artifact. Absent for directly-constructed
+        # predictors (e.g. tests) — export then just skips the metadata.
+        self._cfg = cfg
+        self._class_names = list(class_names) if class_names is not None else None
         self._resize = (
             ResizeShortestEdge(
                 short_edge_lengths=(min_size_test,),
@@ -133,6 +144,7 @@ class Predictor:
         gpu_preprocess: bool = False,
         pinned_memory: bool = False,
         source_stem: str = "model",
+        class_names: Sequence[str] | None = None,
     ) -> Predictor:
         """Internal seam: map ``cfg.input`` deploy geometry onto the constructor.
 
@@ -155,6 +167,8 @@ class Predictor:
             gpu_preprocess=gpu_preprocess,
             pinned_memory=pinned_memory,
             source_stem=source_stem,
+            cfg=cfg,
+            class_names=class_names,
         )
 
     # ------------------------------------------------------------------
@@ -301,6 +315,7 @@ class Predictor:
             build_sample,
             export_detector,
         )
+        from mayaku.utils.checkpoint import build_sidecar
 
         if format not in AVAILABLE_TARGETS:
             raise ValueError(
@@ -311,6 +326,13 @@ class Predictor:
             if output is not None
             else Path(f"{self._source_stem}{TARGET_SUFFIX[format]}")
         )
+        # Embed the self-describing sidecar when we know the config (the
+        # from_pretrained path); a directly-constructed predictor has none.
+        sidecar = (
+            build_sidecar(self._cfg, self._class_names or [])
+            if self._cfg is not None
+            else None
+        )
         sample = build_sample(sample_height, sample_width)
         result = export_detector(
             self.model,
@@ -319,6 +341,7 @@ class Predictor:
             sample=sample,
             coreml_precision=coreml_precision,
             onnx_dynamic_input_shape=onnx_dynamic_input_shape,
+            sidecar=sidecar,
         )
         return result.path
 
@@ -339,9 +362,9 @@ def _resolve_device(model: nn.Module) -> torch.device:
 
 
 # Pre-exported artifact suffixes — the "the file is the backend" dispatch.
-# Loading one of these runs the artifact directly (full-graph runtime); not
-# wired yet (see ArtifactPredictor). A ``.pth`` / bare name is an eager
-# checkpoint.
+# Loading one of these runs the artifact end-to-end via its native runtime
+# (see :class:`mayaku.inference.artifact.ArtifactPredictor`). A ``.pth`` / bare
+# name is an eager checkpoint.
 _ARTIFACT_SUFFIXES = frozenset({".onnx", ".engine", ".mlpackage", ".xml"})
 
 
@@ -351,8 +374,12 @@ def from_pretrained(
     device: str = "auto",
     gpu_preprocess: bool = False,
     pinned_memory: bool = False,
-) -> Predictor:
+) -> Predictor | ArtifactPredictor:
     """Load a deployable detector. The single public deploy entry point.
+
+    Returns a :class:`Predictor` for a ``.pth``/bundled name, or an
+    :class:`~mayaku.inference.artifact.ArtifactPredictor` for a pre-exported
+    artifact — both are callable with an image and return :class:`Instances`.
 
     The ``source`` *suffix selects the backend*:
 
@@ -376,19 +403,17 @@ def from_pretrained(
     from mayaku.cli._factory import load_detector
 
     suffix = Path(source).suffix.lower()
-    # TODO: when the full-graph ArtifactPredictor lands, dispatch here to it
-    # (`return ArtifactPredictor(source, device=device)`) instead of raising.
+    # The file *is* the backend: a pre-exported artifact runs end-to-end via its
+    # native runtime, no checkpoint involved.
     if suffix in _ARTIFACT_SUFFIXES:
-        raise NotImplementedError(
-            f"Running a pre-exported '{suffix}' artifact directly is not wired yet "
-            "(the standalone full-graph runtime). For now, load the '.pth' and run "
-            "eager, or run the artifact with its native runtime."
-        )
+        from mayaku.inference.artifact import ArtifactPredictor
+
+        return ArtifactPredictor.from_file(source, device=device)
 
     if device == "auto":
         device = Device.auto().kind
-    # Architecture + weights both come from the checkpoint's sidecar.
-    cfg, model = load_detector(source)
+    # Architecture + weights + class names all come from the checkpoint's sidecar.
+    cfg, model, class_names = load_detector(source)
     model = model.to(torch.device(device))  # Predictor.__init__ flips to eval()
     return Predictor._from_cfg(
         cfg,
@@ -396,6 +421,7 @@ def from_pretrained(
         gpu_preprocess=gpu_preprocess,
         pinned_memory=pinned_memory,
         source_stem=Path(source).stem,
+        class_names=class_names,
     )
 
 

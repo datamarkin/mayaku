@@ -66,16 +66,11 @@ def run_eval(
     sidecar defines the architecture — the same resolved config that produced
     the checkpoint, so eval matches training without a separate config file.
     """
-    cfg, model = load_detector(weights)
-    # The model's authoritative class identity (contiguous index → name) lives in
-    # the checkpoint sidecar; the evaluator decodes predictions to the GT's
+    # The model's authoritative class identity (contiguous index → name) comes
+    # from the checkpoint sidecar; the evaluator decodes predictions to the GT's
     # category_id by name, so a GT split that numbers its categories differently
     # can't silently misalign AP (C7).
-    from mayaku.cli._weights import resolve_weights
-    from mayaku.utils.checkpoint import class_names_from_checkpoint
-
-    weights_path = resolve_weights(weights)
-    class_names = class_names_from_checkpoint(weights_path) if weights_path is not None else None
+    cfg, model, class_names = load_detector(weights)
     if device is not None:
         if device == "mps":
             apply_mps_environment()

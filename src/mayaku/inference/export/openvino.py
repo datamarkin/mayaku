@@ -28,11 +28,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import Tensor, nn
 
 from mayaku.inference.export.base import ExportResult, ParityResult
+from mayaku.inference.export.full_detector import (
+    FULL_DETECTOR_OUTPUTS,
+    FullDetectorAdapter,
+    is_full_detector,
+)
+from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
 
 __all__ = ["OpenVINOExporter"]
 
@@ -73,6 +80,8 @@ class OpenVINOExporter:
         model: nn.Module,
         sample: Tensor,
         out_path: Path,
+        *,
+        sidecar: dict[str, Any] | None = None,
         **opts: object,
     ) -> ExportResult:
         """Convert ``model.backbone`` to OpenVINO IR and save to ``out_path``.
@@ -81,6 +90,11 @@ class OpenVINOExporter:
         a sibling ``.bin`` next to it. The wrapper sets the input name
         to ``"image"`` and the output names to ``self.output_names``
         so downstream callers don't have to discover them.
+
+        ``sidecar`` (the :func:`mayaku.utils.build_sidecar` dict), when given, is
+        written into the model's ``rt_info`` before save so the artifact is
+        self-describing — done inline here rather than by re-reading the saved IR
+        (whose mmap'd ``.bin`` can't be re-saved over in place).
         """
         del opts
         # Lazy import keeps openvino optional (`[openvino]` extra).
@@ -91,8 +105,14 @@ class OpenVINOExporter:
                 "OpenVINO export requires the [openvino] extra: pip install mayaku[openvino]"
             ) from e
 
-        backbone = _resolve_backbone(model)
-        adapter = _DictToTupleBackbone(backbone, self.output_names).eval()
+        # Full-detector models (UniQuery) convert the whole image -> (boxes,
+        # scores, labels) graph; everything else exports the backbone+FPN body.
+        if is_full_detector(model):
+            adapter: nn.Module = FullDetectorAdapter(model).eval()
+            out_names: tuple[str, ...] = FULL_DETECTOR_OUTPUTS
+        else:
+            adapter = _DictToTupleBackbone(_resolve_backbone(model), self.output_names).eval()
+            out_names = self.output_names
 
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,9 +122,11 @@ class OpenVINOExporter:
 
         # Tag inputs/outputs with friendly names.
         ov_model.inputs[0].set_names({"image"})
-        for ov_output, name in zip(ov_model.outputs, self.output_names, strict=True):
+        for ov_output, name in zip(ov_model.outputs, out_names, strict=True):
             ov_output.set_names({name})
 
+        if sidecar is not None:
+            ov_model.set_rt_info(sidecar_blob(sidecar), [SIDECAR_KEY])
         ov.save_model(ov_model, str(out_path), compress_to_fp16=self.compress_to_fp16)
 
         bin_path = out_path.with_suffix(".bin")
@@ -113,7 +135,7 @@ class OpenVINOExporter:
             target=self.name,
             opset=None,
             input_names=("image",),
-            output_names=self.output_names,
+            output_names=out_names,
             extras={
                 "compress_to_fp16": str(self.compress_to_fp16),
                 "bin_path": str(bin_path),

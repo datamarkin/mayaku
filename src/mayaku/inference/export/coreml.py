@@ -33,11 +33,18 @@ from __future__ import annotations
 import platform
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import Tensor, nn
 
 from mayaku.inference.export.base import ExportResult, ParityResult
+from mayaku.inference.export.full_detector import (
+    FULL_DETECTOR_OUTPUTS,
+    FullDetectorAdapter,
+    is_full_detector,
+)
+from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
 
 __all__ = ["CoreMLExporter"]
 
@@ -95,6 +102,8 @@ class CoreMLExporter:
         model: nn.Module,
         sample: Tensor,
         out_path: Path,
+        *,
+        sidecar: dict[str, Any] | None = None,
         **opts: object,
     ) -> ExportResult:
         """Trace ``model.backbone`` and convert to CoreML.
@@ -106,6 +115,11 @@ class CoreMLExporter:
         constant folding the converter does for FPN's stride-2 ops on
         Apple Silicon. Most deployment workflows pin a fixed test
         size (e.g. 800x1333) anyway, so we mirror that.
+
+        ``sidecar`` (the :func:`mayaku.utils.build_sidecar` dict), when given, is
+        written into the model's ``user_defined_metadata`` before save so the
+        artifact is self-describing — done inline here rather than by re-loading
+        the saved ``.mlpackage`` (which can't be re-saved over itself).
         """
         del opts
         # Lazy import keeps coremltools optional (`[coreml]` extra).
@@ -116,8 +130,14 @@ class CoreMLExporter:
                 "CoreML export requires the [coreml] extra: pip install mayaku[coreml]"
             ) from e
 
-        backbone = _resolve_backbone(model)
-        adapter = _DictToTupleBackbone(backbone, self.output_names).eval()
+        # Full-detector models (UniQuery) trace the whole image -> (boxes,
+        # scores, labels) graph; everything else exports the backbone+FPN body.
+        if is_full_detector(model):
+            adapter: nn.Module = FullDetectorAdapter(model).eval()
+            out_names: tuple[str, ...] = FULL_DETECTOR_OUTPUTS
+        else:
+            adapter = _DictToTupleBackbone(_resolve_backbone(model), self.output_names).eval()
+            out_names = self.output_names
 
         if sample.shape[0] != 1:
             raise ValueError(
@@ -146,11 +166,13 @@ class CoreMLExporter:
         ml = ct.convert(
             traced,
             inputs=[ct.TensorType(name="image", shape=tuple(sample.shape))],
-            outputs=[ct.TensorType(name=n) for n in self.output_names],
+            outputs=[ct.TensorType(name=n) for n in out_names],
             convert_to="mlprogram",
             compute_units=compute,
             compute_precision=precision,
         )
+        if sidecar is not None:
+            ml.user_defined_metadata[SIDECAR_KEY] = sidecar_blob(sidecar)
         ml.save(str(out_path))
 
         return ExportResult(
@@ -158,7 +180,7 @@ class CoreMLExporter:
             target=self.name,
             opset=None,
             input_names=("image",),
-            output_names=self.output_names,
+            output_names=out_names,
             extras={
                 "compute_units": self.compute_units,
                 "compute_precision": self.compute_precision,

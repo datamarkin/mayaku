@@ -223,9 +223,11 @@ def test_from_pretrained_builds_from_sidecar(monkeypatch: pytest.MonkeyPatch) ->
     fake_model = build_faster_rcnn(cfg)
     calls: dict[str, object] = {}
 
-    def fake_load_detector(weights: str | Path) -> tuple[MayakuConfig, torch.nn.Module]:
+    def fake_load_detector(
+        weights: str | Path,
+    ) -> tuple[MayakuConfig, torch.nn.Module, list[str] | None]:
         calls["weights"] = weights
-        return cfg, fake_model
+        return cfg, fake_model, ["a", "b"]
 
     monkeypatch.setattr(_factory, "load_detector", fake_load_detector)
 
@@ -239,11 +241,12 @@ def test_from_pretrained_builds_from_sidecar(monkeypatch: pytest.MonkeyPatch) ->
     assert p.model.training is False  # eval-mode invariant
 
 
-def test_from_pretrained_rejects_artifact_suffix() -> None:
-    """A pre-exported artifact suffix routes to the (not-yet-wired) full-graph
-    runtime, not the checkpoint path — the 'file is the backend' dispatch."""
-    with pytest.raises(NotImplementedError, match="artifact"):
-        from_pretrained("model.onnx")
+def test_from_pretrained_routes_artifact_suffix_to_artifact_loader(tmp_path: Path) -> None:
+    """A pre-exported artifact suffix routes to ArtifactPredictor (the 'file is
+    the backend' dispatch), not the checkpoint path — a missing file surfaces the
+    artifact loader's FileNotFoundError, not a checkpoint/download error."""
+    with pytest.raises(FileNotFoundError, match="artifact not found"):
+        from_pretrained(str(tmp_path / "missing.onnx"))
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ __all__ = [
     "config_from_checkpoint",
     "git_hash",
     "load_checkpoint",
+    "read_deploy_checkpoint",
     "select_final_weights",
     "strip_num_batches_tracked",
 ]
@@ -114,14 +115,16 @@ def load_checkpoint(checkpoint_path: Path) -> tuple[dict[str, Any] | None, dict[
     return (sidecar if isinstance(sidecar, dict) else None), state
 
 
-def config_from_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, dict[str, Any]]:
-    """Read ``(config, model_state)`` from a self-describing checkpoint.
+def read_deploy_checkpoint(
+    checkpoint_path: Path,
+) -> tuple[MayakuConfig, list[str] | None, dict[str, Any]]:
+    """Read ``(config, class_names, model_state)`` from a self-describing checkpoint.
 
-    One deserialize: the architecture comes from the embedded ``"mayaku"``
-    sidecar (the single source of truth) and the weights from the same load.
-    Raises ``ValueError`` for a checkpoint with no sidecar (an older or
-    externally-produced ``.pth``) — convert it first; there is no fall back to a
-    separate config file.
+    One deserialize for the deploy path (``load_detector``), which needs all
+    three — avoids re-reading a large ``.pth`` once for the config and again for
+    the class names. Both come from the embedded ``"mayaku"`` sidecar (the single
+    source of truth). Raises ``ValueError`` for a checkpoint with no sidecar (an
+    older or externally-produced ``.pth``) — convert it first.
     """
     from mayaku.config import MayakuConfig
 
@@ -133,7 +136,19 @@ def config_from_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, dict[st
             "produced checkpoint). Convert it first — predict/eval/export read "
             "the architecture from the checkpoint's embedded sidecar."
         )
-    return MayakuConfig.model_validate(config), state
+    names = sidecar.get("class_names") if sidecar else None
+    class_names = list(names) if isinstance(names, list) else None
+    return MayakuConfig.model_validate(config), class_names, state
+
+
+def config_from_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, dict[str, Any]]:
+    """Read ``(config, model_state)`` from a self-describing checkpoint.
+
+    Thin wrapper over :func:`read_deploy_checkpoint` for callers that don't need
+    the class names.
+    """
+    cfg, _class_names, state = read_deploy_checkpoint(checkpoint_path)
+    return cfg, state
 
 
 def class_names_from_checkpoint(checkpoint_path: Path) -> list[str] | None:

@@ -11,12 +11,14 @@ constructed.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
 
 from mayaku.inference.export.base import ExportResult
 from mayaku.inference.export.coreml import CoreMLExporter
+from mayaku.inference.export.metadata import embed_sidecar
 from mayaku.inference.export.onnx import ONNXExporter
 from mayaku.inference.export.openvino import OpenVINOExporter
 from mayaku.inference.export.tensorrt import TensorRTExporter
@@ -55,6 +57,7 @@ def export_detector(
     sample: torch.Tensor,
     coreml_precision: str = "fp32",
     onnx_dynamic_input_shape: bool = True,
+    sidecar: dict[str, Any] | None = None,
 ) -> ExportResult:
     """Dispatch ``model`` to the exporter for ``target`` and return its result.
 
@@ -62,24 +65,36 @@ def export_detector(
     is moved to the model's device here because the exporters trace by running
     the model forward on it and (unlike TensorRT) onnx/coreml/openvino don't
     re-home it themselves — so a model on MPS/CUDA would otherwise mismatch.
+
+    ``sidecar`` (the :func:`mayaku.utils.build_sidecar` dict) is embedded into the
+    written artifact's metadata slot so it is self-describing — ``from_pretrained``
+    reconstructs config + class names from the file alone. ``None`` skips it (the
+    artifact is still valid, just not self-describing).
     """
     if target not in AVAILABLE_TARGETS:
         raise ValueError(f"unknown export target {target!r}; expected one of {AVAILABLE_TARGETS}")
 
     sample = sample.to(next(model.parameters()).device)
 
+    # CoreML/OpenVINO embed the sidecar inline (they hold the model in memory and
+    # can't be re-saved over in place); ONNX/TensorRT embed post-hoc below.
     if target == "onnx":
-        return ONNXExporter(dynamic_input_shape=onnx_dynamic_input_shape).export(
+        result = ONNXExporter(dynamic_input_shape=onnx_dynamic_input_shape).export(
             model, sample, output
         )
-    if target == "coreml":
-        return CoreMLExporter(compute_precision=coreml_precision).export(model, sample, output)
-    if target == "openvino":
-        return OpenVINOExporter().export(model, sample, output)
-    if target == "tensorrt":
-        return TensorRTExporter().export(model, sample, output)
+    elif target == "coreml":
+        result = CoreMLExporter(compute_precision=coreml_precision).export(
+            model, sample, output, sidecar=sidecar
+        )
+    elif target == "openvino":
+        result = OpenVINOExporter().export(model, sample, output, sidecar=sidecar)
+    elif target == "tensorrt":
+        result = TensorRTExporter().export(model, sample, output)
+    else:  # pragma: no cover — every target in AVAILABLE_TARGETS has a branch.
+        raise AssertionError(
+            f"unhandled export target {target!r}; AVAILABLE_TARGETS is out of sync."
+        )
 
-    # Defensive — every target in AVAILABLE_TARGETS has a branch above.
-    raise AssertionError(  # pragma: no cover
-        f"unhandled export target {target!r}; AVAILABLE_TARGETS is out of sync with the dispatch."
-    )
+    if sidecar is not None and target in ("onnx", "tensorrt"):
+        embed_sidecar(result.path, target, sidecar)
+    return result
