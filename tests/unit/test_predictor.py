@@ -244,3 +244,38 @@ def test_from_pretrained_rejects_artifact_suffix() -> None:
     runtime, not the checkpoint path — the 'file is the backend' dispatch."""
     with pytest.raises(NotImplementedError, match="artifact"):
         from_pretrained("model.onnx")
+
+
+# ---------------------------------------------------------------------------
+# Predictor.export
+# ---------------------------------------------------------------------------
+
+
+def test_export_onnx_writes_file_and_returns_path(tmp_path: Path) -> None:
+    """Predictor.export("onnx") writes the artifact and returns its path —
+    the in-memory mirror of `mayaku export onnx`."""
+    predictor = _tiny_predictor(torch.device("cpu"))
+    out = tmp_path / "m.onnx"
+    result = predictor.export("onnx", output=out, sample_height=64, sample_width=64)
+    assert result == out
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_export_default_filename_uses_source_stem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no `output`, the filename is `<source_stem>.<ext>` in the cwd —
+    so `from_pretrained("mayaku-s").export("onnx")` writes `mayaku-s.onnx`."""
+    torch.manual_seed(0)
+    model = build_faster_rcnn(_tiny_cfg()).eval()
+    predictor = Predictor(model, min_size_test=64, max_size_test=128, source_stem="mayaku-s")
+    monkeypatch.chdir(tmp_path)
+    result = predictor.export("onnx", sample_height=64, sample_width=64)
+    assert result == Path("mayaku-s.onnx")
+    assert (tmp_path / "mayaku-s.onnx").is_file()
+
+
+def test_export_unknown_format_raises() -> None:
+    predictor = _tiny_predictor(torch.device("cpu"))
+    with pytest.raises(ValueError, match="unknown export format"):
+        predictor.export("tflite")
