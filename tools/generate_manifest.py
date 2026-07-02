@@ -70,11 +70,20 @@ def _entry(path: Path) -> dict:
     }
 
 
+def _subdirs(path: Path) -> list[Path]:
+    """Sorted immediate subdirectories, skipping hidden ones.
+
+    A dotdir (or ``.DS_Store``, which ``is_dir()`` already excludes) is never a
+    valid task / model / revision, so it's dropped at every level.
+    """
+    return sorted(p for p in path.iterdir() if p.is_dir() and not p.name.startswith("."))
+
+
 def _discover(task_dir: Path):
     """Yield ``(name, revision, pth)`` for ``<name>/<rev>/<name>.pth``."""
-    for model_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+    for model_dir in _subdirs(task_dir):
         name = model_dir.name
-        for rev_dir in sorted(p for p in model_dir.iterdir() if p.is_dir()):
+        for rev_dir in _subdirs(model_dir):
             pth = rev_dir / f"{name}.pth"
             if pth.is_file():
                 yield name, rev_dir.name, pth
@@ -113,9 +122,11 @@ def main() -> int:
     started = time.perf_counter()
     models: dict[str, dict[str, Any]] = {}
     # Task dirs are discovered from disk (not a fixed list), so any grouping under
-    # models/ — detection / segmentation / keypoint / everyday / … — is picked up.
-    # The dir name becomes the model's ``task`` field.
-    for d in sorted(p for p in MODELS.iterdir() if p.is_dir() and not p.name.startswith(".")):
+    # models/ — detection / segmentation / keypoint / everyday / … — is picked up;
+    # the dir name becomes the model's ``task`` field. Junk dirs are harmless: a
+    # dir only yields models if it holds the full <name>/<rev>/<name>.pth layout,
+    # so an empty or unrelated dir is a silent no-op (never becomes a task).
+    for d in _subdirs(MODELS):
         task = d.name
         for name, rev, pth in _discover(d):
             print(f"[hash] {task}/{name}@{rev}", flush=True)
