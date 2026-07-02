@@ -112,10 +112,11 @@ def main() -> int:
 
     started = time.perf_counter()
     models: dict[str, dict[str, Any]] = {}
-    for task in ("detection", "segmentation", "keypoints"):
-        d = MODELS / task
-        if not d.is_dir():
-            continue
+    # Task dirs are discovered from disk (not a fixed list), so any grouping under
+    # models/ — detection / segmentation / keypoint / everyday / … — is picked up.
+    # The dir name becomes the model's ``task`` field.
+    for d in sorted(p for p in MODELS.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        task = d.name
         for name, rev, pth in _discover(d):
             print(f"[hash] {task}/{name}@{rev}", flush=True)
             entry = models.setdefault(name, {"task": task, "revisions": {}})
