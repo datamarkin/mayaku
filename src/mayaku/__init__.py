@@ -13,23 +13,13 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 __version__ = "0.0.0"
 
-# Lazy top-level exports. ``from mayaku import train`` works without
-# eagerly pulling ``torch`` + the entire CLI stack on plain ``import
-# mayaku``. PEP 562 ``__getattr__`` resolves the name on first access.
+# Eager top-level exports. Every entry point pulls in torch anyway (this is a
+# PyTorch CV library — there is no torch-free code path to protect), so there
+# is nothing to defer, and eager imports are what let IDEs and type checkers
+# resolve ``from mayaku import train``. They sit after the env-var set above
+# because torch snapshots the env at import time.
+from mayaku.api import train
+from mayaku.health import health_check
+from mayaku.inference import from_pretrained
+
 __all__ = ["from_pretrained", "health_check", "train"]
-
-
-def __getattr__(name: str) -> object:
-    if name == "train":
-        from mayaku.api import train
-
-        return train
-    if name == "from_pretrained":
-        from mayaku.inference import from_pretrained
-
-        return from_pretrained
-    if name == "health_check":
-        from mayaku.health import health_check
-
-        return health_check
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
