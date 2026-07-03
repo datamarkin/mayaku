@@ -70,9 +70,9 @@ D2_PUBLISHED_BOX_AP = 0.379
 def main() -> int:
     result = train(
         config=CONFIG_PATH,
-        train_json=COCO_TRAIN_JSON,
+        train_annotations=COCO_TRAIN_JSON,
         train_images=COCO_TRAIN_IMAGES,
-        val_json=COCO_VAL_JSON,
+        val_annotations=COCO_VAL_JSON,
         val_images=COCO_VAL_IMAGES,
         output_dir=OUTPUT_DIR,
         overrides={
