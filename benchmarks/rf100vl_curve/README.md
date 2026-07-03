@@ -2,7 +2,7 @@
 
 Train each library with its **defaults** on the [RF100-VL](https://rf100-vl.org/)
 datasets and measure **COCO AP as a function of training wall-clock** — the
-learning curve. Currently: **YOLO (Ultralytics)** and **RF-DETR**.
+learning curve. Currently: **YOLO (Ultralytics)**, **RF-DETR**, and **Mayaku**.
 
 The one claim: *run the defaults, here's the AP you reach for a given time budget.*
 
@@ -13,7 +13,8 @@ Each leg needs its own library — install only the one you're running:
 ```bash
 pip install ultralytics       # YOLO leg (train_yolo.py / eval_yolo.py)
 pip install rfdetr            # RF-DETR leg (train_rfdetr.py / eval_rfdetr.py)
-pip install pycocotools matplotlib   # scoring + plotting (both legs)
+pip install -e .              # Mayaku leg — from the repo root (train_mayaku.py / eval_mayaku.py)
+pip install pycocotools matplotlib   # scoring + plotting (all legs)
 ```
 
 The scripts fail fast with an install hint if their library is missing, so you
@@ -69,7 +70,11 @@ python eval_yolo.py    --datasets <coco_root>
 python train_rfdetr.py --datasets <coco_root>
 python eval_rfdetr.py  --datasets <coco_root>
 
-# aggregate both into the figure + table
+# Mayaku
+python train_mayaku.py --datasets <coco_root>
+python eval_mayaku.py  --datasets <coco_root>
+
+# aggregate all legs into the figure + table
 python plot.py --results results --budgets 60,300,900,1800
 ```
 
@@ -83,6 +88,7 @@ No `--epochs`: each library uses its own default schedule. `--device` is optiona
 results/
   yolo/<dataset>/{weights/epoch*.pt, meta.json, curve.csv}
   rfdetr/<dataset>/{checkpoint_*.ckpt, meta.json, curve.csv}
+  mayaku/<dataset>/{train/model_iter_*.pth, meta.json, curve.csv}
   summary.csv   # AP at each time budget, per library
   curve.png     # aggregate mean AP vs wall-clock, one line per library
 ```
@@ -97,8 +103,8 @@ checkpoints never need to land at matching times.
 
 | file | role |
 |---|---|
-| `train_yolo.py` / `train_rfdetr.py` | **just the default training loop** — nothing tuned |
-| `eval_yolo.py` / `eval_rfdetr.py` | offline pycocotools scoring of the checkpoints (helpers) |
+| `train_{yolo,rfdetr,mayaku}.py` | **just the default training loop** — nothing tuned |
+| `eval_{yolo,rfdetr,mayaku}.py` | offline pycocotools scoring of the checkpoints (helpers) |
 | `common.py` | dataset discovery, COCO→YOLO prep, val lookup, scorer, curve/meta I/O |
 | `plot.py` | interpolate → aggregate across datasets → `summary.csv` + `curve.png` |
 
@@ -118,11 +124,15 @@ the `curve.csv` — the curve is the durable artifact.
   *EMA* weights as its headline model, so this slightly understates it. The EMA
   weights live in the checkpoint's callback state — switch to them if that gap
   matters.
-- **Class-id alignment:** both legs map model class index `i` → the i-th COCO
-  category id (ascending). This holds because both trainers see categories in that
+- **Mayaku model source:** fine-tunes from the pretrained **weights** (`WEIGHTS` in
+  `train_mayaku.py` — a bundled name or a local `.pth`), *not* a config YAML. The
+  checkpoint is self-describing (architecture comes from it) and auto-config derives
+  the recipe — same as `yolo11n.pt` / `RFDETRNano()`. The one added argument is
+  checkpoint cadence, `overrides={"solver": {"checkpoint_period": 1}}` (per-epoch),
+  matching `save_period` / `checkpoint_interval` on the other legs.
+- **Class-id alignment:** all three legs map model class index `i` → the i-th COCO
+  category id (ascending). This holds because every trainer sees categories in that
   order.
-- **Score threshold at eval** is `0.001` so pycocotools sees the full PR curve;
-  this is eval-side only and does not affect training.
-
-Mayaku is intentionally excluded for now (its iteration-based checkpoint/eval
-defaults need rework before it can join a per-epoch, small-dataset comparison).
+- **Score threshold at eval** is `0.001` on all legs so pycocotools sees the full PR
+  curve (Mayaku bakes `0.05`, so its eval lowers `model.score_thresh`). Eval-side
+  only — training is untouched.
