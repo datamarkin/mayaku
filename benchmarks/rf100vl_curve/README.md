@@ -127,9 +127,10 @@ the `curve.csv` — the curve is the durable artifact.
 - **Mayaku model source:** fine-tunes from the pretrained **weights** (`WEIGHTS` in
   `train_mayaku.py` — a bundled name or a local `.pth`), *not* a config YAML. The
   checkpoint is self-describing (architecture comes from it) and auto-config derives
-  the recipe — same as `yolo11n.pt` / `RFDETRNano()`. The one added argument is
-  checkpoint cadence, `overrides={"solver": {"checkpoint_period": 1}}` (per-epoch),
-  matching `save_period` / `checkpoint_interval` on the other legs.
+  the recipe — same as `yolo11n.pt` / `RFDETRNano()`. It validates on `valid/` every
+  epoch like the other legs (so its wall-clock carries the same validation cost); the
+  added arguments are per-epoch checkpoints and per-epoch eval,
+  `overrides={"solver": {"checkpoint_period": 1}, "test": {"eval_period": 1}}`.
 - **Class-id alignment:** all three legs map model class index `i` → the i-th COCO
   category id (ascending). This holds because every trainer sees categories in that
   order.

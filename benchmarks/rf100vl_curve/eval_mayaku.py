@@ -14,11 +14,7 @@ import argparse
 from pathlib import Path
 
 import common
-
-try:
-    from mayaku import from_pretrained
-except ImportError as exc:
-    raise SystemExit("Mayaku is not installed. Run: pip install -e . (from the repo root)") from exc
+from mayaku import from_pretrained
 
 
 def score(run: Path, dataset_dir: Path, device: str) -> None:
