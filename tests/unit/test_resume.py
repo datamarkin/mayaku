@@ -110,7 +110,7 @@ def test_train_then_resume_end_to_end(toy_workspace: dict[str, Any], tmp_path: P
     # exists to resume from.
     train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
@@ -127,7 +127,7 @@ def test_train_then_resume_end_to_end(toy_workspace: dict[str, Any], tmp_path: P
     out2 = tmp_path / "run_resumed"
     result = train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out2,
         device="cpu",

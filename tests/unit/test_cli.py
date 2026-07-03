@@ -458,7 +458,7 @@ def test_cli_train_delegates_to_api(toy_workspace: dict[str, Path], tmp_path: Pa
         [
             "train",
             str(toy_workspace["cfg"]),
-            "--json",
+            "--annotations",
             str(toy_workspace["json"]),
             "--images",
             str(toy_workspace["images"]),
@@ -481,7 +481,7 @@ def test_cli_train_requires_a_model_source(toy_workspace: dict[str, Path], tmp_p
         app,
         [
             "train",
-            "--json",
+            "--annotations",
             str(toy_workspace["json"]),
             "--images",
             str(toy_workspace["images"]),

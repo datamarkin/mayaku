@@ -31,9 +31,9 @@ def test_train_returns_result_dict_and_writes_artefacts(
     out = tmp_path / "run_happy"
     result = train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
-        val_json=toy_workspace["json"],
+        val_annotations=toy_workspace["json"],
         val_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
@@ -77,7 +77,7 @@ def test_train_size_budget_arg_overrides_config(
     out = tmp_path / "run_budget"
     train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
@@ -100,7 +100,7 @@ def test_train_writes_self_describing_checkpoint(
     out = tmp_path / "run_selfdesc"
     result = train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
@@ -113,49 +113,12 @@ def test_train_writes_self_describing_checkpoint(
 
 
 # ---------------------------------------------------------------------------
-# `data=` (directory convention) resolves the splits and trains end-to-end
+# Dataset paths are the single, explicit way in
 # ---------------------------------------------------------------------------
 
 
-def test_train_accepts_data_directory(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
-    import shutil
-
-    # Lay the toy image + annotations out in the train/ convention.
-    dataset = tmp_path / "dataset"
-    train_dir = dataset / "train"
-    train_dir.mkdir(parents=True)
-    shutil.copy(toy_workspace["image_file"], train_dir / toy_workspace["image_file"].name)
-    shutil.copy(toy_workspace["json"], train_dir / "_annotations.coco.json")
-
-    out = tmp_path / "run_data_dir"
-    result = train(
-        config=toy_workspace["cfg"],
-        data=dataset,
-        output_dir=out,
-        device="cpu",
-    )
-    # train-only layout → no val split → eval skipped, same as omitting val.
-    assert result["final_weights"].exists()
-    assert result["final_box_ap"] is None
-    assert (out / "train" / "metadata.json").exists()
-
-
-def test_train_rejects_data_and_explicit_paths_together(
-    toy_workspace: dict[str, Any], tmp_path: Path
-) -> None:
-    with pytest.raises(ValueError, match="not both"):
-        train(
-            config=toy_workspace["cfg"],
-            data=tmp_path,
-            train_json=toy_workspace["json"],
-            train_images=toy_workspace["images"],
-            output_dir=tmp_path / "run_both",
-            device="cpu",
-        )
-
-
-def test_train_requires_a_dataset_source(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="Provide data="):
+def test_train_requires_dataset_paths(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Provide train_annotations"):
         train(
             config=toy_workspace["cfg"],
             output_dir=tmp_path / "run_neither",
@@ -171,7 +134,7 @@ def test_train_requires_a_dataset_source(toy_workspace: dict[str, Any], tmp_path
 def test_train_requires_config_or_weights(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Provide config="):
         train(
-            train_json=toy_workspace["json"],
+            train_annotations=toy_workspace["json"],
             train_images=toy_workspace["images"],
             output_dir=tmp_path / "run_no_model",
             device="cpu",
@@ -185,7 +148,7 @@ def test_train_derives_config_from_weights(toy_workspace: dict[str, Any], tmp_pa
     # No config= — the architecture comes purely from the checkpoint.
     result = train(
         weights=toy_workspace["weights"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
@@ -206,7 +169,7 @@ def test_train_weights_without_embedded_config_raises(
     with pytest.raises(ValueError, match="no embedded config"):
         train(
             weights=bare,
-            train_json=toy_workspace["json"],
+            train_annotations=toy_workspace["json"],
             train_images=toy_workspace["images"],
             output_dir=tmp_path / "run_old_ckpt",
             device="cpu",
@@ -214,7 +177,7 @@ def test_train_weights_without_embedded_config_raises(
 
 
 # ---------------------------------------------------------------------------
-# `val_json=None` short-circuits all eval
+# `val_annotations=None` short-circuits all eval
 # ---------------------------------------------------------------------------
 
 
@@ -222,9 +185,9 @@ def test_train_skips_eval_when_no_val_set(toy_workspace: dict[str, Any], tmp_pat
     out = tmp_path / "run_no_val"
     result = train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
-        # val_json / val_images intentionally omitted
+        # val_annotations / val_images intentionally omitted
         output_dir=out,
         device="cpu",
     )
@@ -243,9 +206,9 @@ def test_train_rejects_half_configured_val(toy_workspace: dict[str, Any], tmp_pa
     with pytest.raises(ValueError, match="both be provided"):
         train(
             config=toy_workspace["cfg"],
-            train_json=toy_workspace["json"],
+            train_annotations=toy_workspace["json"],
             train_images=toy_workspace["images"],
-            val_json=toy_workspace["json"],
+            val_annotations=toy_workspace["json"],
             # val_images intentionally missing
             output_dir=tmp_path / "run_half_val",
             device="cpu",
@@ -261,7 +224,7 @@ def test_train_accepts_mayaku_config_object(toy_workspace: dict[str, Any], tmp_p
     out = tmp_path / "run_obj"
     result = train(
         config=toy_workspace["cfg_obj"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         device="cpu",
@@ -286,7 +249,7 @@ def test_train_auto_derives_output_dir_from_config_stem(
     monkeypatch.chdir(tmp_path)
     result = train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         device="cpu",
     )
@@ -304,7 +267,7 @@ def test_train_forwards_overrides_to_merge(toy_workspace: dict[str, Any], tmp_pa
     out = tmp_path / "run_override"
     train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         overrides={"solver": {"base_lr": 5e-5}},
@@ -326,7 +289,7 @@ def test_train_invalid_override_raises(toy_workspace: dict[str, Any], tmp_path: 
     with pytest.raises(ValidationError):
         train(
             config=toy_workspace["cfg"],
-            train_json=toy_workspace["json"],
+            train_annotations=toy_workspace["json"],
             train_images=toy_workspace["images"],
             output_dir=tmp_path / "run_invalid",
             overrides={"solver": {"foo_bar_no_such_field": 42}},
@@ -335,15 +298,15 @@ def test_train_invalid_override_raises(toy_workspace: dict[str, Any], tmp_path: 
 
 
 # ---------------------------------------------------------------------------
-# Missing train_json / train_images raise clear errors early
+# Missing train_annotations / train_images raise clear errors early
 # ---------------------------------------------------------------------------
 
 
-def test_train_rejects_missing_train_json(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="train_json"):
+def test_train_rejects_missing_train_annotations(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="train_annotations"):
         train(
             config=toy_workspace["cfg"],
-            train_json=tmp_path / "does_not_exist.json",
+            train_annotations=tmp_path / "does_not_exist.json",
             train_images=toy_workspace["images"],
             output_dir=tmp_path / "run_no_json",
             device="cpu",
@@ -356,7 +319,7 @@ def test_train_rejects_non_directory_train_images(
     with pytest.raises(NotADirectoryError, match="train_images"):
         train(
             config=toy_workspace["cfg"],
-            train_json=toy_workspace["json"],
+            train_annotations=toy_workspace["json"],
             train_images=toy_workspace["json"],  # a file, not a directory
             output_dir=tmp_path / "run_bad_images",
             device="cpu",
@@ -414,7 +377,7 @@ def test_train_num_gpus_2_on_cpu_via_gloo(toy_workspace: dict[str, Any], tmp_pat
     out = tmp_path / "run_ddp_cpu"
     result = train(
         config=toy_workspace["cfg"],
-        train_json=toy_workspace["json"],
+        train_annotations=toy_workspace["json"],
         train_images=toy_workspace["images"],
         output_dir=out,
         overrides={"dataloader": {"num_workers": 0}},

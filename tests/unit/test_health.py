@@ -13,7 +13,8 @@ from pathlib import Path
 import mayaku
 
 
-def _write_dataset(root: Path) -> None:
+def _write_dataset(root: Path) -> tuple[Path, Path]:
+    """Write a toy split; return ``(annotations, images)`` for health_check."""
     train = root / "train"
     train.mkdir(parents=True)
     coco = {
@@ -30,29 +31,28 @@ def _write_dataset(root: Path) -> None:
             {"id": 3, "image_id": 2, "category_id": 1, "bbox": [5, 5, 0, 10], "iscrowd": 0},
         ],
     }
-    (train / "_annotations.coco.json").write_text(json.dumps(coco))
+    annotations = train / "_annotations.coco.json"
+    annotations.write_text(json.dumps(coco))
+    return annotations, train
 
 
 def test_health_check_reports_counts_and_warnings(tmp_path: Path) -> None:
-    _write_dataset(tmp_path)
-    report = mayaku.health_check(tmp_path)
+    annotations, images = _write_dataset(tmp_path)
+    report = mayaku.health_check(annotations, images)
 
-    assert set(report) == {"train"}
-    train = report["train"]
-
-    assert train["images"] == 3
-    assert train["boxes"] == 2  # the degenerate box is excluded
-    assert train["classes"] == 2
-    assert train["class_counts"] == {"cat": 2, "dog": 1}  # keyed by name, not id
+    assert report["images"] == 3
+    assert report["boxes"] == 2  # the degenerate box is excluded
+    assert report["classes"] == 2
+    assert report["class_counts"] == {"cat": 2, "dog": 1}  # keyed by name, not id
 
     # Warnings are factual hygiene flags only (no tuning thresholds).
-    warnings = " ".join(train["warnings"])
+    warnings = " ".join(report["warnings"])
     assert "degenerate" in warnings
     assert "no annotations" in warnings
 
 
 def test_health_check_object_size_fractions_sum_to_one(tmp_path: Path) -> None:
-    _write_dataset(tmp_path)
-    sizes = mayaku.health_check(tmp_path)["train"]["object_size"]
+    annotations, images = _write_dataset(tmp_path)
+    sizes = mayaku.health_check(annotations, images)["object_size"]
     assert set(sizes) == {"small", "medium", "large"}
     assert round(sum(sizes.values()), 2) == 1.0
