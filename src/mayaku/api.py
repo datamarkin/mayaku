@@ -24,13 +24,13 @@ Behaviour:
   came from a path, else ``./runs/mayaku_run/``.
 * ``val_annotations`` / ``val_images`` are optional and must be provided
   together. Final eval runs iff both are set. To enable mid-training
-  eval, also set ``overrides={"test": {"eval_period": N}}``; without
-  the val paths, any non-zero ``eval_period`` from the YAML is
-  silently zeroed with a warning so a forgotten val path doesn't make
-  training look "fine" while emitting no metrics.
+  eval, also set ``overrides={"test": {"eval_period": N}}`` (N in
+  epochs); without the val paths, any non-zero ``eval_period`` from the
+  YAML is silently zeroed with a warning so a forgotten val path doesn't
+  make training look "fine" while emitting no metrics.
 * ``overrides`` is passed straight to :func:`merge_overrides`, so the
   shape is the schema's natural shape (e.g. ``{"solver":
-  {"base_lr": 1e-3}}`` or ``{"test": {"eval_period": 5000}}``).
+  {"base_lr": 1e-3}}`` or ``{"test": {"eval_period": 1}}``).
   Invalid keys raise pydantic's standard "Extra inputs are not
   permitted" error.
 * ``num_gpus`` (default ``1``) spawns ``num_gpus`` DDP workers via

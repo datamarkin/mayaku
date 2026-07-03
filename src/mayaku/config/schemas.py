@@ -743,7 +743,11 @@ class SolverConfig(_BaseModel):
     # fp32 (AMP off) on MPS, which is validated for fp16 only. ``"fp16"`` is
     # the safe cross-backend default.
     amp_dtype: Literal["fp16", "bf16"] = "fp16"
-    checkpoint_period: Annotated[int, Field(gt=0)] = 5000
+    # Checkpoint cadence in EPOCHS (resolved to iterations against the dataset
+    # size at train time, like ``num_epochs``). Epoch-relative so it fires the
+    # same number of times whether a dataset is 200 or 200k images — a fixed
+    # iteration count would silently never trigger on a small dataset.
+    checkpoint_period: Annotated[int, Field(gt=0)] = 1
     clip_gradients_enabled: bool = False
     # When clipping is enabled, the defaults below give the standard
     # global-L2-norm safety net at 5.0 — wide enough to catch genuine
@@ -782,7 +786,10 @@ class SolverConfig(_BaseModel):
 
 class TestConfig(_BaseModel):
     detections_per_image: Annotated[int, Field(gt=0)] = 100
-    eval_period: Annotated[int, Field(ge=0)] = 0  # 0 == disabled
+    # Eval cadence in EPOCHS (resolved to iterations against the dataset size at
+    # train time, like ``num_epochs``). ``0`` disables periodic eval. Epoch-
+    # relative so it fires the same number of times regardless of dataset size.
+    eval_period: Annotated[int, Field(ge=0)] = 0
     precise_bn_enabled: bool = False
     precise_bn_num_iter: Annotated[int, Field(gt=0)] = 200
 

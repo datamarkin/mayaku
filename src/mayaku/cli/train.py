@@ -354,12 +354,17 @@ def run_train(
     # global_batch spans grad-accum and all DDP ranks. The scheduler, LLRD
     # snapshot milestones, and the trainer loop all run on these resolved ints
     # (max_iter / warmup_iters are derived, not config fields).
-    max_iter, warmup_iters = resolve_schedule(
+    max_iter, warmup_iters, iters_per_epoch = resolve_schedule(
         cfg.solver.num_epochs,
         len(dataset_dicts),
         cfg.solver.effective_batch(world_size),
         cfg.solver.warmup_fraction,
     )
+    # Checkpoint / eval cadence are configured in epochs; resolve them against
+    # the iters_per_epoch resolve_schedule already computed so they fire every N
+    # passes over the data regardless of dataset size.
+    checkpoint_period_iters = cfg.solver.checkpoint_period * iters_per_epoch
+    eval_period_iters = cfg.test.eval_period * iters_per_epoch  # 0 stays 0 (disabled)
     # Bake the resolved letterbox canvas into cfg so the resize aug (train + eval)
     # and the checkpoint sidecar all carry the exact (H, W) the model deploys at.
     if derived["canvas"] is not None:
@@ -649,7 +654,7 @@ def run_train(
             PeriodicCheckpointer(
                 unwrapped_model,
                 output_dir,
-                cfg.solver.checkpoint_period,
+                checkpoint_period_iters,
                 optimizer=optimizer,
                 metadata=checkpoint_metadata,
             )
@@ -701,7 +706,7 @@ def run_train(
                 PeriodicCheckpointer(
                     ema.shadow,
                     output_dir / "ema",
-                    cfg.solver.checkpoint_period,
+                    checkpoint_period_iters,
                     metadata=checkpoint_metadata,
                 )
             )
@@ -724,7 +729,7 @@ def run_train(
             class_names=metadata.thing_classes,
         )
         eval_model = ema.shadow if ema is not None else unwrapped_model
-        hooks.append(EvalHook(cfg.test.eval_period, evaluator, eval_model, val_loader))
+        hooks.append(EvalHook(eval_period_iters, evaluator, eval_model, val_loader))
     trainer.register_hooks(hooks)
     trainer.train(start_iter=start_iter, max_iter=max_iter)
 

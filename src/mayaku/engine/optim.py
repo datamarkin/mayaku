@@ -413,19 +413,22 @@ def _log_and_assert_llrd_groups(
 
 def resolve_schedule(
     num_epochs: int, num_images: int, global_batch: int, warmup_fraction: float
-) -> tuple[int, int]:
-    """Resolve an epoch budget to ``(max_iter, warmup_iters)`` iteration counts.
+) -> tuple[int, int, int]:
+    """Resolve an epoch budget to ``(max_iter, warmup_iters, iters_per_epoch)``.
 
     ``global_batch`` is the cross-rank effective batch
     (:meth:`SolverConfig.effective_batch`); one epoch is
     ``ceil(num_images / global_batch)`` optimizer steps. Warmup is
-    ``warmup_fraction`` of the total, clamped to ``< max_iter``. Called once in
-    :func:`mayaku.cli.train.run_train` after the dataset is loaded.
+    ``warmup_fraction`` of the total, clamped to ``< max_iter``.
+    ``iters_per_epoch`` is returned so callers can resolve epoch-based
+    cadences (checkpoint / eval periods) against the same definition rather
+    than re-deriving it. Called once in :func:`mayaku.cli.train.run_train`
+    after the dataset is loaded.
     """
     iters_per_epoch = max(1, math.ceil(num_images / max(1, global_batch)))
     max_iter = max(2, num_epochs * iters_per_epoch)
     warmup_iters = min(max_iter - 1, round(warmup_fraction * max_iter))
-    return max_iter, warmup_iters
+    return max_iter, warmup_iters, iters_per_epoch
 
 
 def build_lr_scheduler(
