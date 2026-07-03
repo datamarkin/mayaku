@@ -171,6 +171,16 @@ class Predictor:
             class_names=class_names,
         )
 
+    @property
+    def class_names(self) -> list[str] | None:
+        """Ordered class names from the checkpoint sidecar (``None`` if unrecorded).
+
+        Mirrors :attr:`ArtifactPredictor.class_names` so any ``from_pretrained``
+        result exposes the same attribute — used by evaluation to align
+        predictions to the ground-truth categories by name.
+        """
+        return self._class_names
+
     # ------------------------------------------------------------------
     # Public call
     # ------------------------------------------------------------------

@@ -18,8 +18,8 @@ __version__ = "0.0.0"
 # is nothing to defer, and eager imports are what let IDEs and type checkers
 # resolve ``from mayaku import train``. They sit after the env-var set above
 # because torch snapshots the env at import time.
-from mayaku.api import train
+from mayaku.api import evaluate, train
 from mayaku.health import health_check
 from mayaku.inference import from_pretrained
 
-__all__ = ["from_pretrained", "health_check", "train"]
+__all__ = ["evaluate", "from_pretrained", "health_check", "train"]

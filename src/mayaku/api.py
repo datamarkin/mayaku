@@ -76,10 +76,11 @@ from mayaku.cli.train import run_train, run_train_worker
 from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
 from mayaku.engine import launch, resolve_ddp_device
+from mayaku.inference import from_pretrained
 from mayaku.tuning import collect_set_paths
 from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
 
-__all__ = ["train"]
+__all__ = ["evaluate", "train"]
 
 
 def train(
@@ -305,17 +306,14 @@ def train(
     if eval_after:
         assert val_annotations is not None and val_images is not None
         eval_start = time.time()
-        # run_eval feeds the device string to torch.device(), which does
-        # not understand the "auto" sentinel — resolve it here.
-        eval_device = device
-        if eval_device == "auto":
-            eval_device = "cuda" if torch.cuda.is_available() else "cpu"
-        metrics = run_eval(
+        # Final eval goes through the public `evaluate` — the one eval path,
+        # shared with standalone eval and the CLI (handles "auto" device itself).
+        metrics = evaluate(
             final_weights,
-            coco_gt_json=val_annotations,
-            image_root=val_images,
+            annotations=val_annotations,
+            images=val_images,
             output_dir=resolved_output_dir / "eval",
-            device=eval_device,
+            device=device,
         )
         eval_seconds = time.time() - eval_start
         raw_bbox = metrics.get("bbox") if isinstance(metrics, dict) else None
@@ -373,6 +371,41 @@ def train(
         "eval_seconds": eval_seconds,
         "metadata": metadata,
     }
+
+
+def evaluate(
+    weights: str | Path,
+    *,
+    annotations: Path,
+    images: Path,
+    output_dir: Path | None = None,
+    device: DeviceSetting = "auto",
+) -> dict[str, Any]:
+    """Evaluate a trained model or exported artifact on a COCO split.
+
+    The eval counterpart of :func:`train`. ``weights`` is loaded via
+    :func:`from_pretrained`, so a ``.pth`` / bundled name and an exported
+    ``.onnx`` / ``.mlpackage`` / ``.xml`` / ``.engine`` all score through the one
+    :func:`~mayaku.cli.eval.run_eval` loop — each with its own as-deployed
+    preprocessing and precision. ``annotations`` + ``images`` are the eval split
+    (the pair used by :func:`train` / :func:`health_check`); ``device`` is
+    forwarded to :func:`from_pretrained` (``"auto"`` picks the best device).
+
+    Returns the per-task metrics dict (e.g. ``{"bbox": {"AP": ...}}``), also
+    written to ``<output_dir>/metrics.json`` when ``output_dir`` is set.
+    """
+    if not annotations.exists():
+        raise FileNotFoundError(f"annotations not found: {annotations}")
+    if not images.is_dir():
+        raise NotADirectoryError(f"images is not a directory: {images}")
+
+    predictor = from_pretrained(weights, device=device)
+    return run_eval(
+        predictor,
+        coco_gt_json=annotations,
+        image_root=images,
+        output_dir=output_dir,
+    )
 
 
 # ---------------------------------------------------------------------------

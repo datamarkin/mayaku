@@ -10,7 +10,7 @@ argument plumbing).
 Subcommands:
 
 * ``mayaku train [CONFIG] [--weights] --annotations --images [--val-annotations --val-images] [--output] [--device] [--epochs] [--num-gpus]``
-* ``mayaku eval CONFIG --weights --annotations --images [--output] [--device]``
+* ``mayaku eval WEIGHTS --annotations --images [--output] [--device]``
 * ``mayaku predict CONFIG IMAGE [--weights] [--output] [--device]``
 * ``mayaku export TARGET CONFIG --weights --output``
   (TARGET ∈ ``onnx`` | ``coreml`` | ``openvino`` | ``tensorrt``)
@@ -26,7 +26,6 @@ import typer
 
 from mayaku.backends.mps import track_mps_fallbacks
 from mayaku.cli.download import render_index, run_download
-from mayaku.cli.eval import run_eval
 from mayaku.cli.export import run_export
 from mayaku.cli.predict import run_predict
 from mayaku.config.schemas import DeviceSetting
@@ -163,16 +162,23 @@ def _eval(
     annotations: Path = typer.Option(..., "--annotations", exists=True, dir_okay=False),
     images: Path = typer.Option(..., "--images", exists=True, file_okay=False),
     output: Path | None = typer.Option(None, "--output", file_okay=False),
-    device: str | None = typer.Option(None, "--device"),
+    device: str = typer.Option("auto", "--device", help="cpu/mps/cuda; default = auto"),
 ) -> None:
-    """Run COCO evaluation; print the per-task metrics dict."""
+    """Run COCO evaluation — the CLI mirror of :func:`mayaku.evaluate`.
+
+    Prints the per-task metrics dict.
+    """
+    # Deferred import: `mayaku.api` imports from `mayaku.cli`, so importing it at
+    # module load would create a cycle (same reason as the train command).
+    from mayaku.api import evaluate
+
     with track_mps_fallbacks(label="eval"):
-        metrics = run_eval(
+        metrics = evaluate(
             weights,
-            coco_gt_json=annotations,
-            image_root=images,
+            annotations=annotations,
+            images=images,
             output_dir=output,
-            device=device,
+            device=cast(DeviceSetting, device),
         )
     typer.echo(json.dumps(metrics, indent=2))
 

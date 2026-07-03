@@ -887,11 +887,12 @@ def _load_for_finetune(model: torch.nn.Module, state: dict[str, Any]) -> None:
 
 
 def _build_val_loader(cfg: Any, val_json: Path, val_image_root: Path) -> DataLoader[Any]:
-    """Mirror :func:`mayaku.cli.eval.run_eval`'s val loader construction.
+    """Build the batched val DataLoader for mid-training evaluation.
 
-    Kept as a helper rather than imported from `cli.eval` so the train
-    path doesn't pull in the eval CLI surface (the two are deliberately
-    separate console-script entry points).
+    The training loop keeps its own in-process eval loader rather than routing
+    through :func:`mayaku.evaluate` (the single standalone/final eval path):
+    unifying the two is a deliberate follow-up — it needs a live-model predictor
+    wrapper plus throughput work, so mid-training eval stays on this loader.
     """
     # Eval mapper drops annotations entirely (is_train=False), so neither
     # polygons nor keypoints are needed in the loaded dicts. One COCO parse
