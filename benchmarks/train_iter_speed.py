@@ -18,7 +18,7 @@ ITERS = 100
 
 result = train(
     CONFIG,
-    train_json=TRAIN_JSON,
+    train_annotations=TRAIN_JSON,
     train_images=TRAIN_IMAGES,
     overrides={
         "auto_config": {"enabled": False},

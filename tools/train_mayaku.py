@@ -45,9 +45,9 @@ EVAL_PERIOD  = 5000
 def main() -> int:
     result = train(
         config=CONFIG,
-        train_json=TRAIN_JSON,
+        train_annotations=TRAIN_JSON,
         train_images=TRAIN_IMAGES,
-        val_json=VAL_JSON,
+        val_annotations=VAL_JSON,
         val_images=VAL_IMAGES,
         output_dir=OUTPUT_DIR,
         overrides={"test": {"eval_period": EVAL_PERIOD}},
