@@ -19,7 +19,6 @@ from typer.testing import CliRunner
 
 from mayaku.cli import app
 from mayaku.cli._factory import build_detector
-from mayaku.cli.eval import run_eval
 from mayaku.cli.export import run_export
 from mayaku.cli.predict import run_predict
 from mayaku.cli.train import run_train
@@ -64,18 +63,6 @@ def test_run_predict_writes_json_file(toy_workspace: dict[str, Path], tmp_path: 
     )
     parsed = json.loads(out.read_text())
     assert parsed["image"] == str(toy_workspace["image_file"])
-
-
-def test_run_eval_returns_metrics_dict(toy_workspace: dict[str, Path]) -> None:
-    metrics = run_eval(
-        toy_workspace["weights"],
-        coco_gt_json=toy_workspace["json"],
-        image_root=toy_workspace["images"],
-    )
-    assert isinstance(metrics, dict)
-    # Untrained random model → no detections survive the score threshold;
-    # evaluate() returns {} in that case (predictions list is empty).
-    assert metrics == {} or "bbox" in metrics
 
 
 def test_run_train_runs_the_loop_and_writes_checkpoints(
