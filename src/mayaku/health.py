@@ -1,15 +1,18 @@
-"""Dataset health check — one scan per split, returned as a plain dict.
+"""Dataset health check — one scan of one split, returned as a plain dict.
 
-``health_check`` reuses the same primitives the trainer's auto-config
-runs on (:func:`mayaku.data.resolve_dataset` +
-:func:`mayaku.tuning.analyze_dataset`), so the numbers a user inspects
-here are exactly the ones that drive the recipe. Output is JSON-friendly
-(dicts / lists / scalars) so callers can print it, log it, or feed it
-straight into auto-config.
+``health_check`` reuses the same primitive the trainer's auto-config runs
+on (:func:`mayaku.tuning.analyze_dataset`), so the numbers a user inspects
+here are exactly the ones that drive the recipe. It takes one
+``(annotations, images)`` pair — the same split unit you pass to
+:func:`mayaku.train` — so run it once per split you want to inspect.
+Output is JSON-friendly (dicts / lists / scalars) so callers can print it,
+log it, or feed it straight into auto-config.
 
     >>> import mayaku
-    >>> report = mayaku.health_check("/data/myproject")   # doctest: +SKIP
-    >>> report["train"]["object_size"]                    # doctest: +SKIP
+    >>> report = mayaku.health_check(                      # doctest: +SKIP
+    ...     "train/_annotations.coco.json", "train/"
+    ... )
+    >>> report["object_size"]                             # doctest: +SKIP
     {'small': 0.62, 'medium': 0.31, 'large': 0.07}
 
 Object sizes are bucketed in *resized* space (after the canonical
@@ -30,7 +33,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-from mayaku.data import build_coco_metadata, load_coco_json, resolve_dataset
+from mayaku.data import build_coco_metadata, load_coco_json
 from mayaku.data.catalog import Metadata
 from mayaku.tuning.dataset_stats import DatasetStats, analyze_dataset
 
@@ -41,22 +44,17 @@ _SMALL_EDGE = 32.0
 _LARGE_EDGE = 96.0
 
 
-def health_check(data: str | Path) -> dict[str, Any]:
-    """Scan a dataset and return per-split health statistics.
+def health_check(annotations: str | Path, images: str | Path) -> dict[str, Any]:
+    """Scan one dataset split and return its health statistics.
 
-    ``data`` is a dataset directory or a ``.yaml`` descriptor, resolved
-    by :func:`mayaku.data.resolve_dataset`. The result maps each present
-    split (``train`` and, when defined, ``val`` / ``test``) to a dict of
-    counts, distributions, and factual ``warnings``.
+    ``annotations`` is a COCO JSON and ``images`` its image directory — the
+    same ``(annotations, images)`` pair you pass to :func:`mayaku.train`.
+    Returns a dict of counts, distributions, and factual ``warnings``. Run
+    it once per split you want to inspect.
     """
-    return {
-        split: _summarize_split(split, source.images, source.annotations)
-        for split, source in resolve_dataset(data).items()
-    }
-
-
-def _summarize_split(split: str, images: Path, annotations: Path) -> dict[str, Any]:
-    metadata = build_coco_metadata(name=f"health_{split}", json_path=annotations)
+    annotations = Path(annotations)
+    images = Path(images)
+    metadata = build_coco_metadata(name="health", json_path=annotations)
     dataset_dicts = load_coco_json(
         annotations, images, metadata, keep_segmentation=False, keep_keypoints=False
     )

@@ -9,8 +9,8 @@ argument plumbing).
 
 Subcommands:
 
-* ``mayaku train [CONFIG] [--weights] (--data | --json --images) [--val-json --val-images] [--output] [--device] [--epochs] [--num-gpus]``
-* ``mayaku eval CONFIG --weights --json --images [--output] [--device]``
+* ``mayaku train [CONFIG] [--weights] --annotations --images [--val-annotations --val-images] [--output] [--device] [--epochs] [--num-gpus]``
+* ``mayaku eval CONFIG --weights --annotations --images [--output] [--device]``
 * ``mayaku predict CONFIG IMAGE [--weights] [--output] [--device]``
 * ``mayaku export TARGET CONFIG --weights --output``
   (TARGET ∈ ``onnx`` | ``coreml`` | ``openvino`` | ``tensorrt``)
@@ -55,19 +55,26 @@ def _train(
             "re-initialises when the dataset's class count differs)."
         ),
     ),
-    data: str | None = typer.Option(
+    annotations: Path | None = typer.Option(
         None,
-        "--data",
-        help="Dataset directory or .yaml descriptor. Alternative to --json/--images.",
-    ),
-    json_path: Path | None = typer.Option(
-        None, "--json", exists=True, dir_okay=False, help="Train COCO JSON (with --images)."
+        "--annotations",
+        exists=True,
+        dir_okay=False,
+        help="Train COCO annotation JSON (with --images).",
     ),
     images: Path | None = typer.Option(
-        None, "--images", exists=True, file_okay=False, help="Train image directory (with --json)."
+        None,
+        "--images",
+        exists=True,
+        file_okay=False,
+        help="Train image directory (with --annotations).",
     ),
-    val_json: Path | None = typer.Option(
-        None, "--val-json", exists=True, dir_okay=False, help="Val COCO JSON for final eval."
+    val_annotations: Path | None = typer.Option(
+        None,
+        "--val-annotations",
+        exists=True,
+        dir_okay=False,
+        help="Val COCO annotation JSON for final eval.",
     ),
     val_images: Path | None = typer.Option(
         None, "--val-images", exists=True, file_okay=False, help="Val image directory."
@@ -107,8 +114,8 @@ def _train(
 
     Define the model with ``CONFIG`` (YAML path or bundled name) or
     ``--weights`` (bundled name or trained .pth). Point at the dataset
-    with ``--data`` (directory or .yaml) or the explicit ``--json`` /
-    ``--images``. Picks the best checkpoint, runs final eval when a val
+    with ``--annotations`` (a COCO JSON) and ``--images`` (its image
+    directory). Picks the best checkpoint, runs final eval when a val
     split is present, and writes ``metadata.json``.
     """
     # Deferred: `mayaku.api` imports from `mayaku.cli` (resolve_weights, run_train),
@@ -123,10 +130,9 @@ def _train(
             result = train(
                 config=config,
                 weights=weights,
-                data=data,
-                train_json=json_path,
+                train_annotations=annotations,
                 train_images=images,
-                val_json=val_json,
+                val_annotations=val_annotations,
                 val_images=val_images,
                 output_dir=output,
                 num_epochs=epochs,
@@ -154,7 +160,7 @@ def _eval(
             "manifest on first use."
         ),
     ),
-    json_path: Path = typer.Option(..., "--json", exists=True, dir_okay=False),
+    annotations: Path = typer.Option(..., "--annotations", exists=True, dir_okay=False),
     images: Path = typer.Option(..., "--images", exists=True, file_okay=False),
     output: Path | None = typer.Option(None, "--output", file_okay=False),
     device: str | None = typer.Option(None, "--device"),
@@ -163,7 +169,7 @@ def _eval(
     with track_mps_fallbacks(label="eval"):
         metrics = run_eval(
             weights,
-            coco_gt_json=json_path,
+            coco_gt_json=annotations,
             image_root=images,
             output_dir=output,
             device=device,

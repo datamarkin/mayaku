@@ -12,7 +12,7 @@ The minimum call:
 >>> from mayaku.api import train
 >>> result = train(
 ...     config="configs/detection/faster_rcnn_R_50_FPN_1x.yaml",
-...     train_json=Path("/data/coco/annotations/instances_train2017.json"),
+...     train_annotations=Path("/data/coco/annotations/instances_train2017.json"),
 ...     train_images=Path("/data/coco/train2017"),
 ... )                                                # doctest: +SKIP
 
@@ -22,7 +22,7 @@ Behaviour:
   :class:`MayakuConfig`. Paths are loaded once; objects pass through.
 * ``output_dir`` defaults to ``./runs/<config_stem>/`` when the config
   came from a path, else ``./runs/mayaku_run/``.
-* ``val_json`` / ``val_images`` are optional and must be provided
+* ``val_annotations`` / ``val_images`` are optional and must be provided
   together. Final eval runs iff both are set. To enable mid-training
   eval, also set ``overrides={"test": {"eval_period": N}}``; without
   the val paths, any non-zero ``eval_period`` from the YAML is
@@ -75,7 +75,6 @@ from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train, run_train_worker
 from mayaku.config import MayakuConfig, load_yaml, merge_overrides
 from mayaku.config.schemas import DeviceSetting
-from mayaku.data import resolve_dataset
 from mayaku.engine import launch, resolve_ddp_device
 from mayaku.tuning import collect_set_paths
 from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
@@ -87,10 +86,9 @@ def train(
     config: str | Path | MayakuConfig | None = None,
     *,
     weights: str | Path | None = None,
-    data: str | Path | None = None,
-    train_json: Path | None = None,
+    train_annotations: Path | None = None,
     train_images: Path | None = None,
-    val_json: Path | None = None,
+    val_annotations: Path | None = None,
     val_images: Path | None = None,
     output_dir: Path | None = None,
     size_budget: int | None = None,
@@ -116,14 +114,12 @@ def train(
       produced by this version or later — older ones raise, asking for
       ``config``. Only full bundled names resolve (no short aliases).
 
-    Point the dataset at either ``data`` or the explicit paths, not both:
+    Point the dataset at the explicit split paths:
 
-    * ``data`` — a dataset directory or a ``.yaml`` descriptor, resolved
-      by :func:`mayaku.data.resolve_dataset`. ``train`` is required; a
-      ``val`` split, when present, is used for final eval. Class names
-      come from the COCO annotations, not the descriptor.
-    * ``train_json`` + ``train_images`` (+ optional ``val_json`` +
-      ``val_images``) — the explicit form.
+    * ``train_annotations`` (a COCO JSON) + ``train_images`` (its image
+      directory) are required. ``val_annotations`` + ``val_images`` are
+      optional and, when given, drive final eval. Class names come from
+      the COCO ``categories``.
 
     ``size_budget`` is the first-class form of the compute-budget dial: the
     letterbox canvas is the largest 128-aligned ``(H, W)`` under
@@ -141,7 +137,7 @@ def train(
     **Auto-config vs. manual recipe.** When you pass a ``config`` (YAML path,
     bundled name, or :class:`MayakuConfig`), it is used *verbatim* — auto-config
     is off, so the recipe you wrote is never silently re-tuned. With no
-    ``config`` (the ``weights`` + ``data`` path), the recipe is derived from
+    ``config`` (the ``weights`` fine-tune path), the recipe is derived from
     your dataset (schedule, LR, anchors, num_classes, augmentation). In both
     cases anything you pass via ``overrides`` or ``size_budget`` is applied last
     and always wins — auto-config never overwrites a field you set explicitly.
@@ -150,39 +146,24 @@ def train(
     auto-detection rules (pretrained-backbone derivation, no-val
     short-circuit, output-dir defaulting). Returns a result dict.
 
-    Final eval runs iff both ``val_json`` and ``val_images`` are set.
-    For mid-training eval, pass
+    Final eval runs iff both ``val_annotations`` and ``val_images`` are
+    set. For mid-training eval, pass
     ``overrides={"test": {"eval_period": N}}``.
     """
-    # --- Resolve the dataset source ---------------------------------------
-    if data is not None:
-        if any(p is not None for p in (train_json, train_images, val_json, val_images)):
-            raise ValueError(
-                "Pass either data= or the explicit train_json/train_images"
-                "(/val_json/val_images) paths, not both."
-            )
-        splits = resolve_dataset(data)
-        train_images, train_json = splits["train"]
-        if "val" in splits:
-            val_images, val_json = splits["val"]
-    elif train_json is None or train_images is None:
+    # --- Validate the dataset paths ---------------------------------------
+    if train_annotations is None or train_images is None:
         raise ValueError(
-            "Provide data= (a dataset directory or .yaml descriptor) or both "
-            "train_json and train_images."
+            "Provide train_annotations (a COCO JSON) and train_images "
+            "(its image directory)."
         )
-
-    # --- Validate inputs early --------------------------------------------
-    # Guaranteed set by the resolution block above (data= populates them,
-    # the explicit path raises if either is missing).
-    assert train_json is not None and train_images is not None
-    if not train_json.exists():
-        raise FileNotFoundError(f"train_json not found: {train_json}")
+    if not train_annotations.exists():
+        raise FileNotFoundError(f"train_annotations not found: {train_annotations}")
     if not train_images.is_dir():
         raise NotADirectoryError(f"train_images is not a directory: {train_images}")
-    if (val_json is None) != (val_images is None):
+    if (val_annotations is None) != (val_images is None):
         raise ValueError(
-            "val_json and val_images must both be provided, or both omitted; "
-            f"got val_json={val_json!r}, val_images={val_images!r}"
+            "val_annotations and val_images must both be provided, or both omitted; "
+            f"got val_annotations={val_annotations!r}, val_images={val_images!r}"
         )
     if num_gpus < 1:
         raise ValueError(f"num_gpus must be >= 1; got {num_gpus}")
@@ -226,11 +207,11 @@ def train(
     cfg = merge_overrides(cfg, {"auto_config": {"enabled": config is None}})
 
     # --- No-val short-circuit (after overrides, so eval_period is final) --
-    eval_after = val_json is not None
+    eval_after = val_annotations is not None
     if not eval_after and cfg.test.eval_period > 0:
         warnings.warn(
-            "test.eval_period > 0 but no val_json/val_images provided — "
-            "mid-training eval disabled. Pass val_json + val_images to enable.",
+            "test.eval_period > 0 but no val_annotations/val_images provided — "
+            "mid-training eval disabled. Pass val_annotations + val_images to enable.",
             stacklevel=2,
         )
         cfg = merge_overrides(cfg, {"test": {"eval_period": 0}})
@@ -269,13 +250,13 @@ def train(
     if num_gpus == 1:
         run_train(
             cfg,
-            coco_gt_json=train_json,
+            coco_gt_json=train_annotations,
             image_root=train_images,
             output_dir=train_dir,
             weights=detector_weights,
             pretrained_backbone=pretrained_backbone,
             device=device,
-            val_json=val_json if forward_val else None,
+            val_json=val_annotations if forward_val else None,
             val_image_root=val_images if forward_val else None,
             resume=resume_path,
             user_set_paths=pinned_paths,
@@ -294,7 +275,7 @@ def train(
             device=dev,
             args=(
                 cfg,
-                train_json,
+                train_annotations,
                 train_images,
                 train_dir,
                 detector_weights,  # weights
@@ -302,7 +283,7 @@ def train(
                 device,
                 None,  # num_epochs (cfg already carries it)
                 20,  # log_period default
-                val_json if forward_val else None,
+                val_annotations if forward_val else None,
                 val_images if forward_val else None,
                 resume_path,
                 pinned_paths,
@@ -322,7 +303,7 @@ def train(
     bbox: dict[str, Any] = {}
     eval_seconds: float | None = None
     if eval_after:
-        assert val_json is not None and val_images is not None
+        assert val_annotations is not None and val_images is not None
         eval_start = time.time()
         # run_eval feeds the device string to torch.device(), which does
         # not understand the "auto" sentinel — resolve it here.
@@ -331,7 +312,7 @@ def train(
             eval_device = "cuda" if torch.cuda.is_available() else "cpu"
         metrics = run_eval(
             final_weights,
-            coco_gt_json=val_json,
+            coco_gt_json=val_annotations,
             image_root=val_images,
             output_dir=resolved_output_dir / "eval",
             device=eval_device,
