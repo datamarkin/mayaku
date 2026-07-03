@@ -163,10 +163,10 @@ process_row() {
     if [[ -f "$metrics" && "$metrics" -nt "$pth_path" ]]; then
         echo "[eval]     cached: $metrics"
     else
-        echo "[eval]     $mayaku_cfg --weights $pth_path --json $(basename "$gt_path")"
+        echo "[eval]     $mayaku_cfg --weights $pth_path --annotations $(basename "$gt_path")"
         local mayaku_cmd=(mayaku eval "$mayaku_cfg"
             --weights "$pth_path"
-            --json "$gt_path"
+            --annotations "$gt_path"
             --images "$COCO_IMAGES"
             --output "$out_dir"
             --device cuda)
