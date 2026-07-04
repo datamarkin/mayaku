@@ -1,5 +1,14 @@
 # RF100-VL — AP vs wall-clock
 
+> ⚠️ **Not yet validated — re-verify everything before trusting any result.**
+> This benchmark's whole value rests on two things: it must be **fair** (all legs
+> apples-to-apples) and it must use each library's **defaults**. Every leg needs an
+> end-to-end re-check before any number is trusted or published — training is truly
+> the library default (nothing tuned), all three train/validate on the same splits,
+> checkpoint + EMA/deploy-weight handling is equivalent, class-id alignment and score
+> thresholds match, and wall-clock is accounted the same way. Treat current numbers as
+> provisional until a full pass confirms it.
+
 Train each library with its **defaults** on the [RF100-VL](https://rf100-vl.org/)
 datasets and measure **COCO AP as a function of training wall-clock** — the
 learning curve. Currently: **YOLO (Ultralytics)**, **RF-DETR**, and **Mayaku**.
@@ -120,10 +129,11 @@ the `curve.csv` — the curve is the durable artifact.
   `rfdetr.py:_to_rfdetr_weights` converts them and RF-DETR auto-resizes its head.
   It fails loud if RF-DETR's module layout changes — smoke-test it on the first
   checkpoint you produce.
-- **RF-DETR EMA:** eval uses the base weights in each checkpoint. RF-DETR ships the
-  *EMA* weights as its headline model, so this slightly understates it. The EMA
-  weights live in the checkpoint's callback state — switch to them if that gap
-  matters.
+- **EMA / deploy weights.** Each leg is scored on the weights it deploys — the
+  EMA-smoothed ones (also far less noisy epoch-to-epoch). YOLO's saved checkpoints are
+  already EMA (Ultralytics default); Mayaku eval reads the EMA shadow (`train/ema/`);
+  RF-DETR eval extracts the EMA weights from each `.ckpt`'s callback state (falling back
+  to base if EMA is off). The `eval` scripts print which source was used.
 - **Mayaku model source:** fine-tunes from the pretrained **weights** (`WEIGHTS` in
   `train_mayaku.py` — a bundled name or a local `.pth`), *not* a config YAML. The
   checkpoint is self-describing (architecture comes from it) and auto-config derives
