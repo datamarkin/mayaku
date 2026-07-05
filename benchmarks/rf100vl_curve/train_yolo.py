@@ -22,7 +22,7 @@ try:
 except ImportError as exc:
     raise SystemExit("Ultralytics is not installed. Run: pip install ultralytics") from exc
 
-MODEL = "yolo11n.pt"
+MODEL = "yolo26n.pt"
 
 
 def main() -> None:
