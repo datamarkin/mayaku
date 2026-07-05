@@ -574,7 +574,7 @@ def build_uniquery(cfg: MayakuConfig, *, backbone_weights: str | None = None) ->
         cost_class=uq_cfg.cost_class,
         cost_bbox=uq_cfg.cost_bbox,
         cost_giou=uq_cfg.cost_giou,
-        cascade_iou_thresholds=uq_cfg.cascade_iou_thresholds,
+        cascade_iou_thresholds=uq_cfg.cascade_iou_thresholds or (),
     )
 
     weight_dict: dict[str, float] = {

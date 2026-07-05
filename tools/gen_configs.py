@@ -154,7 +154,6 @@ def render(tier: Tier, task: str) -> str:
         "    cost_class: 2.0\n"
         "    cost_bbox: 5.0\n"
         "    cost_giou: 2.0\n"
-        "    cascade_iou_thresholds: []\n"
         f"{head_block}"
         "\n"
         "input:\n"

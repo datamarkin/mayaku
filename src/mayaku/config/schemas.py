@@ -393,11 +393,13 @@ class UniQueryHeadConfig(_BaseModel):
     dn_loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
 
     # Cascade-IoU: per-stage minimum IoU floor for Hungarian matching.
-    # Empty tuple = disabled (vanilla flat matching). When set, length
-    # must equal num_stages. Predictions below the floor cannot match a
-    # GT in that stage. Training-only — zero inference/export impact.
-    # Recommended for 6 stages: (0.0, 0.0, 0.4, 0.5, 0.6, 0.7)
-    cascade_iou_thresholds: tuple[float, ...] = ()
+    # ``None`` (default) auto-enables it — tighten the last two refinement
+    # stages to (0.5, 0.6), earlier stages 0.0, sized to num_stages
+    # (2 stages -> (0.5, 0.6); 6 -> (0.0, 0.0, 0.0, 0.0, 0.5, 0.6)). ``()``
+    # explicitly disables it (vanilla flat matching); an explicit tuple
+    # (length == num_stages) overrides. Predictions below a stage's floor
+    # cannot match a GT in that stage. Training-only — zero inference impact.
+    cascade_iou_thresholds: tuple[float, ...] | None = None
 
     # Inference-time knobs: use fewer stages or proposals at test time
     # for speed without retraining. None = use training values.
@@ -407,6 +409,12 @@ class UniQueryHeadConfig(_BaseModel):
     @model_validator(mode="after")
     def _check_cascade_iou(self) -> UniQueryHeadConfig:
         t = self.cascade_iou_thresholds
+        if t is None:
+            # Enabled by default: tighten the last two stages, sized to num_stages
+            # (single-stage models get no cascade — the concept needs ≥2 stages).
+            n = self.num_stages
+            t = (0.0,) * (n - 2) + (0.5, 0.6) if n >= 2 else ()
+            object.__setattr__(self, "cascade_iou_thresholds", t)
         if t and len(t) != self.num_stages:
             raise ValueError(
                 f"cascade_iou_thresholds length ({len(t)}) must equal "
