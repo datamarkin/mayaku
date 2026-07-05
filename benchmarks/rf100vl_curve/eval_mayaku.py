@@ -25,12 +25,8 @@ def score(run: Path, dataset_dir: Path, device: str) -> None:
     gt = val / common.COCO_ANN
     cat_ids = common.category_ids(gt)
     val_images = common.images(gt, val)
-    # Prefer EMA weights — that's what Mayaku deploys (higher AP, and far less
-    # epoch-to-epoch noise than the live weights). Fall back to live if EMA is off.
-    ema_dir = run / "train" / "ema"
-    ckpt_dir = ema_dir if ema_dir.is_dir() else run / "train"
-    ckpts = sorted(ckpt_dir.glob("model_iter_*.pth"), key=lambda p: p.stat().st_mtime)
-    print(f"[mayaku] eval {run.name}: {len(ckpts)} checkpoints ({'ema' if ckpt_dir == ema_dir else 'live'})")
+    ckpts = sorted((run / "train").glob("model_iter_*.pth"), key=lambda p: p.stat().st_mtime)
+    print(f"[mayaku] eval {run.name}: {len(ckpts)} checkpoints")
     rows = []
     for ck in ckpts:
         predictor = from_pretrained(str(ck), device=device)

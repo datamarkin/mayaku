@@ -7,11 +7,13 @@ predicts on the val images, and scores with the shared pycocotools evaluator —
 same metric as the YOLO leg. Wall-clock per checkpoint is its file mtime minus the
 train-start ``t0`` stamped in meta.json.
 
-``_to_rfdetr_weights`` converts each ``.ckpt`` into the ``{"model": ...}`` file
-RF-DETR loads, preferring the **EMA** (deploy) weights from the checkpoint's callback
-state and falling back to the base weights when EMA is off — so this matches the
-EMA-grade weights the YOLO and Mayaku legs are scored on. It fails loud if RF-DETR's
-layout ever changes. Worth a smoke-test on the first real checkpoint.
+Two things to validate on the first real checkpoint:
+  * ``_to_rfdetr_weights`` converts the plain PyTorch-Lightning ``.ckpt`` (keys
+    prefixed ``model.``, no ``model`` entry) into the ``{"model": ...}`` file
+    RF-DETR loads; it fails loud if RF-DETR's module layout ever changes.
+  * These are the *base* weights. RF-DETR deploys the *EMA* weights as its headline
+    model (kept separately in the checkpoint's callback state), so this slightly
+    understates it — switch to EMA if that gap matters.
 """
 
 from __future__ import annotations
@@ -27,56 +29,27 @@ except ImportError as exc:
     raise SystemExit("RF-DETR is not installed. Run: pip install rfdetr") from exc
 
 
-def _strip_to_model(state: dict, anchor_suffix: str = "class_embed.bias") -> dict | None:
-    """Strip a state_dict's wrapper prefix down to RF-DETR's raw model keys.
-
-    The prefix (``model.``, ``module.model.``, optionally with ``_orig_mod.``) is
-    detected from whichever key ends in ``class_embed.bias``, so this handles the
-    LightningModule wrap, the EMA ``AveragedModel`` wrap, and torch.compile alike.
-    Returns None if no anchor key is present.
-    """
-    anchor = next((k for k in state if k.endswith(anchor_suffix)), None)
-    if anchor is None:
-        return None
-    prefix = anchor[: -len(anchor_suffix)]
-    return {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
-
-
-def _to_rfdetr_weights(ckpt: Path, dst: Path) -> str:
-    """Convert a per-epoch checkpoint into an RF-DETR-loadable ``{"model": ...}`` file.
-
-    Prefers the EMA (deploy) weights — RF-DETR ships EMA as its headline model and
-    they are far less noisy epoch-to-epoch — falling back to the base weights when
-    EMA is off. RF-DETR auto-resizes its head from ``class_embed.bias`` on load.
-    Returns the weight source used: ``"ema"``, ``"base"``, or ``"native"``.
-    """
+def _to_rfdetr_weights(ckpt: Path, dst: Path) -> None:
+    """Convert a per-epoch checkpoint into an RF-DETR-loadable ``{"model": ...}`` file."""
     import torch
 
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
-
-    # EMA weights live in the RFDETREMACallback state (an AveragedModel state_dict).
-    for cb_state in ck.get("callbacks", {}).values():
-        if isinstance(cb_state, dict) and "average_model_state_dict" in cb_state:
-            ema = _strip_to_model(cb_state["average_model_state_dict"])
-            if ema is not None:
-                torch.save({"model": ema}, dst)
-                return "ema"
-
-    if "model" in ck:  # already RF-DETR native (.pth)
+    if "model" in ck:  # already RF-DETR native
         payload = {"model": ck["model"]}
         if "args" in ck:
             payload["args"] = ck["args"]
         torch.save(payload, dst)
-        return "native"
+        return
 
-    raw = _strip_to_model(ck["state_dict"])  # plain PTL base weights
-    if raw is None:
+    sd = ck["state_dict"]  # plain PTL: strip the single "model." LightningModule prefix
+    prefix = "model._orig_mod." if any(k.startswith("model._orig_mod.") for k in sd) else "model."
+    raw = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+    if "class_embed.bias" not in raw:
         raise RuntimeError(
-            f"{ckpt.name}: no 'class_embed.bias' in the checkpoint's EMA callback state "
-            f"or base state_dict — RF-DETR's layout may have changed."
+            f"{ckpt.name}: no 'class_embed.bias' after stripping '{prefix}'. RF-DETR's "
+            f"LightningModule layout may have changed — inspect the state_dict keys."
         )
     torch.save({"model": raw}, dst)
-    return "base"
 
 
 def score(run: Path, dataset_dir: Path, device: str) -> None:
@@ -91,18 +64,24 @@ def score(run: Path, dataset_dir: Path, device: str) -> None:
     print(f"[rfdetr] eval {run.name}: {len(ckpts)} checkpoints")
     tmp = run / "_eval_weights.pth"
     rows = []
-    src = "none"
     for ck in ckpts:
-        src = _to_rfdetr_weights(ck, tmp)
+        _to_rfdetr_weights(ck, tmp)
         model = RFDETRNano(pretrain_weights=str(tmp))
         dets = []
         for image_id, path in val_images:
             det = model.predict(str(path), threshold=0.001)
             for (x1, y1, x2, y2), s, cls in zip(det.xyxy, det.confidence, det.class_id):
+                # RF-DETR (LW-DETR) builds an (N+1)-slot classification head: indices
+                # 0..N-1 are the dataset's ascending categories, index N is the DETR
+                # "no-object" class. At threshold 0.001 that slot leaks detections; it
+                # maps to no real category, so drop anything past the last category.
+                ci = int(cls)
+                if ci >= len(cat_ids):
+                    continue
                 dets.append(
                     {
                         "image_id": image_id,
-                        "category_id": cat_ids[int(cls)],
+                        "category_id": cat_ids[ci],
                         "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
                         "score": float(s),
                     }
@@ -113,7 +92,7 @@ def score(run: Path, dataset_dir: Path, device: str) -> None:
             torch.cuda.empty_cache()
     tmp.unlink(missing_ok=True)
     common.write_curve(run, rows)
-    print(f"[rfdetr]   wrote {run / 'curve.csv'} ({src} weights)")
+    print(f"[rfdetr]   wrote {run / 'curve.csv'}")
 
 
 def main() -> None:

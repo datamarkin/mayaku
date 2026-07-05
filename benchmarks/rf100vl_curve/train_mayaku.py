@@ -5,7 +5,7 @@
 The train call below is Mayaku's stock fine-tune: point at the pretrained nano
 weights (a self-describing checkpoint — architecture comes from it) and let
 auto-config derive the recipe from the dataset. Same shape as the other legs'
-`yolo11n.pt` / `RFDETRNano()` — pretrained model + library defaults. Trains on
+`yolo26n.pt` / `RFDETRNano()` — pretrained model + library defaults. Trains on
 the dataset's `train/` split and validates on `valid/` every epoch, like the
 others. The added arguments are per-epoch checkpoints and per-epoch eval; the
 final (uniform pycocotools) scoring is offline in eval_mayaku.py.
@@ -21,7 +21,7 @@ import common
 from mayaku import train
 
 # Pretrained nano — a bundled model name (downloads) or a local .pth checkpoint path.
-WEIGHTS = "mayaku-n"
+WEIGHTS = "mayaku-n-det"
 
 
 def main() -> None:
@@ -47,7 +47,7 @@ def main() -> None:
             val_annotations=val / common.COCO_ANN,
             val_images=val,
             output_dir=run,
-            # per-epoch checkpoints + per-epoch eval (matches the other legs' default validation)
+            # per-epoch checkpoints; the only added argument (a curve needs them).
             overrides={"solver": {"checkpoint_period": 1}},
         )
         common.write_meta(run, lib="mayaku", dataset=name, t0=t0)
