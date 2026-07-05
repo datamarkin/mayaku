@@ -5,6 +5,44 @@ package. They exist to support one-time engineering tasks (validation,
 data prep, etc.) and are deleted once their job is done. None of them
 are documented in user-facing docs.
 
+## `convert_convnext_backbone.py`
+
+**Purpose.** Convert an external ConvNeXt backbone checkpoint (timm,
+facebookresearch / Liu et al., or torchvision) into a Mayaku-format
+backbone `state_dict`, so a maintainer can warm-start a from-scratch
+train from a public ImageNet-pretrained backbone.
+
+**Why this exists.** The `mayaku` library loads *mayaku* weights, period
+— it has no knowledge of timm / facebookresearch / torchvision as
+*weight sources* (no auto-download, no runtime format remapping). This
+script is the one place that knows those external key layouts. It lifts
+the (now-deleted) in-library remap out to `tools/`, where it belongs.
+
+**Format support.** Auto-detected from key naming: timm
+(`stages.N.blocks.Y.…`, MLP as 1×1 Conv2d → squeezed to Linear),
+facebookresearch (`downsample_layers.k`, `stages.k.j.dwconv`,
+`gamma (C,) → layer_scale (C,1,1)`), and torchvision (`features.k.…`,
+already-`(C,1,1)` `layer_scale`). Classification-head keys (`head.*` /
+`norm.*` / `classifier.*`) are dropped automatically.
+
+**Verification.** The tool builds `ConvNeXtBackbone(variant)` and does a
+strict load before writing — a wrong `--variant` or unsupported layout
+fails loudly. Round-trip parity is exact (max|Δ|=0.0) for timm
+(`convnext_femto`) and torchvision (`convnext_tiny`) forward outputs.
+
+### Usage
+
+```bash
+python tools/convert_convnext_backbone.py convnext_femto.d1_in1k.pth \
+    --variant convnext_femto \
+    -o convnext_femto.mayaku.pth
+```
+
+The output is a bare backbone `state_dict` (keys match
+`ConvNeXtBackbone(variant).state_dict()`) — the format the maintainer-only
+from-scratch backbone-init path consumes. Input may be
+`.pth` / `.pt` / `.bin` or `.safetensors`.
+
 ## `convert_d2_checkpoint.py`
 
 **Purpose.** Convert a Detectron2 model-zoo checkpoint (e.g.

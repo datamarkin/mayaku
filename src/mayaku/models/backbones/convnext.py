@@ -8,21 +8,9 @@ Wraps torchvision's reference ConvNeXt rather than reimplementing the
   27}, 3]``, same dims ``[96/96/128/192, ...]``, same 4×4 stride-4
   stem, same 7×7 depthwise + ``LayerNorm`` + MLP block with
   per-channel layer-scale.
-* Pretrained weights are supplied via :attr:`BackboneConfig.weights_path`.
-  The loader accepts both checkpoint key-naming conventions:
-    - **torchvision**: ``features.k.j.block.{0,2,3,5}`` / ``layer_scale``
-      (shape ``(C, 1, 1)``)
-    - **facebookresearch / Liu et al.**: ``downsample_layers.k`` /
-      ``stages.k.j.{dwconv,norm,pwconv1,pwconv2,gamma}`` with ``gamma``
-      at shape ``(C,)`` — the format used by the original ConvNeXt
-      release and downstream forks (DINOv3 LVD-1689M distillation,
-      user fine-tunes, etc.)
-  The latter is handled by :func:`_remap_facebook_convnext_state_dict`,
-  which renames keys and reshapes ``gamma`` → ``(C, 1, 1)`` before load.
-  Mayaku ships no checkpoint URLs and no auto-download — supply a local
-  ``.pth`` / ``.safetensors`` path. Some sources (DINOv3) are
-  license-gated and must be downloaded manually after accepting the
-  upstream license.
+* Architecture only — random init. Trained weights arrive by loading a mayaku
+  checkpoint on top of the built model; the backbone never fetches or loads
+  weights itself.
 * RGB-native (ADR 002): ConvNeXt uses standard ImageNet RGB
   normalisation, matching :class:`ModelConfig.pixel_mean/std`.
 * ``BACKEND_PORTABILITY_REPORT.md`` §3: the ConvNeXt primitives
@@ -42,12 +30,9 @@ Channel/stride table per variant:
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
-from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal
 
-import torch
 import torchvision.models as tv
 from torch import Tensor, nn
 
@@ -126,14 +111,6 @@ def _build_custom_convnext(name: str) -> tv.ConvNeXt:
     return tv.ConvNeXt(block_setting=block_setting, stochastic_depth_prob=0.1)
 
 
-_TORCHVISION_DEFAULT_WEIGHTS: dict[ConvNeXtVariant, tv.WeightsEnum] = {
-    "convnext_tiny": tv.ConvNeXt_Tiny_Weights.IMAGENET1K_V1,
-    "convnext_small": tv.ConvNeXt_Small_Weights.IMAGENET1K_V1,
-    "convnext_base": tv.ConvNeXt_Base_Weights.IMAGENET1K_V1,
-    "convnext_large": tv.ConvNeXt_Large_Weights.IMAGENET1K_V1,
-}
-
-
 class ConvNeXtBackbone(Backbone):
     """Bottom-up ConvNeXt feature extractor.
 
@@ -142,20 +119,6 @@ class ConvNeXtBackbone(Backbone):
         freeze_at: Number of stages to freeze, counting stem as 1
             (mirrors :class:`ResNetBackbone`). 0 = nothing, 1 = stem,
             2 = stem + res2, ..., 5 = everything.
-        weights: ``"DEFAULT"`` to load torchvision's published
-            IMAGENET1K_V1 weights; ``None`` for random init. Ignored
-            when ``weights_path`` is set (no need to download
-            torchvision weights just to overwrite them).
-        weights_path: Path to a local ConvNeXt checkpoint, accepted in
-            either torchvision key naming (``features.*.block.*.layer_scale``)
-            or facebookresearch / Liu et al. key naming
-            (``stages.*.{dwconv,norm,pwconv1,pwconv2,gamma}``,
-            ``downsample_layers.*``). The latter covers DINOv3
-            LVD-1689M, the original ConvNeXt release, and downstream
-            user fine-tunes — it is renamed and ``gamma`` reshaped to
-            ``(C, 1, 1)`` before load. Accepts ``.pth`` / ``.pt`` /
-            ``.bin`` (PyTorch pickle) and ``.safetensors``. When set,
-            takes precedence over ``weights="DEFAULT"``.
         out_features: Subset of ``("res2","res3","res4","res5")`` to
             return; defaults to all four.
     """
@@ -165,8 +128,6 @@ class ConvNeXtBackbone(Backbone):
         name: ConvNeXtVariant = "convnext_tiny",
         *,
         freeze_at: int = 0,
-        weights: WeightsChoice = None,
-        weights_path: str | os.PathLike[str] | None = None,
         out_features: tuple[str, ...] = _DEFAULT_OUT_FEATURES,
     ) -> None:
         super().__init__()
@@ -187,26 +148,12 @@ class ConvNeXtBackbone(Backbone):
         self._out_feature_channels = {f: _VARIANT_CHANNELS[name][f] for f in self._out_features}
         self._out_feature_strides = {f: _OUT_STRIDES[f] for f in self._out_features}
 
-        # Choose: random init, or torchvision-pretrained "DEFAULT". The
-        # local-checkpoint path is a *separate* override that runs after
-        # construction, so we don't accidentally trigger a network
-        # download for the torchvision weights when the caller already
-        # has a local checkpoint in hand.
-        if weights is not None and weights != "DEFAULT":
-            raise ValueError(f"weights must be None or 'DEFAULT'; got {weights!r}")
-
+        # Architecture only — random init. Trained weights come from a mayaku
+        # checkpoint loaded on top by the caller; the backbone never fetches or
+        # loads weights itself.
         if name in _TORCHVISION_FACTORIES:
-            tv_weights = (
-                _TORCHVISION_DEFAULT_WEIGHTS[name]
-                if weights == "DEFAULT" and weights_path is None
-                else None
-            )
-            tv_model = _TORCHVISION_FACTORIES[name](weights=tv_weights)
+            tv_model = _TORCHVISION_FACTORIES[name](weights=None)
         else:
-            if weights == "DEFAULT":
-                raise ValueError(
-                    f"{name} has no torchvision pretrained weights; use weights_path instead"
-                )
             tv_model = _build_custom_convnext(name)
 
         # torchvision ConvNeXt's ``features`` is a Sequential of 8
@@ -232,9 +179,6 @@ class ConvNeXtBackbone(Backbone):
                 "res5": feats[7],
             }
         )
-
-        if weights_path is not None:
-            _load_pretrained_weights(self, Path(weights_path))
 
         self._apply_freeze(freeze_at)
 
@@ -279,323 +223,16 @@ class ConvNeXtBackbone(Backbone):
                 p.requires_grad_(False)
 
 
-# ---------------------------------------------------------------------------
-# Pretrained-weights loading (facebookresearch-style ConvNeXt state-dict)
-# ---------------------------------------------------------------------------
-
-
-def _load_pretrained_weights(model: ConvNeXtBackbone, path: Path) -> None:
-    """Load a ConvNeXt checkpoint into ``model``.
-
-    Accepts ``.pth`` / ``.pt`` / ``.bin`` (PyTorch pickle) and
-    ``.safetensors`` (HuggingFace). The checkpoint may be:
-
-    * A bare state-dict in the original Liu et al. / facebookresearch
-      ConvNeXt key naming (this is what the DINOv3 LVD-1689M release,
-      the original ConvNeXt release, and most downstream forks ship), or
-    * A dict with a top-level ``"model"`` / ``"state_dict"`` /
-      ``"teacher"`` / ``"student"`` key (some upstream tooling wraps it).
-
-    Keys are remapped from the source naming (``stages.k.j.dwconv``,
-    ``downsample_layers.k.``) to torchvision's
-    (``features.{2k+1}.j.block.0``, ``features.{2k}.``). Final ``norm``
-    and per-stage ``norms`` parameters (the source's classification-head
-    bits) are discarded; we only need backbone params.
-    """
-    if not path.exists():
-        raise FileNotFoundError(
-            f"ConvNeXt checkpoint not found at {path!s}. Provide a checkpoint "
-            "in either torchvision or facebookresearch key naming — e.g., the "
-            "DINOv3 LVD-1689M release on HuggingFace "
-            "(https://huggingface.co/facebook/dinov3-convnext-tiny-pretrain-lvd1689m "
-            "and siblings; license-gated, manual download), the original "
-            "Liu et al. ConvNeXt release, or a user fine-tune."
-        )
-    raw = _read_checkpoint(path)
-    state = _unwrap_checkpoint(raw)
-    remapped = _remap_facebook_convnext_state_dict(state)
-
-    target_keys = set(model.state_dict().keys())
-    # Filter out keys that don't belong in this backbone (the checkpoint's
-    # final ``norm.*`` and ``norms.*``, which we intentionally drop).
-    filtered = {k: v for k, v in remapped.items() if k in target_keys}
-    missing = target_keys - set(filtered)
-    unexpected = set(remapped) - target_keys
-    if missing:
-        raise RuntimeError(
-            f"ConvNeXt checkpoint at {path!s} is missing keys after remap: "
-            f"{sorted(missing)[:8]}{' ...' if len(missing) > 8 else ''}"
-        )
-    # Strict load: every backbone parameter must be filled by the
-    # checkpoint. Unexpected source keys (norm / norms / register tokens
-    # if any) are silently dropped via the filter above.
-    incompatible = model.load_state_dict(filtered, strict=False)
-    del unexpected, incompatible  # checked above; load_state_dict echoes them
-
-
-def _read_checkpoint(path: Path) -> dict[str, Any]:
-    """Read a ConvNeXt checkpoint file into a top-level dict.
-
-    The return type is intentionally ``dict[str, Any]`` because wrapped
-    checkpoints (``{"model": state_dict, "epoch": 42, ...}``) have
-    non-tensor leaves at the top level; :func:`_unwrap_checkpoint`
-    narrows to the actual state-dict afterwards.
-    """
-    if path.suffix == ".safetensors":
-        try:
-            from safetensors.torch import load_file
-        except ImportError as exc:
-            raise ImportError(
-                f"Loading .safetensors requires the 'safetensors' package; "
-                f"install with `pip install safetensors`, or download the "
-                f"`.pth` variant of {path.name} instead."
-            ) from exc
-        return cast(dict[str, Any], load_file(str(path), device="cpu"))
-    loaded = torch.load(str(path), map_location="cpu", weights_only=True)
-    return cast(dict[str, Any], loaded)
-
-
-def _unwrap_checkpoint(raw: dict[str, Any]) -> dict[str, Tensor]:
-    # Common wrappers: {"model": state_dict}, {"state_dict": state_dict},
-    # {"teacher": state_dict} (DINOv3 SSL checkpoints sometimes nest under
-    # "teacher" or "student" for the EMA copy). Detect by absence of
-    # tensor leaves at the top level.
-    if not raw:
-        return cast(dict[str, Tensor], raw)
-    sample_value = next(iter(raw.values()))
-    if isinstance(sample_value, torch.Tensor):
-        return cast(dict[str, Tensor], raw)
-    for key in ("model", "state_dict", "teacher", "student"):
-        if key in raw and isinstance(raw[key], dict):
-            return cast(dict[str, Tensor], raw[key])
-    raise RuntimeError(
-        "ConvNeXt checkpoint has a non-tensor top level but no known "
-        f"wrapper key (model/state_dict/teacher/student). Got top-level "
-        f"keys: {sorted(raw.keys())[:8]}"
-    )
-
-
-def _remap_facebook_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Rename external ConvNeXt keys → Mayaku's internal layout, reshape ``gamma`` → ``layer_scale``.
-
-    Mapping:
-
-    * ``downsample_layers.0.{0,1}.*`` → ``features.0.{0,1}.*`` (stem)
-    * ``downsample_layers.k.{0,1}.*`` (k=1..3) → ``features.{2k}.{0,1}.*``
-    * ``stages.k.j.dwconv.*``  → ``features.{2k+1}.j.block.0.*``
-    * ``stages.k.j.norm.*``    → ``features.{2k+1}.j.block.2.*``
-    * ``stages.k.j.pwconv1.*`` → ``features.{2k+1}.j.block.3.*``
-    * ``stages.k.j.pwconv2.*`` → ``features.{2k+1}.j.block.5.*``
-    * ``stages.k.j.gamma``     → ``features.{2k+1}.j.layer_scale``
-      (reshape ``(C,) → (C, 1, 1)``)
-
-    Source-only keys (``norm.*``, ``norms.*``, register tokens, etc.)
-    pass through unchanged so the caller's strict-load filter can drop
-    them.
-
-    The torchvision prefix is also injected: keys land under
-    ``stem.*`` / ``_res_downs.{res2..res5}.*`` / ``_res_stages.{res2..res5}.*``
-    to match :class:`ConvNeXtBackbone`'s carved structure, **not** under
-    ``features.*``. The two-step rename (source → tv features.*, then
-    features.* → mayaku carved-name) keeps the per-step logic readable.
-    """
-    # Detect key format: timm/v1.5 uses "stem_0" / "stages_X.blocks.Y",
-    # facebookresearch uses "downsample_layers" / "stages.k.j.dwconv".
-    # If any key starts with "stem_" or contains ".blocks.", it's timm.
-    is_timm = any(k.startswith("stem_") or ".blocks." in k for k in state)
-    if is_timm:
-        return _remap_timm_convnext_state_dict(state)
-
-    # torchvision-native ConvNeXt (torchvision.models, torch.hub, and
-    # lightly_train exports): the whole network is one "features" Sequential.
-    # The Facebook branch below doesn't recognise that prefix, so dispatch here.
-    is_torchvision = any(k.startswith("features.") for k in state)
-    if is_torchvision:
-        return _remap_torchvision_convnext_state_dict(state)
-
-    out: dict[str, Tensor] = {}
-    # Block sub-module index inside the torchvision CNBlock.block
-    # Sequential: dwconv=0, Permute=1, LayerNorm=2, pwconv1=3, GELU=4,
-    # pwconv2=5, Permute=6. Only the parametric layers appear here.
-    _BLOCK_SUB = {"dwconv": 0, "norm": 2, "pwconv1": 3, "pwconv2": 5}
-    # k → carved-stage name. ``downsample_layers.0`` is the stem; the
-    # other three downsamples sit before res3/res4/res5 in our layout.
-    _STAGE_NAMES = ("res2", "res3", "res4", "res5")
-
-    for key, value in state.items():
-        parts = key.split(".")
-        # ---- downsample_layers.k.{0,1}.{weight,bias} ---------------------
-        if parts[0] == "downsample_layers":
-            k = int(parts[1])  # 0 = stem, 1..3 = pre-res{3,4,5} downsamples
-            if k == 0:
-                # stem (Conv 4×4 + LayerNorm2d), lives at self.stem.{0,1}.*
-                new_key = "stem." + ".".join(parts[2:])
-            else:
-                # 1 → res3, 2 → res4, 3 → res5
-                stage = _STAGE_NAMES[k]
-                # parts[2] ∈ {"0","1"} (LayerNorm2d, Conv2d) — preserve.
-                new_key = f"_res_downs.{stage}." + ".".join(parts[2:])
-            out[new_key] = value
-            continue
-
-        # ---- stages.k.j.{dwconv,norm,pwconv1,pwconv2,gamma}.{w,b} --------
-        if parts[0] == "stages":
-            k = int(parts[1])
-            j = int(parts[2])
-            sub = parts[3]
-            stage = _STAGE_NAMES[k]
-            if sub == "gamma":
-                channels = value.shape[0]
-                out[f"_res_stages.{stage}.{j}.layer_scale"] = value.view(channels, 1, 1)
-                continue
-            if sub not in _BLOCK_SUB:
-                out[key] = value
-                continue
-            tail = ".".join(parts[4:])  # "weight" / "bias"
-            out[f"_res_stages.{stage}.{j}.block.{_BLOCK_SUB[sub]}.{tail}"] = value
-            continue
-
-        # ---- everything else (norm, norms, mask_token, ...) --------------
-        # Pass through; caller filters against the carved model's keys.
-        out[key] = value
-
-    return out
-
-
-def _remap_timm_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Rename timm/ConvNeXt-v1.5 keys → Mayaku's internal layout.
-
-    Handles the key naming from distilled ConvNeXt checkpoints:
-        stem_0/stem_1                 → stem.0/stem.1
-        stages_X.blocks.Y.conv_dw    → _res_stages.resN.Y.block.0
-        stages_X.blocks.Y.norm       → _res_stages.resN.Y.block.2
-        stages_X.blocks.Y.mlp.fc1    → _res_stages.resN.Y.block.3
-        stages_X.blocks.Y.mlp.fc2    → _res_stages.resN.Y.block.5
-        stages_X.blocks.Y.gamma      → _res_stages.resN.Y.layer_scale (C→C,1,1)
-        stages_X.downsample.{0,1}    → _res_downs.resN.{0,1}
-    """
-    out: dict[str, Tensor] = {}
-    _BLOCK_SUB = {"conv_dw": 0, "norm": 2}
-    _MLP_SUB = {"fc1": 3, "fc2": 5}
-    _STAGE_NAMES = ("res2", "res3", "res4", "res5")
-
-    for key, value in state.items():
-        parts = key.split(".")
-
-        # ---- stem_0.weight / stem_1.bias ----
-        if parts[0].startswith("stem_"):
-            idx = parts[0].split("_")[1]  # "0" or "1"
-            tail = ".".join(parts[1:])
-            out[f"stem.{idx}.{tail}"] = value
-            continue
-
-        # ---- stages_X.downsample.{0,1}.{weight,bias} ----
-        # stages_1.downsample = downsample before stage 1 = between res2→res3
-        if parts[0].startswith("stages_") and len(parts) >= 2 and parts[1] == "downsample":
-            k = int(parts[0].split("_")[1])
-            stage = _STAGE_NAMES[k]  # stages_1.downsample → res3
-            tail = ".".join(parts[2:])
-            out[f"_res_downs.{stage}.{tail}"] = value
-            continue
-
-        # ---- stages_X.blocks.Y.{conv_dw,norm,mlp.fc1,mlp.fc2,gamma} ----
-        if parts[0].startswith("stages_") and len(parts) >= 3 and parts[1] == "blocks":
-            k = int(parts[0].split("_")[1])
-            j = int(parts[2])
-            stage = _STAGE_NAMES[k]
-            sub = parts[3]
-
-            if sub == "gamma":
-                channels = value.shape[0]
-                out[f"_res_stages.{stage}.{j}.layer_scale"] = value.view(channels, 1, 1)
-                continue
-            if sub == "mlp" and len(parts) >= 5:
-                mlp_sub = parts[4]  # "fc1" or "fc2"
-                if mlp_sub in _MLP_SUB:
-                    tail = ".".join(parts[5:])
-                    # timm uses Conv2d(1×1) for MLP; torchvision uses Linear.
-                    # Squeeze spatial dims: (out, in, 1, 1) → (out, in)
-                    if tail == "weight" and value.dim() == 4:
-                        value = value.squeeze(-1).squeeze(-1)
-                    out[f"_res_stages.{stage}.{j}.block.{_MLP_SUB[mlp_sub]}.{tail}"] = value
-                    continue
-            if sub in _BLOCK_SUB:
-                tail = ".".join(parts[4:])
-                out[f"_res_stages.{stage}.{j}.block.{_BLOCK_SUB[sub]}.{tail}"] = value
-                continue
-
-        out[key] = value
-
-    return out
-
-
-def _remap_torchvision_convnext_state_dict(state: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Rename torchvision-native ConvNeXt keys → Mayaku's internal layout.
-
-    torchvision (and torch.hub / lightly_train exports) lay the whole network
-    out as a single ``features`` Sequential:
-
-        features.0.{0,1}          stem (Conv 4x4 + LayerNorm2d)
-        features.{1,3,5,7}.j...   stages res2..res5 (the CNBlock list)
-        features.{2,4,6}.{0,1}    downsamples before res3 / res4 / res5
-
-    Mayaku carves those into ``stem`` / ``_res_stages.resN`` / ``_res_downs.resN``,
-    but the per-block sub-structure (``block.{0,2,3,5}`` with Linear pointwise,
-    and ``layer_scale`` already shaped ``(C,1,1)``) is *identical* to
-    torchvision's — so only the top-level ``features.{i}`` prefix is rewritten,
-    no per-tensor reshape. ``classifier.*`` (and any other non-``features`` key)
-    passes through for the caller's strict-load filter to drop.
-    """
-    out: dict[str, Tensor] = {}
-    _STAGE_NAMES = {1: "res2", 3: "res3", 5: "res4", 7: "res5"}
-    _DOWN_NAMES = {2: "res3", 4: "res4", 6: "res5"}
-    for key, value in state.items():
-        parts = key.split(".")
-        if parts[0] != "features" or len(parts) < 3:
-            out[key] = value
-            continue
-        fi = int(parts[1])
-        tail = ".".join(parts[2:])
-        if fi == 0:
-            out[f"stem.{tail}"] = value
-        elif fi in _STAGE_NAMES:
-            out[f"_res_stages.{_STAGE_NAMES[fi]}.{tail}"] = value
-        elif fi in _DOWN_NAMES:
-            out[f"_res_downs.{_DOWN_NAMES[fi]}.{tail}"] = value
-        else:
-            out[key] = value
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Factory from BackboneConfig
-# ---------------------------------------------------------------------------
-
-
 def build_convnext(
     cfg: BackboneConfig,
     *,
-    weights: WeightsChoice = None,
     out_features: tuple[str, ...] = _DEFAULT_OUT_FEATURES,
 ) -> ConvNeXtBackbone:
-    """Construct a :class:`ConvNeXtBackbone` from a typed config.
-
-    ``weights`` selects torchvision's ImageNet baseline (mirrors the
-    :class:`ResNetBackbone` API for parity tests). ``cfg.weights_path``,
-    when set, points at a local ConvNeXt checkpoint in torchvision or
-    facebookresearch key naming and takes precedence over
-    ``weights="DEFAULT"``.
-    """
+    """Construct a :class:`ConvNeXtBackbone` (architecture only) from a typed config."""
     name = cfg.name
     if name not in _VARIANT_CHANNELS:
         raise ValueError(f"build_convnext requires a ConvNeXt variant; got {name!r}")
-    return ConvNeXtBackbone(
-        name=name,
-        freeze_at=cfg.freeze_at,
-        weights=weights,
-        weights_path=cfg.weights_path,
-        out_features=out_features,
-    )
+    return ConvNeXtBackbone(name=name, freeze_at=cfg.freeze_at, out_features=out_features)
 
 
 def is_convnext_variant(name: str) -> bool:

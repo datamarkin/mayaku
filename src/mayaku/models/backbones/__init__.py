@@ -69,5 +69,8 @@ def build_bottom_up(
             all four FPN-feeding levels.
     """
     if is_convnext_variant(cfg.name):
-        return build_convnext(cfg, weights=weights, out_features=out_features)
+        # ConvNeXt is architecture-only — trained weights arrive via a mayaku
+        # checkpoint loaded on top, never fetched here. ``weights`` (DEFAULT
+        # download) applies to the legacy ResNet path only.
+        return build_convnext(cfg, out_features=out_features)
     return build_backbone(cfg, weights=weights, out_features=out_features)
