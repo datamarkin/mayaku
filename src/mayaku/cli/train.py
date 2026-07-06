@@ -345,9 +345,7 @@ def run_train(
     # anything — the backbone is architecture-only — so this term is vestigial
     # and goes away with the field in the weights_path cleanup; it's kept for
     # now only so a config still carrying the field behaves as it did before.
-    backbone_initialized = (
-        weights is not None or cfg.model.backbone.weights_path is not None
-    )
+    backbone_initialized = weights is not None or cfg.model.backbone.weights_path is not None
     if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
         warnings.warn(
             f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "

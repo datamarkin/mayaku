@@ -268,5 +268,7 @@ class _TensorRTSession:
             "run the engine with TensorRT's native runtime."
         )
 
-    def run(self, x: npt.NDArray[np.float32]) -> dict[str, npt.NDArray[np.float32]]:  # pragma: no cover
+    def run(
+        self, x: npt.NDArray[np.float32]
+    ) -> dict[str, npt.NDArray[np.float32]]:  # pragma: no cover
         raise NotImplementedError

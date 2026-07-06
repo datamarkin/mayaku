@@ -339,9 +339,7 @@ class Predictor:
         # Embed the self-describing sidecar when we know the config (the
         # from_pretrained path); a directly-constructed predictor has none.
         sidecar = (
-            build_sidecar(self._cfg, self._class_names or [])
-            if self._cfg is not None
-            else None
+            build_sidecar(self._cfg, self._class_names or []) if self._cfg is not None else None
         )
         sample = build_sample(sample_height, sample_width)
         result = export_detector(

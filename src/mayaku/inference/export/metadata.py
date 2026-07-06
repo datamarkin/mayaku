@@ -44,8 +44,7 @@ def target_from_suffix(path: str | Path) -> str:
     target = _SUFFIX_TO_TARGET.get(suffix)
     if target is None:
         raise ValueError(
-            f"unrecognised artifact suffix {suffix!r}; expected one of "
-            f"{sorted(_SUFFIX_TO_TARGET)}"
+            f"unrecognised artifact suffix {suffix!r}; expected one of {sorted(_SUFFIX_TO_TARGET)}"
         )
     return target
 

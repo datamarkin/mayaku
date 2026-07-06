@@ -48,7 +48,9 @@ def run_eval(
     dataset_dicts = load_coco_json(
         coco_gt_json, image_root, metadata, keep_segmentation=False, keep_keypoints=False
     )
-    evaluator = COCOEvaluator(coco_gt_json, output_dir=output_dir, class_names=predictor.class_names)
+    evaluator = COCOEvaluator(
+        coco_gt_json, output_dir=output_dir, class_names=predictor.class_names
+    )
     evaluator.reset()
     total = len(dataset_dicts)
     for i, record in enumerate(dataset_dicts, start=1):
