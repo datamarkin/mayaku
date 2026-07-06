@@ -25,7 +25,9 @@ def score(run: Path, dataset_dir: Path, device: str) -> None:
     gt = val / common.COCO_ANN
     cat_ids = common.category_ids(gt)
     val_images = common.images(gt, val)
-    ckpts = sorted((run / "train").glob("model_iter_*.pth"), key=lambda p: p.stat().st_mtime)
+    # Score the EMA shadow — it's what select_final_weights ships; the live
+    # checkpoints under train/ exist for resume.
+    ckpts = sorted((run / "train" / "ema").glob("model_iter_*.pth"), key=lambda p: p.stat().st_mtime)
     print(f"[mayaku] eval {run.name}: {len(ckpts)} checkpoints")
     rows = []
     for ck in ckpts:

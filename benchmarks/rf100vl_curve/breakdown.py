@@ -81,7 +81,7 @@ def main():
               "AR@1", "AR@10", "AR@100", "AR small", "AR medium", "AR large"]
 
     results = {}
-    for lib, dets_fn, sub in [("mayaku", mayaku_dets, "train"), ("yolo", yolo_dets, "weights")]:
+    for lib, dets_fn, sub in [("mayaku", mayaku_dets, "train/ema"), ("yolo", yolo_dets, "weights")]:
         curve = out / lib / a.name / "curve.csv"
         if not curve.exists():
             print(f"[skip] {lib}: no curve.csv"); continue
