@@ -322,7 +322,7 @@ def _build_convnext_tiny(**kwargs):
     """
     from mayaku.models.backbones.convnext import ConvNeXtBackbone
 
-    return ConvNeXtBackbone(name="convnext_tiny", weights=None, weights_path=None, **kwargs)
+    return ConvNeXtBackbone(name="convnext_tiny", **kwargs)
 
 
 def test_llrd_scale_formula_on_convnext_tiny() -> None:
@@ -416,7 +416,7 @@ def test_llrd_resnet50_end_to_end_monotonic() -> None:
     # norm="BN" exposes real BatchNorm params so we exercise the
     # norm-vs-non-norm × layer_id composition (FrozenBN has no requires_grad
     # params after freeze conversion).
-    backbone = ResNetBackbone(name="resnet50", norm="BN", freeze_at=0, weights=None)
+    backbone = ResNetBackbone(name="resnet50", norm="BN", freeze_at=0)
     model = nn.ModuleDict({"backbone": backbone, "head": nn.Linear(8, 4)})
     cfg = _solver_cfg(base_lr=0.02, llrd_enabled=True, llrd_decay=0.75)
     opt = build_optimizer(model, cfg)

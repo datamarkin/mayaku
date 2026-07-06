@@ -302,7 +302,9 @@ def test_train_invalid_override_raises(toy_workspace: dict[str, Any], tmp_path: 
 # ---------------------------------------------------------------------------
 
 
-def test_train_rejects_missing_train_annotations(toy_workspace: dict[str, Any], tmp_path: Path) -> None:
+def test_train_rejects_missing_train_annotations(
+    toy_workspace: dict[str, Any], tmp_path: Path
+) -> None:
     with pytest.raises(FileNotFoundError, match="train_annotations"):
         train(
             config=toy_workspace["cfg"],

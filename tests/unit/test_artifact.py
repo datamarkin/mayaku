@@ -153,7 +153,10 @@ def test_backbone_only_artifact_rejected(tmp_path: Path) -> None:
     model = build_faster_rcnn(cfg).eval()
     out = tmp_path / "rcnn.onnx"
     export_detector(
-        model, "onnx", out, sample=build_sample(_CANVAS, _CANVAS),
+        model,
+        "onnx",
+        out,
+        sample=build_sample(_CANVAS, _CANVAS),
         sidecar=build_sidecar(cfg, ["a", "b", "c"]),
     )
     with pytest.raises(ValueError, match="backbone-only"):

@@ -15,7 +15,6 @@ from torch import nn
 
 from mayaku.config.schemas import BackboneConfig
 from mayaku.models.backbones import (
-    Backbone,
     FrozenBatchNorm2d,
     ResNetBackbone,
     ShapeSpec,
@@ -173,14 +172,6 @@ def test_build_backbone_honours_freeze_at_and_name() -> None:
     assert bb.name == "resnet101"
     assert not _trainable(bb.res4)
     assert _trainable(bb.res5)
-
-
-def test_build_backbone_invalid_weights_rejected() -> None:
-    bb = ResNetBackbone(name="resnet50")
-    assert isinstance(bb, Backbone)
-    # Direct invalid-weights path on the constructor.
-    with pytest.raises(ValueError, match="weights"):
-        ResNetBackbone(name="resnet50", weights="bogus")  # type: ignore[arg-type]
 
 
 def test_stride_in_3x3_default_matches_torchvision_layout() -> None:

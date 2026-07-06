@@ -33,9 +33,7 @@ def test_present_file_returned_without_network(
     assert download_model("mayaku-s-det") == tmp_path / "mayaku-s-det.pth"
 
 
-def test_cosmetic_pth_strips_to_same_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cosmetic_pth_strips_to_same_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # `name` and `name.pth` resolve to the identical ./name.pth — so every entry
     # point (`--weights`, `mayaku download`) accepts either spelling.
     monkeypatch.chdir(tmp_path)
