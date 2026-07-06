@@ -778,7 +778,9 @@ class SolverConfig(_BaseModel):
     # and a parallel EMA checkpoint is saved alongside the live one.
     # Default off so D2-replication training runs are bit-identical to
     # the existing 40.2-AP baseline.
-    ema_enabled: bool = False
+    # EMA weights are what eval/ship/export see (select_final_weights, EvalHook);
+    # live weights exist for resume. Off is an explicit opt-out.
+    ema_enabled: bool = True
     ema_decay: Annotated[float, Field(ge=0.0, le=1.0)] = 0.9999
     ema_tau: Annotated[float, Field(gt=0.0)] = 2000.0
 
