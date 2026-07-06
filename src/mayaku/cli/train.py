@@ -87,7 +87,6 @@ def run_train(
     image_root: Path,
     output_dir: Path,
     weights: Path | None = None,
-    pretrained_backbone: bool = False,
     device: str | None = None,
     num_epochs: int | None = None,
     log_period: int = 20,
@@ -108,20 +107,13 @@ def run_train(
     training from: model weights, optimizer state, LR-schedule position,
     and (if present) the EMA shadow are restored and training resumes at
     the checkpoint's iteration. Use the *same* config the checkpoint was
-    trained with. Mutually exclusive with ``weights`` / ``pretrained_backbone``.
+    trained with. Mutually exclusive with ``weights``.
     """
-    if pretrained_backbone and weights is not None:
+    if resume is not None and weights is not None:
         raise ValueError(
-            "--pretrained-backbone and --weights are mutually exclusive: the "
-            "first asks for ImageNet-pretrained backbone init, the second "
-            "loads a full mayaku checkpoint that already includes whatever "
-            "backbone weights it was trained from. Pick one."
-        )
-    if resume is not None and (weights is not None or pretrained_backbone):
-        raise ValueError(
-            "--resume is mutually exclusive with --weights / --pretrained-backbone: "
-            "resume restores the full training state (weights + optimizer + LR "
-            "schedule) from a checkpoint, so there is nothing left to initialise."
+            "--resume is mutually exclusive with --weights: resume restores the "
+            "full training state (weights + optimizer + LR schedule) from a "
+            "checkpoint, so there is nothing left to initialise."
         )
 
     # Track which config paths the user explicitly set. Auto-config later
@@ -174,41 +166,6 @@ def run_train(
             "iteration count to enable mid-training eval.",
             stacklevel=2,
         )
-
-    # Reject the silent caffe2-vs-torchvision mismatch that drives box AP
-    # to zero. ``pretrained_backbone=True`` loads torchvision IMAGENET1K_V2
-    # weights, which were trained with stride-2 in the 3x3 conv of
-    # res3/res4/res5 and with std-normalised inputs. The D2 model-zoo
-    # configs (``faster_rcnn_R_50_FPN_1x.yaml`` and friends) ship
-    # ``stride_in_1x1=true`` and ``pixel_std=[1, 1, 1]`` so they match
-    # caffe2's MSRA-pretrained R-50.pkl — using either of those settings
-    # with torchvision weights miscalibrates every downstream activation
-    # (~58× input-scale error or wrong feature stride), training collapses
-    # to "predict background everywhere," and eval returns AP=0. The
-    # ``*_modern.yaml`` configs already match torchvision; if you want to
-    # train from scratch with a D2-mirror config, either load D2's
-    # converted .pth via ``--weights`` or override these two fields.
-    if pretrained_backbone:
-        if cfg.model.backbone.stride_in_1x1:
-            raise ValueError(
-                "pretrained_backbone=True loads torchvision IMAGENET1K_V2 weights, "
-                "but the config has model.backbone.stride_in_1x1=true (caffe2/D2 "
-                "layout). The two are not weight-compatible and training will "
-                "silently collapse to AP=0. Either set stride_in_1x1=false in the "
-                "config (matches torchvision; what the *_modern.yaml configs do), "
-                "or drop --pretrained-backbone and load D2's R-50.pkl-converted "
-                "checkpoint via --weights instead."
-            )
-        if tuple(cfg.model.pixel_std) == (1.0, 1.0, 1.0):
-            raise ValueError(
-                "pretrained_backbone=True loads torchvision IMAGENET1K_V2 weights, "
-                "but the config has model.pixel_std=[1, 1, 1] (caffe2-style mean-"
-                "only normalisation). Torchvision weights expect std-normalised "
-                "inputs; pairing them with std=1 inflates input magnitudes ~58x "
-                "and triggers the same silent collapse as a stride-layout "
-                "mismatch. Set pixel_std=[58.395, 57.120, 57.375] (the *_modern."
-                "yaml convention) when training with --pretrained-backbone."
-            )
 
     # Bring up the distributed context BEFORE loading the dataset: the
     # per-node shared loader (below) broadcasts the parsed dataset over the
@@ -381,27 +338,26 @@ def run_train(
     # after auto-config so the freeze_at being checked is the one that
     # will actually train.
     #
-    # ``cfg.model.backbone.weights_path`` is loaded inside the backbone
-    # __init__ before ``_apply_freeze``, so it counts as a real init source
-    # here even though it isn't fed through the top-level ``weights`` path.
+    # ``weights`` (a mayaku checkpoint loaded on top of the architecture-only
+    # backbone) is the only live init source. ``weights_path`` no longer seeds
+    # anything — the backbone is architecture-only — so this term is vestigial
+    # and goes away with the field in the weights_path cleanup; it's kept for
+    # now only so a config still carrying the field behaves as it did before.
     backbone_initialized = (
-        pretrained_backbone or weights is not None or cfg.model.backbone.weights_path is not None
+        weights is not None or cfg.model.backbone.weights_path is not None
     )
     if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
         warnings.warn(
             f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
             "is freezing the early stages. Random-init frozen features cannot "
             "be recovered downstream and training will not converge — your "
-            "model will detect nothing. Pass --pretrained-backbone, or set "
+            "model will detect nothing. Warm-start via --weights, or set "
             "model.backbone.freeze_at=0 in the YAML for true from-scratch "
             "training.",
             stacklevel=2,
         )
 
-    model = build_detector(
-        cfg,
-        backbone_weights="DEFAULT" if pretrained_backbone else None,
-    ).to(dev.torch)
+    model = build_detector(cfg).to(dev.torch)
     # ``resume`` restores the exact prior training state; ``weights`` is a
     # warm-start that re-inits the schedule. They're mutually exclusive
     # (validated above). ``start_iter`` drives the trainer + LR fast-forward.
@@ -740,7 +696,6 @@ def run_train_worker(
     image_root: Path,
     output_dir: Path,
     weights: Path | None,
-    pretrained_backbone: bool,
     device: str | None,
     num_epochs: int | None,
     log_period: int,
@@ -761,7 +716,6 @@ def run_train_worker(
         image_root=image_root,
         output_dir=output_dir,
         weights=weights,
-        pretrained_backbone=pretrained_backbone,
         device=device,
         num_epochs=num_epochs,
         log_period=log_period,
