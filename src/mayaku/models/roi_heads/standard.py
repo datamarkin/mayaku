@@ -354,7 +354,7 @@ def build_standard_roi_heads(
     *,
     mask_head_cfg: ROIMaskHeadConfig | None = None,
     keypoint_head_cfg: ROIKeypointHeadConfig | None = None,
-    test_detections_per_image: int = 100,
+    test_detections_per_image: int = 300,
 ) -> StandardROIHeads:
     """Build a fully-wired :class:`StandardROIHeads` from typed configs.
 

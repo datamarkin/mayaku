@@ -791,7 +791,10 @@ class SolverConfig(_BaseModel):
 
 
 class TestConfig(_BaseModel):
-    detections_per_image: Annotated[int, Field(gt=0)] = 100
+    # Total per-image budget across ALL classes (COCOeval's maxDets=100 is per
+    # category, and NMS-free decode can spend several slots on one object) —
+    # 100 starves recall on dense/multi-class scenes.
+    detections_per_image: Annotated[int, Field(gt=0)] = 300
     # Eval cadence in EPOCHS (resolved to iterations against the dataset size at
     # train time, like ``num_epochs``). ``0`` disables periodic eval. Epoch-
     # relative so it fires the same number of times regardless of dataset size.

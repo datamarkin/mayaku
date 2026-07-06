@@ -54,7 +54,7 @@ class UniQuery(nn.Module):
         weight_dict: dict[str, float],
         feature_keys: Sequence[str],
         score_thresh: float = 0.05,
-        detections_per_image: int = 100,
+        detections_per_image: int = 300,
         inference_num_stages: int | None = None,
         inference_num_proposals: int | None = None,
         mask_head: UniQueryDynamicMaskHead | None = None,
