@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in checkpoints:
         try:
             print(f"  {strip_checkpoint(path, verify=args.verify)}")
-        except Exception as exc:  # noqa: BLE001 — report and continue the batch
+        except Exception as exc:
             failures += 1
             print(f"  {path.name}: FAILED — {exc}", file=sys.stderr)
 

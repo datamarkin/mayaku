@@ -24,7 +24,7 @@ from mayaku.engine.distributed import (
     resolve_ddp_device,
     synchronize,
 )
-from mayaku.engine.ema import EMAHook, ModelEMA
+from mayaku.engine.ema import EMAHook, ModelEMA, clamp_ema_for_run_length
 from mayaku.engine.evaluator import (
     COCOEvaluator,
     DatasetEvaluator,
@@ -54,6 +54,7 @@ __all__ = [
     "all_reduce_dict",
     "build_lr_scheduler",
     "build_optimizer",
+    "clamp_ema_for_run_length",
     "create_ddp_model",
     "get_rank",
     "get_world_size",

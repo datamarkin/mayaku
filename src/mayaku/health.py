@@ -1,12 +1,15 @@
 """Dataset health check — one scan of one split, returned as a plain dict.
 
 ``health_check`` reuses the same primitive the trainer's auto-config runs
-on (:func:`mayaku.tuning.analyze_dataset`), so the numbers a user inspects
-here are exactly the ones that drive the recipe. It takes one
-``(annotations, images)`` pair — the same split unit you pass to
-:func:`mayaku.train` — so run it once per split you want to inspect.
-Output is JSON-friendly (dicts / lists / scalars) so callers can print it,
-log it, or feed it straight into auto-config.
+on (:func:`mayaku.tuning.analyze_dataset`). Box stats here are measured in
+the default short-edge resize frame; a letterbox training run (the mayaku
+family default) measures in its resolved canvas frame instead, so absolute
+pixel numbers can differ from what drives the recipe — distributions and
+warnings are the same. It takes one ``(annotations, images)`` pair — the
+same split unit you pass to :func:`mayaku.train` — so run it once per
+split you want to inspect. Output is JSON-friendly (dicts / lists /
+scalars) so callers can print it, log it, or feed it straight into
+auto-config.
 
     >>> import mayaku
     >>> report = mayaku.health_check(                      # doctest: +SKIP

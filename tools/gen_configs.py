@@ -196,7 +196,9 @@ def render(tier: Tier, task: str) -> str:
         "  ema_tau: 2000.0\n"
         "\n"
         "test:\n"
-        "  detections_per_image: 100\n"
+        # This value is DEFINED as "the schema default" (the tuned budget lives
+        # there), so source it — a hardcoded copy would drift silently.
+        f"  detections_per_image: {_detections_per_image_default()}\n"
         "  eval_period: 5000\n"
         "  precise_bn_enabled: false\n"
         "\n"
@@ -209,6 +211,13 @@ def render(tier: Tier, task: str) -> str:
         "auto_config:\n"
         "  enabled: false\n"
     )
+
+
+def _detections_per_image_default() -> int:
+    # Deferred import, same as _validate: keep `--help` free of the mayaku import.
+    from mayaku.config.schemas import TestConfig
+
+    return TestConfig().detections_per_image
 
 
 def _validate(text: str) -> None:

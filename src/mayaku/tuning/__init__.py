@@ -2,9 +2,10 @@
 
 This package powers the :class:`mayaku.config.AutoConfig` flow: a
 single read-only pass over the COCO dataset emits a set of fine-tune
-recipe overrides (anchor sizes/ARs, base_lr, max_iter, augmentation
-toggles, sampler choice). Each module is a pure function, callable
-independently and unit-tested in isolation.
+recipe overrides (anchor sizes/ARs, epoch budget, augmentation
+strength, sampler choice — never architecture-tuned hyperparameters;
+see :data:`mayaku.tuning.recipe.ARCHITECTURE_TUNED_PATHS`). Each module
+is a pure function, callable independently and unit-tested in isolation.
 
 Public surface:
 

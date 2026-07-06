@@ -59,6 +59,7 @@ from mayaku.engine import (
     SimpleTrainer,
     build_lr_scheduler,
     build_optimizer,
+    clamp_ema_for_run_length,
     create_ddp_model,
     get_rank,
     get_world_size,
@@ -215,9 +216,24 @@ def run_train(
     # loader, then broadcast to the node's other ranks. Both feed the model
     # build / sampler below, so they must be identical across ranks.
     def _derive(meta: Any, dicts: list[dict[str, Any]]) -> dict[str, Any]:
-        # Dataset-aware auto-config. The recipe layer fills in fine-tune-
-        # relevant heuristics (anchor sizes/ARs, base_lr, schedule, mosaic /
-        # mixup probs, sampler choice) that the user did NOT set explicitly.
+        # Aspect-aware letterbox canvas: ALWAYS resolved from *this* run's data
+        # (uniform → rectangle, diverse → square) under the size_budget² budget.
+        # Resolved FIRST (a light dims-only pass) so the box statistics that
+        # drive anchor k-means below are measured in the frame the pipeline
+        # actually produces, not the legacy short-edge-resize frame.
+        # Re-resolving every train is what lets fine-tuning adapt: a 1:1 base model
+        # fine-tuned on 16:9 data gets a 16:9 canvas, not the base's inherited
+        # square. ``canvas_hw`` is a deploy artifact of training, not a user input.
+        canvas: tuple[int, int] | None = None
+        canvas_use = 1.0
+        if cfg.input.resize_mode == "letterbox":
+            median, uniform = dataset_aspect(dicts)
+            canvas, canvas_use = resolve_canvas(cfg.input.size_budget, median, uniform)
+        # Dataset-aware auto-config. The recipe layer fills in the dataset-
+        # structural facts (anchors for anchor-consuming architectures, sampler
+        # choice) and run-scoped budgets (schedule length, mosaic/mixup probs)
+        # that the user did NOT set explicitly — never architecture-tuned
+        # hyperparameters, which the config/sidecar owns (see recipe.py).
         # (num_classes is handled separately in the body — it's structural, not
         # a heuristic.) Tiny datasets (< MIN_IMAGES_FOR_AUTO_CONFIG) and
         # ``auto_config.enabled = False`` both short-circuit with no overrides.
@@ -229,6 +245,7 @@ def run_train(
                 num_classes=len(meta.thing_classes),
                 resize_short_edge=cfg.input.min_size_test,
                 resize_max_edge=cfg.input.max_size_test,
+                letterbox_canvas=canvas,
             )
             proposed = derive_overrides(stats, cfg)
             overrides = filter_unset(proposed, user_set_paths) or None
@@ -242,21 +259,6 @@ def run_train(
             rfs = RepeatFactorTrainingSampler.repeat_factors_from_category_frequency(
                 dicts, repeat_thresh=dataloader.repeat_threshold
             )
-        # Aspect-aware letterbox canvas: ALWAYS resolved from *this* run's data
-        # (uniform → rectangle, diverse → square) under the size_budget² budget.
-        # Re-resolving every train is what lets fine-tuning adapt: a 1:1 base model
-        # fine-tuned on 16:9 data gets a 16:9 canvas, not the base's inherited
-        # square. ``canvas_hw`` is a deploy artifact of training, not a user input.
-        canvas: tuple[int, int] | None = None
-        canvas_use = 1.0
-        if cfg.input.resize_mode == "letterbox":
-            # Reuse the auto-config stats' aspect profile when it already ran;
-            # else a light dims-only pass (avoids re-scanning the dicts).
-            if stats is not None:
-                median, uniform = stats.aspect_median, stats.is_uniform_aspect
-            else:
-                median, uniform = dataset_aspect(dicts)
-            canvas, canvas_use = resolve_canvas(cfg.input.size_budget, median, uniform)
         return {
             "overrides": overrides,
             "stats": stats,
@@ -286,13 +288,15 @@ def run_train(
     )
     assert derived is not None
     if derived["overrides"]:
-        cfg = merge_overrides(cfg, derived["overrides"])
+        # Log BEFORE merging so the report can show old → new for every
+        # override — tuned-value changes must be visible, never silent.
         if is_main_process():
-            _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths)
+            _log_auto_config_report(derived["stats"], derived["overrides"], user_set_paths, cfg)
+        cfg = merge_overrides(cfg, derived["overrides"])
 
     # When auto-config is on (the fine-tune / API default), the class count is a
     # STRUCTURAL fact of the dataset — derive it from the COCO categories
-    # regardless of dataset size (unlike the LR/anchor/schedule heuristics, which
+    # regardless of dataset size (unlike the anchor/schedule heuristics, which
     # need MIN_IMAGES_FOR_AUTO_CONFIG worth of data). This is what makes a
     # weights-only fine-tune on a new class count reinit the head: the rebuilt
     # head is sized to the new dataset, so the old class-specific layers
@@ -334,9 +338,7 @@ def run_train(
     # Surface the most common silent footgun: freezing early backbone stages
     # at random init (the schema's freeze_at=2 default assumes a pretrained
     # backbone). Warn here rather than after model construction so the
-    # message lands before the slow torch.load / weight download. Runs
-    # after auto-config so the freeze_at being checked is the one that
-    # will actually train.
+    # message lands before the slow torch.load / weight download.
     #
     # ``weights`` (a mayaku checkpoint loaded on top of the architecture-only
     # backbone) is the only live init source. ``weights_path`` no longer seeds
@@ -638,10 +640,22 @@ def run_train(
         # from the sibling ``ema/`` checkpoint so the averaging history isn't
         # lost; if it's missing (e.g. EMA was off in the prior run) the shadow
         # falls back to the restored live weights, which is still correct.
+        # Run-length clamp — see clamp_ema_for_run_length for the two
+        # short-run failure modes it prevents.
+        ema_decay, ema_tau = clamp_ema_for_run_length(
+            cfg.solver.ema_decay, cfg.solver.ema_tau, max_iter
+        )
+        if is_main_process() and (ema_decay, ema_tau) != (cfg.solver.ema_decay, cfg.solver.ema_tau):
+            print(
+                f"[train] EMA clamped to run length ({max_iter} iters): "
+                f"decay {cfg.solver.ema_decay:g} -> {ema_decay:.6g}, "
+                f"tau {cfg.solver.ema_tau:g} -> {ema_tau:g}",
+                flush=True,
+            )
         ema = ModelEMA(
             unwrapped_model,
-            decay=cfg.solver.ema_decay,
-            tau=cfg.solver.ema_tau,
+            decay=ema_decay,
+            tau=ema_tau,
             updates=start_iter,
         )
         if resume_ckpt is not None and resume is not None:
@@ -778,20 +792,23 @@ def _log_canvas(canvas: tuple[int, int], use: float) -> None:
 
 
 def _log_auto_config_report(
-    stats: Any, applied: Mapping[str, Any], user_set_paths: set[str]
+    stats: Any, applied: Mapping[str, Any], user_set_paths: set[str], cfg_before: MayakuConfig
 ) -> None:
     """Print a scannable summary of what auto-config decided.
 
-    Goes through stdout so it sits next to the existing ``[train]``
-    lines from :func:`_load_for_finetune`.
+    Every override is shown as ``old -> new`` against ``cfg_before`` (the
+    pre-merge config) so a recipe value replacing a tuned one is visible
+    in the run log, never silent. Goes through stdout so it sits next to
+    the existing ``[train]`` lines from :func:`_load_for_finetune`.
     """
     print(
         f"[auto-config] N_train={stats.num_images} num_classes={stats.num_classes} "
         f"num_boxes={stats.num_boxes} imbalance={stats.class_imbalance:.1f}x",
         flush=True,
     )
+    before = dict(walk_leaves(cfg_before.model_dump(mode="json")))
     for path, value in walk_leaves(applied):
-        print(f"[auto-config] {path} -> {value!r}", flush=True)
+        print(f"[auto-config] {path}: {before.get(path, '<unset>')!r} -> {value!r}", flush=True)
     if user_set_paths:
         kept = sorted(
             p

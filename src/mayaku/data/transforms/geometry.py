@@ -21,7 +21,13 @@ from PIL import Image
 
 from mayaku.data.transforms.base import Transform
 
-__all__ = ["HFlipTransform", "LetterboxTransform", "ResizeTransform", "letterbox"]
+__all__ = [
+    "HFlipTransform",
+    "LetterboxTransform",
+    "ResizeTransform",
+    "letterbox",
+    "letterbox_scale",
+]
 
 _F32 = npt.NDArray[np.float32]
 
@@ -120,6 +126,15 @@ class HFlipTransform(Transform):
         return out
 
 
+def letterbox_scale(h: int, w: int, out_h: int, out_w: int) -> float:
+    """Fit-inside scale of an aspect-preserving letterbox: the largest single
+    factor keeping an ``(h, w)`` image within BOTH canvas dims. The one
+    definition of the pipeline's letterbox geometry — shared by
+    :class:`LetterboxTransform` and the auto-config dataset analyser so box
+    statistics are measured with exactly the transform's rule."""
+    return min(out_h / h, out_w / w)
+
+
 class LetterboxTransform(Transform):
     """Aspect-preserving resize into a fixed canvas, **centred**.
 
@@ -159,10 +174,9 @@ class LetterboxTransform(Transform):
         self.w = w
         self.out_h = out_h
         self.out_w = out_w
-        # Fit-inside scale: the largest single (aspect-preserving) factor keeping
-        # the image within BOTH canvas dims. For a square this reduces to
-        # ``size / max(h, w)``; a single scalar keeps the inverse exact.
-        self.scale = min(out_h / h, out_w / w)
+        # For a square canvas this reduces to ``size / max(h, w)``; a single
+        # scalar keeps the inverse exact.
+        self.scale = letterbox_scale(h, w, out_h, out_w)
         # Clamp against float rounding so the resized image never exceeds the canvas.
         self.new_h = min(round(h * self.scale), out_h)
         self.new_w = min(round(w * self.scale), out_w)

@@ -841,19 +841,25 @@ class AutoConfig(_BaseModel):
       match the data), unlike the heuristics below which need
       ``MIN_IMAGES_FOR_AUTO_CONFIG`` worth of data.
     * ``model.anchor_generator.sizes`` / ``aspect_ratios`` — k-means on
-      GT box √area and w/h (skipped if <50 boxes)
-    * ``model.backbone.freeze_at`` — from dataset size bucket
-    * ``solver.base_lr`` / ``num_epochs`` / ``ema_enabled`` / ``ema_decay`` /
-      ``ema_tau`` — from dataset size bucket, anchored to the scratch recipe
-      and applying both batch-scaling and the 10× fine-tune drop
+      GT box √area and w/h, measured in the pipeline's actual input frame;
+      only for anchor-consuming meta-architectures (the R-CNN family),
+      skipped if <50 boxes
+    * ``solver.num_epochs`` — a target-total-steps budget resolved to
+      epochs, so total training work is monotone in dataset size
     * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
       dataset size bucket
     * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to
       ``RepeatFactorTrainingSampler`` when class-imbalance ratio > 10
 
-    Explicit user values always win — auto-config only fills gaps. The
-    resolved config is dumped to ``output_dir/config.yaml`` for
-    reproducibility.
+    Architecture-tuned hyperparameters — ``solver.base_lr``, the EMA
+    constants, ``model.backbone.freeze_at`` — are NEVER auto-overridden:
+    the config that travels with the weights owns them. Auto-config
+    adapts the run to the dataset; it does not re-tune the model (the
+    contract is pinned in ``mayaku.tuning.recipe.ARCHITECTURE_TUNED_PATHS``).
+
+    Explicit user values always win — auto-config only fills gaps. Every
+    applied override is logged as ``old -> new``, and the resolved config
+    is dumped to ``output_dir/config.yaml`` for reproducibility.
 
     Set ``enabled: false`` for replication runs where the config's
     defaults are intentional (e.g. the bundled COCO 1x/3x recipes), or

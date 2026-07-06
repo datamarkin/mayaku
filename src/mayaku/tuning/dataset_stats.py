@@ -5,10 +5,12 @@ Pure-function analyser: given the output of
 :class:`mayaku.data.catalog.Metadata`, returns a :class:`DatasetStats`
 record capturing everything the recipe layer needs.
 
-Box statistics are computed in *resized* image space — that is, after
-the canonical short-edge resize that ``ResizeShortestEdge`` applies
-during training. K-means clusters on raw input-pixel areas would produce
-anchor scales that don't match the model's actual input distribution.
+Box statistics are computed in *resized* image space — the frame the
+pipeline actually produces: the aspect-preserving letterbox scale when a
+``letterbox_canvas`` is given, else the canonical short-edge resize that
+``ResizeShortestEdge`` applies. K-means clusters on any other frame
+would produce anchor scales that don't match the model's actual input
+distribution.
 """
 
 from __future__ import annotations
@@ -20,12 +22,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from mayaku.data.transforms.augmentation import compute_resized_hw
+from mayaku.data.transforms.geometry import letterbox_scale
 
 __all__ = ["DatasetStats", "analyze_dataset", "dataset_aspect"]
 
 # Robust aspect spread (p90/p10) at or below this → the dataset is "one aspect"
-# and a fixed (H, W) canvas beats square letterbox. The single source for both
-# the health report (DatasetStats.is_uniform_aspect) and the train-time resolver.
+# and a fixed (H, W) canvas beats square letterbox. Consumed by the train-time
+# canvas resolver via :func:`dataset_aspect`.
 ASPECT_UNIFORMITY_THRESHOLD = 1.10
 
 
@@ -68,9 +71,6 @@ class DatasetStats:
     aspect_ratios: tuple[float, ...]
     median_image_short_edge: int
     median_image_long_edge: int
-    # Per-image aspect ``W / H`` (original pixels) — drives aspect-aware input
-    # sizing (a uniform-aspect dataset → a fixed (H, W) canvas instead of square).
-    image_aspects: tuple[float, ...] = ()
     # Hygiene counts — boxes/images the analyser skipped, surfaced
     # instead of silently dropped so a health report can flag bad labels.
     num_degenerate_boxes: int = 0
@@ -93,24 +93,6 @@ class DatasetStats:
         lo = max(1, min(counts))
         return max(counts) / lo
 
-    @property
-    def aspect_median(self) -> float:
-        """Median image aspect ``W / H`` (1.0 for an empty dataset)."""
-        return float(statistics.median(self.image_aspects)) if self.image_aspects else 1.0
-
-    @property
-    def aspect_spread(self) -> float:
-        """Robust spread of image aspect — ``p90 / p10``. 1.0 = all identical;
-        grows with diversity. Percentiles (not min/max) so a few outliers — one
-        odd image, a 5% minority — never flip the result."""
-        return _aspect_spread(self.image_aspects)
-
-    @property
-    def is_uniform_aspect(self) -> bool:
-        """True when the dataset is effectively one aspect ratio → a fixed
-        ``(H, W)`` canvas beats square letterbox (no padding waste)."""
-        return self.aspect_spread <= ASPECT_UNIFORMITY_THRESHOLD
-
 
 def analyze_dataset(
     dataset_dicts: Sequence[dict[str, Any]],
@@ -118,6 +100,7 @@ def analyze_dataset(
     num_classes: int,
     resize_short_edge: int = 800,
     resize_max_edge: int = 1333,
+    letterbox_canvas: tuple[int, int] | None = None,
 ) -> DatasetStats:
     """Compute :class:`DatasetStats` from loaded dataset dicts.
 
@@ -128,6 +111,11 @@ def analyze_dataset(
         resize_short_edge: Short-edge target of the canonical resize.
             Defaults to 800 (the COCO / Mayaku default).
         resize_max_edge: Max long-edge after resize. Defaults to 1333.
+        letterbox_canvas: The resolved deploy ``(H, W)`` canvas when the
+            pipeline letterboxes. When given, box stats use the
+            aspect-preserving letterbox scale ``min(H/h, W/w)`` instead
+            of the short-edge rule, so they're measured in the frame
+            the model actually sees.
 
     Returns:
         A :class:`DatasetStats` with all per-image / per-box stats.
@@ -145,7 +133,6 @@ def analyze_dataset(
 
     short_edges: list[int] = []
     long_edges: list[int] = []
-    image_aspects: list[float] = []
     sqrt_areas: list[float] = []
     aspect_ratios: list[float] = []
     # Image-level — same semantics as RepeatFactorTrainingSampler so a
@@ -159,12 +146,14 @@ def analyze_dataset(
         w = int(d["width"])
         short_edges.append(min(h, w))
         long_edges.append(max(h, w))
-        image_aspects.append(w / h)
 
-        # Match ResizeShortestEdge's target size exactly so box stats are
-        # in the same space the model will see.
-        new_h, _ = compute_resized_hw(h, w, resize_short_edge, resize_max_edge)
-        scale = new_h / h
+        # Match the pipeline's actual resize exactly so box stats are in
+        # the same space the model will see.
+        if letterbox_canvas is not None:
+            scale = letterbox_scale(h, w, *letterbox_canvas)
+        else:
+            new_h, _ = compute_resized_hw(h, w, resize_short_edge, resize_max_edge)
+            scale = new_h / h
 
         annotations = d.get("annotations", ())
         if not annotations:
@@ -200,7 +189,6 @@ def analyze_dataset(
         class_counts=dict(class_image_count),
         sqrt_areas=tuple(sqrt_areas),
         aspect_ratios=tuple(aspect_ratios),
-        image_aspects=tuple(image_aspects),
         median_image_short_edge=int(statistics.median(short_edges)),
         median_image_long_edge=int(statistics.median(long_edges)),
         num_degenerate_boxes=num_degenerate,

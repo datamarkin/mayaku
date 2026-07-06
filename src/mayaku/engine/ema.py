@@ -39,7 +39,38 @@ from mayaku.engine.callbacks import _BaseHook
 if TYPE_CHECKING:
     from mayaku.engine.trainer import TrainerBase
 
-__all__ = ["EMAHook", "ModelEMA"]
+__all__ = ["EMA_WINDOW_FRACTION", "EMAHook", "ModelEMA", "clamp_ema_for_run_length"]
+
+# Fraction of the run that the EMA averaging window may span. 0.1 keeps
+# long runs untouched (window clamp only bites when 0.1·max_iter is
+# shorter than the configured 1/(1-decay) window) while giving short
+# fine-tunes a real average over their final stretch.
+EMA_WINDOW_FRACTION = 0.1
+
+
+def clamp_ema_for_run_length(
+    decay: float, tau: float, max_iter: int, *, fraction: float = EMA_WINDOW_FRACTION
+) -> tuple[float, float]:
+    """Clamp ``(decay, tau)`` so the EMA is a real average within ``max_iter``.
+
+    The config's asymptotic ``decay``/``tau`` are tuned for long
+    pretrains. On a short fine-tune two failure modes appear:
+
+    * ``tau >> max_iter`` — the decay ramp never finishes: effective
+      decay stays tiny and the shadow is a near-copy of the live weights
+      (no averaging benefit).
+    * averaging window ``1/(1-decay) >> remaining steps`` — once the
+      ramp *does* finish, the shadow barely moves and freezes near the
+      weights from ramp-completion time. This is why clamping tau alone
+      would be worse than not clamping at all.
+
+    Both are cured by sizing the window to a fraction of the run:
+    ``window = fraction·max_iter``, ``decay <= 1 - 1/window``,
+    ``tau <= window``. Runs long enough that the configured values
+    already fit are returned unchanged.
+    """
+    window = max(1.0, fraction * max_iter)
+    return min(decay, 1.0 - 1.0 / window), min(tau, window)
 
 
 class ModelEMA:

@@ -26,7 +26,14 @@ from torch import nn
 from mayaku.config.schemas import SolverConfig
 from mayaku.models.backbones._frozen_bn import FrozenBatchNorm2d
 
-__all__ = ["build_lr_scheduler", "build_optimizer", "resolve_schedule"]
+__all__ = ["WARMUP_FLOOR_ITERS", "build_lr_scheduler", "build_optimizer", "resolve_schedule"]
+
+# Minimum warmup length. warmup_fraction of a tiny fine-tune is a
+# handful of iterations straight into the full LR — enough to blow up a
+# pretrained backbone's early features. Floored here (not in the config)
+# so every schedule benefits; capped at a quarter of the run so short
+# schedules still spend most steps at the real LR.
+WARMUP_FLOOR_ITERS = 100
 
 logger = logging.getLogger(__name__)
 
@@ -419,15 +426,19 @@ def resolve_schedule(
     ``global_batch`` is the cross-rank effective batch
     (:meth:`SolverConfig.effective_batch`); one epoch is
     ``ceil(num_images / global_batch)`` optimizer steps. Warmup is
-    ``warmup_fraction`` of the total, clamped to ``< max_iter``.
-    ``iters_per_epoch`` is returned so callers can resolve epoch-based
-    cadences (checkpoint / eval periods) against the same definition rather
-    than re-deriving it. Called once in :func:`mayaku.cli.train.run_train`
-    after the dataset is loaded.
+    ``warmup_fraction`` of the total, floored at
+    ``min(WARMUP_FLOOR_ITERS, max_iter // 4)`` and clamped to
+    ``< max_iter``. ``iters_per_epoch`` is returned so callers can resolve
+    epoch-based cadences (checkpoint / eval periods) against the same
+    definition rather than re-deriving it. Called once in
+    :func:`mayaku.cli.train.run_train` after the dataset is loaded.
     """
+    # Same epoch definition as derive_overrides' step budget (tuning/recipe.py)
+    # — keep the formulas in sync; recipe doesn't import this to stay torch-free.
     iters_per_epoch = max(1, math.ceil(num_images / max(1, global_batch)))
     max_iter = max(2, num_epochs * iters_per_epoch)
-    warmup_iters = min(max_iter - 1, round(warmup_fraction * max_iter))
+    warmup_floor = min(WARMUP_FLOOR_ITERS, max_iter // 4)
+    warmup_iters = min(max_iter - 1, max(round(warmup_fraction * max_iter), warmup_floor))
     return max_iter, warmup_iters, iters_per_epoch
 
 
