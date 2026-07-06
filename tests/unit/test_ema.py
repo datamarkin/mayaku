@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from mayaku.engine.ema import EMAHook, ModelEMA
+from mayaku.engine.ema import EMAHook, ModelEMA, clamp_ema_for_run_length
 
 
 def _tiny_model() -> nn.Module:
@@ -197,3 +197,32 @@ def test_invalid_tau_raises(bad: float) -> None:
 def test_invalid_updates_raises() -> None:
     with pytest.raises(ValueError, match="updates"):
         ModelEMA(_tiny_model(), updates=-5)
+
+
+# ---------------------------------------------------------------------------
+# clamp_ema_for_run_length
+# ---------------------------------------------------------------------------
+
+
+def test_clamp_noop_on_long_runs() -> None:
+    # A COCO-scale run: both configured values fit inside the window.
+    assert clamp_ema_for_run_length(0.9999, 2000.0, 200_000) == (0.9999, 2000.0)
+
+
+def test_clamp_sizes_window_to_short_runs() -> None:
+    # 500-step fine-tune, fraction 0.1 → window 50: decay gives a ~50-step
+    # average, tau finishes the ramp early enough for it to matter.
+    decay, tau = clamp_ema_for_run_length(0.9999, 2000.0, 500)
+    assert tau == 50.0
+    assert decay == pytest.approx(1.0 - 1.0 / 50.0)
+
+
+def test_clamp_never_raises_configured_values() -> None:
+    # A config already tuned tighter than the window is left alone.
+    assert clamp_ema_for_run_length(0.9, 10.0, 500) == (0.9, 10.0)
+
+
+def test_clamped_values_are_valid_ema_params() -> None:
+    # Degenerate 2-iter run must still construct: decay >= 0, tau > 0.
+    decay, tau = clamp_ema_for_run_length(0.9999, 2000.0, 2)
+    ModelEMA(_tiny_model(), decay=decay, tau=tau)

@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import pytest
+import itertools
+import math
 
 from mayaku.config import MayakuConfig
 from mayaku.tuning.dataset_stats import DatasetStats
 from mayaku.tuning.recipe import (
+    ARCHITECTURE_TUNED_PATHS,
+    MAX_FINETUNE_EPOCHS,
     MIN_BOXES_FOR_ANCHOR_TUNE,
+    MIN_FINETUNE_EPOCHS,
     MIN_IMAGES_FOR_AUTO_CONFIG,
     collect_set_paths,
     derive_overrides,
     filter_unset,
     size_bucket,
+    walk_leaves,
 )
 
 # ---------------------------------------------------------------------------
@@ -33,15 +38,6 @@ def test_size_bucket_boundaries() -> None:
     assert size_bucket(49_999).name == "l"
     assert size_bucket(50_000).name == "xl"
     assert size_bucket(1_000_000).name == "xl"
-
-
-def test_size_bucket_lr_fits_the_documented_table() -> None:
-    # The recipe table is the source of truth for the auto-config LR
-    # math — pin the values so the docstring derivation stays correct.
-    assert size_bucket(100).base_lr == pytest.approx(5e-4)
-    assert size_bucket(1_000).base_lr == pytest.approx(1e-3)
-    assert size_bucket(3_000).base_lr == pytest.approx(1e-3)
-    assert size_bucket(10_000).base_lr == pytest.approx(2e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +70,39 @@ def _stats(
     )
 
 
+def _uniquery_cfg() -> MayakuConfig:
+    return MayakuConfig.model_validate(
+        {"model": {"meta_architecture": "uniquery", "uniquery_head": {}}}
+    )
+
+
+# ---------------------------------------------------------------------------
+# The auto-config contract: never re-tune the model
+# ---------------------------------------------------------------------------
+
+
+def test_derive_overrides_never_emits_architecture_tuned_fields() -> None:
+    # THE invariant: the recipe adapts the run to the dataset; the config
+    # that travels with the weights owns base_lr / freeze_at / EMA. A
+    # table edit that re-adds any of these must fail here.
+    for cfg in (MayakuConfig(), _uniquery_cfg()):
+        for n in (100, 1_500, 10_000, 100_000):
+            overrides = derive_overrides(_stats(num_images=n), cfg)
+            emitted = {p for p, _ in walk_leaves(overrides)}
+            assert not emitted & ARCHITECTURE_TUNED_PATHS, (
+                f"recipe emitted architecture-tuned field(s) "
+                f"{sorted(emitted & ARCHITECTURE_TUNED_PATHS)} at n={n}"
+            )
+
+
+def test_anchor_overrides_gated_to_anchor_consuming_archs() -> None:
+    # UniQuery has no anchor generator — emitting anchors would merge
+    # validly and pollute the checkpoint sidecar.
+    stats = _stats(num_boxes=MIN_BOXES_FOR_ANCHOR_TUNE)
+    assert "anchor_generator" not in derive_overrides(stats, _uniquery_cfg()).get("model", {})
+    assert "anchor_generator" in derive_overrides(stats, MayakuConfig())["model"]
+
+
 def test_derive_overrides_empty_for_tiny_datasets() -> None:
     stats = _stats(num_images=MIN_IMAGES_FOR_AUTO_CONFIG - 1, num_boxes=5)
     assert derive_overrides(stats, MayakuConfig()) == {}
@@ -102,16 +131,7 @@ def test_derive_overrides_sets_anchors_when_enough_boxes() -> None:
 def test_derive_overrides_skips_anchors_below_min_boxes() -> None:
     stats = _stats(num_boxes=MIN_BOXES_FOR_ANCHOR_TUNE - 1)
     overrides = derive_overrides(stats, MayakuConfig())
-    assert "anchor_generator" not in overrides["model"]
-
-
-def test_derive_overrides_scales_lr_with_ims_per_batch() -> None:
-    # Base config has ims_per_batch=16 (D2 default). Bucket base_lr is
-    # anchored at bs=8, so at bs=16 it should double.
-    cfg = MayakuConfig()  # ims_per_batch=16
-    stats = _stats(num_images=1_500)  # bucket "s" → 1e-3 at bs=8
-    overrides = derive_overrides(stats, cfg)
-    assert overrides["solver"]["base_lr"] == pytest.approx(1e-3 * 2.0)
+    assert "anchor_generator" not in overrides.get("model", {})
 
 
 def test_derive_overrides_emits_epoch_budget() -> None:
@@ -122,6 +142,48 @@ def test_derive_overrides_emits_epoch_budget() -> None:
     assert overrides["solver"]["num_epochs"] > 0
     assert "max_iter" not in overrides["solver"]
     assert "steps" not in overrides["solver"]
+
+
+def test_epoch_budget_total_steps_monotone_in_dataset_size() -> None:
+    # The old per-bucket epoch table trained a 515-image set for FEWER
+    # total steps than a 478-image one (a 34% cliff at the 500 boundary).
+    # Total work must be non-decreasing in dataset size, up to the
+    # ±one-epoch wobble that ceil() rounding makes unavoidable.
+    cfg = MayakuConfig()  # effective batch 16
+    batch = cfg.solver.effective_batch()
+
+    def total_steps(n: int) -> int:
+        epochs = derive_overrides(_stats(num_images=n), cfg)["solver"]["num_epochs"]
+        return epochs * math.ceil(n / batch)
+
+    sizes = (100, 478, 500, 515, 2_000, 5_000, 50_000)
+    steps = [total_steps(n) for n in sizes]
+    for (n_prev, s_prev), (n_next, s_next) in itertools.pairwise(zip(sizes, steps)):
+        one_epoch = math.ceil(n_next / batch)
+        assert s_next >= s_prev - one_epoch, (
+            f"total steps dropped across {n_prev}->{n_next} images: {s_prev}->{s_next}"
+        )
+
+
+def test_epoch_budget_clamped_at_both_ends() -> None:
+    cfg = MayakuConfig()
+    # Tiny dataset: target steps would demand hundreds of epochs → MAX.
+    tiny = derive_overrides(_stats(num_images=50), cfg)["solver"]["num_epochs"]
+    assert tiny == MAX_FINETUNE_EPOCHS
+    # Huge dataset: one epoch already exceeds the target → MIN.
+    huge = derive_overrides(_stats(num_images=200_000), cfg)["solver"]["num_epochs"]
+    assert huge == MIN_FINETUNE_EPOCHS
+
+
+def test_multi_sample_aug_stays_conservative_on_small_datasets() -> None:
+    # Deliberate: early A/Bs showed mosaic hurting small-set fine-tunes,
+    # so it stays LOW below 2k images until the benchmark sweep re-tests
+    # the direction. If you're here to raise it, bring sweep evidence.
+    assert derive_overrides(_stats(num_images=100), MayakuConfig())["input"]["mosaic_prob"] == 0.1
+    assert derive_overrides(_stats(num_images=1_500), MayakuConfig())["input"]["mosaic_prob"] == 0.2
+    assert (
+        derive_overrides(_stats(num_images=10_000), MayakuConfig())["input"]["mosaic_prob"] == 0.5
+    )
 
 
 def test_derive_overrides_enables_repeat_factor_sampler_when_imbalanced() -> None:

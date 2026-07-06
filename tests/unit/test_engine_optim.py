@@ -11,11 +11,13 @@ from torch import nn
 
 from mayaku.config.schemas import SolverConfig
 from mayaku.engine.optim import (
+    WARMUP_FLOOR_ITERS,
     _layer_id_for_convnext_param,
     _layer_id_for_resnet_param,
     _resolve_llrd_num_layers,
     build_lr_scheduler,
     build_optimizer,
+    resolve_schedule,
 )
 from mayaku.models.backbones._frozen_bn import FrozenBatchNorm2d
 
@@ -438,3 +440,29 @@ def test_llrd_without_supported_backbone_raises() -> None:
     cfg = _solver_cfg(llrd_enabled=True)
     with pytest.raises(ValueError, match="no supported backbone"):
         build_optimizer(model, cfg)
+
+
+# ---------------------------------------------------------------------------
+# resolve_schedule — warmup floor
+# ---------------------------------------------------------------------------
+
+
+def test_warmup_floor_lifts_tiny_fractions() -> None:
+    # 5,000-image dataset, batch 16, 10 epochs → 3,130 iters. 3% would be
+    # ~94 iters; the floor lifts it to WARMUP_FLOOR_ITERS.
+    _max_iter, warmup_iters, _ = resolve_schedule(10, 5_000, 16, 0.03)
+    assert warmup_iters == WARMUP_FLOOR_ITERS
+
+
+def test_warmup_floor_capped_on_short_runs() -> None:
+    # 125-iter run: a flat 100-iter floor would consume 80% of training.
+    # The floor is capped at a quarter of the run.
+    max_iter, warmup_iters, _ = resolve_schedule(1, 125, 1, 0.03)
+    assert max_iter == 125
+    assert warmup_iters == 125 // 4
+
+
+def test_warmup_fraction_still_wins_on_long_runs() -> None:
+    max_iter, warmup_iters, _ = resolve_schedule(10, 160_000, 16, 0.03)
+    assert max_iter == 100_000
+    assert warmup_iters == round(0.03 * max_iter)

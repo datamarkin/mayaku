@@ -79,6 +79,17 @@ def test_boxes_are_in_resized_space() -> None:
     assert pytest.approx(stats.sqrt_areas[0]) == 100.0
 
 
+def test_letterbox_canvas_overrides_short_edge_rule() -> None:
+    # 400×800 image letterboxed into a (640, 640) canvas: the aspect-
+    # preserving scale is min(640/400, 640/800) = 0.8, NOT the short-edge
+    # rule (which would give 800/400 = 2.0). A 50×50 box → 40×40.
+    dataset = [_img(1, 400, 800, [_box(0, 0, 0, 50, 50)])]
+    stats = analyze_dataset(
+        dataset, num_classes=1, resize_short_edge=800, letterbox_canvas=(640, 640)
+    )
+    assert pytest.approx(stats.sqrt_areas[0]) == 40.0
+
+
 def test_max_edge_caps_resize_scale() -> None:
     # 200×1000 image; raw scale to short_edge=800 would be 4.0 → long
     # edge would land at 4000, exceeding max_edge=1333. Scale must
