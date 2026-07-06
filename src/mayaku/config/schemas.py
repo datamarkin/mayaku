@@ -169,9 +169,7 @@ class BackboneConfig(_BaseModel):
             if self.weights_path is not None:
                 raise ValueError(
                     f"backbone.weights_path is only valid for ConvNeXt variants "
-                    f"(got name={self.name!r}). ResNet/ResNeXt use torchvision's "
-                    f"published ImageNet weights via the --pretrained-backbone CLI "
-                    f"flag (``weights='DEFAULT'``)."
+                    f"(got name={self.name!r})."
                 )
         return self
 

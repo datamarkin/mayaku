@@ -500,7 +500,7 @@ def _strip_stage_suffix(key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_uniquery(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> UniQuery:
+def build_uniquery(cfg: MayakuConfig) -> UniQuery:
     if cfg.model.meta_architecture != "uniquery":
         raise ValueError(
             f"build_uniquery requires meta_architecture='uniquery'; got "
@@ -511,7 +511,7 @@ def build_uniquery(cfg: MayakuConfig, *, backbone_weights: str | None = None) ->
     if uq_cfg is None:
         raise ValueError("uniquery requires model.uniquery_head config section")
 
-    bottom_up = build_bottom_up(cfg.model.backbone, weights=backbone_weights)  # type: ignore[arg-type]
+    bottom_up = build_bottom_up(cfg.model.backbone)
 
     # Optional conv-based P6/P7 for large-object coverage (QGN runs P3-P7).
     top_block = None

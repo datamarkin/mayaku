@@ -56,23 +56,21 @@ def build_resize_augmentation(cfg: MayakuConfig, *, for_train: bool) -> Augmenta
     return ResizeShortestEdge((inp.min_size_test,), max_size=inp.max_size_test)
 
 
-def build_detector(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> nn.Module:
+def build_detector(cfg: MayakuConfig) -> nn.Module:
     """Build the detector that matches ``cfg.model.meta_architecture``.
 
-    ``backbone_weights="DEFAULT"`` is forwarded to the per-architecture
-    factory and triggers torchvision's pretrained ImageNet weights for
-    the backbone. ``None`` initialises the backbone fresh — what the
-    test suite uses.
+    Architecture only — the backbone and heads initialise fresh; trained
+    weights arrive via a mayaku checkpoint loaded on top by the caller.
     """
     arch = cfg.model.meta_architecture
     if arch == "faster_rcnn":
-        return build_faster_rcnn(cfg, backbone_weights=backbone_weights)
+        return build_faster_rcnn(cfg)
     if arch == "mask_rcnn":
-        return build_mask_rcnn(cfg, backbone_weights=backbone_weights)
+        return build_mask_rcnn(cfg)
     if arch == "keypoint_rcnn":
-        return build_keypoint_rcnn(cfg, backbone_weights=backbone_weights)
+        return build_keypoint_rcnn(cfg)
     if arch == "uniquery":
-        return build_uniquery(cfg, backbone_weights=backbone_weights)
+        return build_uniquery(cfg)
     raise ValueError(f"unknown meta_architecture {arch!r}")
 
 

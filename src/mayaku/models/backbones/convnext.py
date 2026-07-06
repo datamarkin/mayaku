@@ -51,7 +51,6 @@ ConvNeXtVariant = Literal[
     "convnext_base",
     "convnext_large",
 ]
-WeightsChoice = Literal["DEFAULT"] | None
 
 
 # Per-variant stage-output channel tables. Strides are identical across

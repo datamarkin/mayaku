@@ -28,7 +28,7 @@ from mayaku.models.roi_heads.standard import build_standard_roi_heads
 __all__ = ["build_mask_rcnn"]
 
 
-def build_mask_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> FasterRCNN:
+def build_mask_rcnn(cfg: MayakuConfig) -> FasterRCNN:
     """Build a Mask R-CNN model from a top-level :class:`MayakuConfig`.
 
     The returned object is a :class:`FasterRCNN` instance whose ROI
@@ -43,10 +43,7 @@ def build_mask_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) -
         )
     assert cfg.model.roi_mask_head is not None  # enforced by ModelConfig validator
 
-    bottom_up = build_bottom_up(
-        cfg.model.backbone,
-        weights=backbone_weights,  # type: ignore[arg-type]
-    )
+    bottom_up = build_bottom_up(cfg.model.backbone)
     fpn = FPN(
         bottom_up=bottom_up,
         in_features=cfg.model.fpn.in_features,

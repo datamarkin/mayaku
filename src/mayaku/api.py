@@ -38,11 +38,9 @@ Behaviour:
   elsewhere. Apply the linear LR scaling rule (multiply
   ``solver.base_lr`` by ``num_gpus``) when scaling up. MPS is
   single-device only and rejects ``num_gpus > 1``.
-* ``pretrained_backbone`` (torchvision ImageNet init) is **not** a
-  parameter — it's derived from ``cfg.model.backbone.weights_path``:
-  if ``weights_path`` is set, the local file wins and torchvision
-  weights are not requested; if it's unset, torchvision ImageNet init
-  is used. To switch, edit the YAML's ``weights_path`` field.
+* The backbone is architecture-only (random init) unless a mayaku
+  checkpoint is supplied via ``weights=`` (or the config's
+  ``model.weights``) — the library never fetches external weights.
 * The final checkpoint comes from
   :func:`mayaku.utils.select_final_weights` (EMA shadow > live final >
   latest periodic) — same logic both bundled scripts used.
@@ -226,16 +224,13 @@ def train(
     # own ``model.weights`` for the YAML-driven fine-tune path.
     if detector_weights is None and cfg.model.weights is not None:
         detector_weights = Path(cfg.model.weights)
-    # Torchvision ImageNet init only when nothing else seeds the weights.
-    pretrained_backbone = cfg.model.backbone.weights_path is None and detector_weights is None
 
     # Resume restores the full training state from a checkpoint, so it
-    # supersedes any weight init — drop the warm-start sources to satisfy
+    # supersedes any weight init — drop the warm-start source to satisfy
     # run_train's mutual-exclusivity check.
     resume_path = Path(resume) if resume is not None else None
     if resume_path is not None:
         detector_weights = None
-        pretrained_backbone = False
 
     print(f"[mayaku.train] {config_stem} -> {resolved_output_dir}")
 
@@ -255,7 +250,6 @@ def train(
             image_root=train_images,
             output_dir=train_dir,
             weights=detector_weights,
-            pretrained_backbone=pretrained_backbone,
             device=device,
             val_json=val_annotations if forward_val else None,
             val_image_root=val_images if forward_val else None,
@@ -280,7 +274,6 @@ def train(
                 train_images,
                 train_dir,
                 detector_weights,  # weights
-                pretrained_backbone,
                 device,
                 None,  # num_epochs (cfg already carries it)
                 20,  # log_period default

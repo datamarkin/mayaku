@@ -26,7 +26,7 @@ from mayaku.models.roi_heads.standard import build_standard_roi_heads
 __all__ = ["build_keypoint_rcnn"]
 
 
-def build_keypoint_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> FasterRCNN:
+def build_keypoint_rcnn(cfg: MayakuConfig) -> FasterRCNN:
     """Build a Keypoint R-CNN model from a top-level :class:`MayakuConfig`.
 
     The schema validator in Step 5 enforces that
@@ -41,10 +41,7 @@ def build_keypoint_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = Non
         )
     assert cfg.model.roi_keypoint_head is not None  # enforced by ModelConfig validator
 
-    bottom_up = build_bottom_up(
-        cfg.model.backbone,
-        weights=backbone_weights,  # type: ignore[arg-type]
-    )
+    bottom_up = build_bottom_up(cfg.model.backbone)
     fpn = FPN(
         bottom_up=bottom_up,
         in_features=cfg.model.fpn.in_features,

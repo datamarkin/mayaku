@@ -30,7 +30,6 @@ from mayaku.models.backbones.convnext import (
 )
 from mayaku.models.backbones.resnet import (
     ResNetBackbone,
-    WeightsChoice,
     build_backbone,
 )
 
@@ -41,7 +40,6 @@ __all__ = [
     "FrozenBatchNorm2d",
     "ResNetBackbone",
     "ShapeSpec",
-    "WeightsChoice",
     "build_backbone",
     "build_bottom_up",
     "build_convnext",
@@ -53,24 +51,18 @@ __all__ = [
 def build_bottom_up(
     cfg: BackboneConfig,
     *,
-    weights: WeightsChoice = None,
     out_features: tuple[str, ...] = ("res2", "res3", "res4", "res5"),
 ) -> Backbone:
     """Typed dispatch from :class:`BackboneConfig` to a concrete backbone.
 
+    Both families are architecture-only — trained weights arrive via a mayaku
+    checkpoint loaded on top, never fetched here.
+
     Args:
         cfg: Validated backbone config — ``cfg.name`` selects the family.
-        weights: ``"DEFAULT"`` requests the canonical ImageNet-pretrained
-            weights for the family (torchvision IMAGENET1K_V2 for ResNet,
-            IMAGENET1K_V1 for ConvNeXt). ``None`` initialises randomly.
-            For ConvNeXt, ``cfg.weights_path`` (DINOv3 checkpoint) takes
-            precedence over this flag.
         out_features: Which stage outputs to materialise; defaults to
             all four FPN-feeding levels.
     """
     if is_convnext_variant(cfg.name):
-        # ConvNeXt is architecture-only — trained weights arrive via a mayaku
-        # checkpoint loaded on top, never fetched here. ``weights`` (DEFAULT
-        # download) applies to the legacy ResNet path only.
         return build_convnext(cfg, out_features=out_features)
-    return build_backbone(cfg, weights=weights, out_features=out_features)
+    return build_backbone(cfg, out_features=out_features)

@@ -7,9 +7,10 @@ Wraps torchvision's reference implementations rather than reimplementing
   the non-goal "loading Detectron2 checkpoints directly" both apply
   here — the master plan explicitly rules out distorting the model
   code to match either, and torchvision's implementation is the same
-  bottleneck design with FAIR-public ImageNet-trained weights.
-* ADR 002 (RGB-native) means torchvision's RGB-trained weights load
-  directly with no channel swap.
+  bottleneck design. Architecture only — trained weights arrive by
+  loading a mayaku checkpoint on top; the backbone never fetches them.
+* ADR 002 (RGB-native) means mayaku ResNet checkpoints are RGB-trained
+  and load with no channel swap.
 * ``BACKEND_PORTABILITY_REPORT.md`` §3 confirms the ResNet/ResNeXt
   building blocks are pure PyTorch and run unchanged on CUDA, MPS, and
   CPU; no in-scope config enables deformable convolution (ADR 001), so
@@ -17,8 +18,8 @@ Wraps torchvision's reference implementations rather than reimplementing
 
 The wrapper:
 
-1. Builds the underlying torchvision model (optionally with pretrained
-   weights via ``torchvision.models.<arch>(weights=...)``).
+1. Builds the underlying torchvision model (architecture only,
+   ``weights=None``).
 2. Discards the ``avgpool``/``fc`` classification head.
 3. Implements a hand-rolled forward that calls
    ``conv1 → bn1 → relu → maxpool → layer1 → layer2 → layer3 → layer4``
@@ -56,7 +57,6 @@ from mayaku.models.backbones._frozen_bn import (
 __all__ = ["ResNetBackbone", "build_backbone"]
 
 NormChoice = Literal["FrozenBN", "BN", "GN", "SyncBN"]
-WeightsChoice = Literal["DEFAULT"] | None
 
 
 _OUT_CHANNELS = {"res2": 256, "res3": 512, "res4": 1024, "res5": 2048}
@@ -79,13 +79,11 @@ class ResNetBackbone(Backbone):
         freeze_at: Number of stages to freeze, counting stem as 1
             (`DETECTRON2_TECHNICAL_SPEC.md` §2.1). 0 = nothing,
             2 = stem + res2 (default), 5 = everything.
-        weights: ``"DEFAULT"`` to load torchvision's published
-            IMAGENET1K_V2 (ResNet) / IMAGENET1K_V2 (ResNeXt) weights;
-            ``None`` for random init. Pretrained weights are
-            **RGB-trained** and load directly without channel swap
-            (ADR 002).
         out_features: Subset of ``("res2","res3","res4","res5")`` to
             return; defaults to all four.
+
+    Architecture only — random init. Trained weights arrive by loading a
+    mayaku checkpoint on top; the backbone never fetches weights itself.
     """
 
     def __init__(
@@ -94,7 +92,6 @@ class ResNetBackbone(Backbone):
         *,
         norm: NormChoice = "FrozenBN",
         freeze_at: int = 2,
-        weights: WeightsChoice = None,
         out_features: tuple[str, ...] = _DEFAULT_OUT_FEATURES,
         stride_in_1x1: bool = False,
     ) -> None:
@@ -113,12 +110,10 @@ class ResNetBackbone(Backbone):
         self._out_feature_channels = {f: _OUT_CHANNELS[f] for f in self._out_features}
         self._out_feature_strides = {f: _OUT_STRIDES[f] for f in self._out_features}
 
-        tv_weights = _resolve_weights(name, weights)
-        tv_model = _construct_torchvision(name, tv_weights)
+        tv_model = _construct_torchvision(name)
         # Carve up the torchvision module into our four-stage layout. We
         # keep the original BatchNorm2d objects in place; norm/freeze
-        # conversion happens at the end so pretrained weight loading is
-        # the source of truth for any running stats.
+        # conversion happens at the end.
         self.stem = nn.Sequential(
             tv_model.conv1,
             tv_model.bn1,
@@ -213,22 +208,7 @@ class ResNetBackbone(Backbone):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_weights(name: BackboneName, weights: WeightsChoice) -> tv.WeightsEnum | None:
-    if weights is None:
-        return None
-    if weights != "DEFAULT":
-        raise ValueError(f"weights must be None or 'DEFAULT'; got {weights!r}")
-    return _DEFAULT_WEIGHTS[name]
-
-
-_DEFAULT_WEIGHTS: dict[BackboneName, tv.WeightsEnum] = {
-    "resnet50": tv.ResNet50_Weights.IMAGENET1K_V2,
-    "resnet101": tv.ResNet101_Weights.IMAGENET1K_V2,
-    "resnext101_32x8d": tv.ResNeXt101_32X8D_Weights.IMAGENET1K_V2,
-}
-
-
-def _construct_torchvision(name: BackboneName, weights: tv.WeightsEnum | None) -> tv.ResNet:
+def _construct_torchvision(name: BackboneName) -> tv.ResNet:
     factory: dict[BackboneName, Callable[..., tv.ResNet]] = {
         "resnet50": tv.resnet50,
         "resnet101": tv.resnet101,
@@ -236,7 +216,7 @@ def _construct_torchvision(name: BackboneName, weights: tv.WeightsEnum | None) -
     }
     if name not in factory:
         raise ValueError(f"unknown backbone name {name!r}")
-    model: tv.ResNet = factory[name](weights=weights)
+    model: tv.ResNet = factory[name](weights=None)
     return model
 
 
@@ -248,22 +228,18 @@ def _construct_torchvision(name: BackboneName, weights: tv.WeightsEnum | None) -
 def build_backbone(
     cfg: BackboneConfig,
     *,
-    weights: WeightsChoice = None,
     out_features: tuple[str, ...] = _DEFAULT_OUT_FEATURES,
 ) -> ResNetBackbone:
-    """Construct a :class:`ResNetBackbone` from a typed config.
+    """Construct a :class:`ResNetBackbone` (architecture only) from a typed config.
 
-    ``weights`` is *not* a config field because it's a deployment
-    concern (whether to download pretrained ImageNet checkpoints) and
-    in tests we always want the random-init path. The ``ModelConfig``-
-    level ``weights`` field (Step 5) is reserved for full-model
-    checkpoints, not backbone-only.
+    Random init — trained weights arrive via a mayaku checkpoint loaded on top,
+    never fetched here. The ``ModelConfig``-level ``weights`` field (Step 5) is
+    for full-model checkpoints.
     """
     return ResNetBackbone(
         name=cfg.name,
         norm=cfg.norm,
         freeze_at=cfg.freeze_at,
-        weights=weights,
         out_features=out_features,
         stride_in_1x1=cfg.stride_in_1x1,
     )

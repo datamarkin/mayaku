@@ -129,23 +129,18 @@ class FasterRCNN(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def build_faster_rcnn(cfg: MayakuConfig, *, backbone_weights: str | None = None) -> FasterRCNN:
-    """Build a Faster R-CNN model from a top-level :class:`MayakuConfig`.
+def build_faster_rcnn(cfg: MayakuConfig) -> FasterRCNN:
+    """Build a Faster R-CNN model (architecture only) from a top-level :class:`MayakuConfig`.
 
-    ``backbone_weights="DEFAULT"`` loads torchvision's IMAGENET1K_V2
-    pretrained weights into the bottom-up ResNet (ADR 002 RGB-native);
-    the default ``None`` initialises everything fresh, which is what the
-    test suite uses.
+    Everything initialises fresh; trained weights arrive via a mayaku checkpoint
+    loaded on top.
     """
     if cfg.model.meta_architecture != "faster_rcnn":
         raise ValueError(
             f"build_faster_rcnn requires meta_architecture='faster_rcnn'; got "
             f"{cfg.model.meta_architecture!r}"
         )
-    bottom_up = build_bottom_up(
-        cfg.model.backbone,
-        weights=backbone_weights,  # type: ignore[arg-type]
-    )
+    bottom_up = build_bottom_up(cfg.model.backbone)
     fpn = FPN(
         bottom_up=bottom_up,
         in_features=cfg.model.fpn.in_features,
