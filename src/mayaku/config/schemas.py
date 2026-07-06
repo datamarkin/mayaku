@@ -846,16 +846,20 @@ class AutoConfig(_BaseModel):
       skipped if <50 boxes
     * ``solver.num_epochs`` — a target-total-steps budget resolved to
       epochs, so total training work is monotone in dataset size
+    * ``solver.base_lr`` — the fine-tune learning rate. Regime-dependent:
+      the checkpoint bakes the *pretraining* LR, and fine-tuning wants
+      ~10x more, so the recipe emits a flat fine-tune default
+      (``FINETUNE_BASE_LR``) batch-scaled to the run's effective batch
     * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
       dataset size bucket
     * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to
       ``RepeatFactorTrainingSampler`` when class-imbalance ratio > 10
 
-    Architecture-tuned hyperparameters — ``solver.base_lr``, the EMA
-    constants, ``model.backbone.freeze_at`` — are NEVER auto-overridden:
-    the config that travels with the weights owns them. Auto-config
-    adapts the run to the dataset; it does not re-tune the model (the
-    contract is pinned in ``mayaku.tuning.recipe.ARCHITECTURE_TUNED_PATHS``).
+    Architecture-tuned hyperparameters — the EMA constants and
+    ``model.backbone.freeze_at`` — are NEVER auto-overridden: the config
+    that travels with the weights owns them. Auto-config adapts the run to
+    the dataset; it does not re-tune the model (the contract is pinned in
+    ``mayaku.tuning.recipe.ARCHITECTURE_TUNED_PATHS``).
 
     Explicit user values always win — auto-config only fills gaps. Every
     applied override is logged as ``old -> new``, and the resolved config

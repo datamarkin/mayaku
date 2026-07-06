@@ -60,7 +60,6 @@ Return value (dict):
 from __future__ import annotations
 
 import json
-import math
 import time
 import warnings
 from collections.abc import Mapping
@@ -179,11 +178,6 @@ def train(
     # go into ``pinned_paths`` so the dataset-derived recipe (which runs inside
     # run_train on the no-config path) skips them and the user's value wins.
     pinned_paths: set[str] = set()
-    # Snapshot the effective batch / LR the config (or sidecar) was tuned at —
-    # the reference for the LR↔batch coupling below, taken before any override
-    # can rewrite them.
-    ref_batch = cfg.solver.effective_batch()
-    ref_lr = cfg.solver.base_lr
     if overrides:
         cfg = merge_overrides(cfg, overrides)
         pinned_paths |= collect_set_paths(overrides)
@@ -200,24 +194,8 @@ def train(
         cfg = merge_overrides(cfg, {"solver": {"num_epochs": num_epochs}})
         pinned_paths.add("solver.num_epochs")
 
-    # LR↔batch coupling (weights path only): the sidecar's tuned base_lr is
-    # anchored to the sidecar's own effective batch. When the user's overrides
-    # land on a different batch without pinning base_lr, scale the tuned LR by
-    # the batch ratio — linear for SGD, sqrt for AdamW. On the config path the
-    # recipe is used verbatim by contract, so nothing is touched there.
-    if config is None and "solver.base_lr" not in pinned_paths:
-        new_batch = cfg.solver.effective_batch()
-        if new_batch != ref_batch:
-            ratio = new_batch / ref_batch
-            factor = ratio if cfg.solver.optimizer_name == "SGD" else math.sqrt(ratio)
-            new_lr = ref_lr * factor
-            cfg = merge_overrides(cfg, {"solver": {"base_lr": new_lr}})
-            print(
-                f"[train] base_lr scaled with effective batch "
-                f"({ref_batch} -> {new_batch}, {cfg.solver.optimizer_name}): "
-                f"{ref_lr:g} -> {new_lr:g}",
-                flush=True,
-            )
+    # LR↔batch coupling now lives in the recipe (tuning/recipe.py), which
+    # emits the batch-scaled fine-tune base_lr; nothing to do here.
 
     # A config (YAML path, bundled name, or MayakuConfig) means "train exactly
     # this recipe": auto-config is turned off so the config is used verbatim and

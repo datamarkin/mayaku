@@ -7,21 +7,29 @@ into a nested override dict that
 The contract (the auto-config invariant): **auto-config must deliver
 results >= the tuned config that travels with the weights.** The recipe
 therefore adapts the run to the dataset — it never re-tunes the model.
-It only ever emits two kinds of fields:
+It only ever emits three kinds of fields:
 
 * **dataset-structural facts** — anchor sizes/ARs (for anchor-consuming
   architectures, measured in the pipeline's actual input frame) and the
   RepeatFactor sampler switch;
 * **run-scoped budgets** — ``num_epochs`` (a target-total-steps budget)
-  and multi-sample augmentation strength.
+  and multi-sample augmentation strength;
+* **the fine-tune learning rate** — ``base_lr`` is *regime-dependent*,
+  not architecture-tuned. The checkpoint bakes the *pretraining* LR
+  (1e-4 AdamW, right for COCO-scale data); fine-tuning from those
+  weights to a new dataset wants ~10x more to move off the pretrained
+  basin in a short run (benchmark-confirmed: inheriting the baked 1e-4
+  regressed every far-from-COCO set). The recipe emits a flat fine-tune
+  default (:data:`FINETUNE_BASE_LR`), batch-scaled off its validated
+  anchor; a pinned ``base_lr`` (YAML/overrides) still wins via
+  :func:`filter_unset`.
 
-Architecture-tuned hyperparameters — ``base_lr``, ``freeze_at``, the
-EMA constants, optimizer settings, loss weights — are NEVER emitted:
-the checkpoint's embedded config owns them ("weights carry
-everything"). That contract is pinned by
-:data:`ARCHITECTURE_TUNED_PATHS` and its test; add to the set before
-adding any solver/model knob to the recipe, and it will fail the
-contract test — by design.
+Genuinely architecture-tuned hyperparameters — ``freeze_at``, the EMA
+constants, optimizer settings, loss weights — are NEVER emitted: the
+checkpoint's embedded config owns them ("weights carry everything").
+That contract is pinned by :data:`ARCHITECTURE_TUNED_PATHS` and its
+test; add to the set before adding any solver/model knob to the recipe,
+and it will fail the contract test — by design.
 
 Two ancillary helpers travel with the recipe to keep the wiring in
 ``run_train`` short:
@@ -49,10 +57,12 @@ from mayaku.tuning.dataset_stats import DatasetStats
 
 __all__ = [
     "ARCHITECTURE_TUNED_PATHS",
+    "FINETUNE_BASE_LR",
     "MAX_FINETUNE_EPOCHS",
     "MIN_BOXES_FOR_ANCHOR_TUNE",
     "MIN_FINETUNE_EPOCHS",
     "MIN_IMAGES_FOR_AUTO_CONFIG",
+    "REFERENCE_BATCH",
     "SizeBucket",
     "collect_set_paths",
     "derive_overrides",
@@ -63,12 +73,13 @@ __all__ = [
 
 # Dotted paths the recipe is FORBIDDEN from emitting. These are tuned
 # per-architecture and shipped inside the checkpoint sidecar; a
-# dataset-size table overriding them is exactly the bug class that made
-# every weights-only fine-tune train at an SGD-era LR with a frozen
-# stem. Enforced by the contract test in tests/unit/test_tuning_recipe.py.
+# dataset-size table overriding them is a bug class (e.g. a frozen RGB
+# stem forced onto a modality that needs to adapt). Enforced by the
+# contract test in tests/unit/test_tuning_recipe.py.
+# NB: base_lr is deliberately NOT here — it's regime-dependent, so the
+# recipe emits a fine-tune default instead. See FINETUNE_BASE_LR.
 ARCHITECTURE_TUNED_PATHS: Final = frozenset(
     {
-        "solver.base_lr",
         "solver.ema_enabled",
         "solver.ema_decay",
         "solver.ema_tau",
@@ -115,6 +126,19 @@ _IMBALANCE_TRIGGER: Final = 10.0
 TARGET_TOTAL_STEPS: Final = 3_000
 MIN_FINETUNE_EPOCHS: Final = 16
 MAX_FINETUNE_EPOCHS: Final = 30
+
+# Fine-tune learning rate. base_lr is regime-dependent: the checkpoint
+# bakes the PRETRAINING LR (1e-4 AdamW, right for COCO-scale data), but
+# fine-tuning to a new dataset from those weights wants ~10x more to move
+# the head+backbone off the pretrained basin within a short run. 1e-3 is
+# benchmark-validated (recovers the far-from-COCO wins that 1e-4
+# regressed; near-ceiling sets prefer a touch less — a domain-adaptive
+# refinement tracked separately). LLRD still scales this down per backbone
+# depth. Emitted through filter_unset, so a pinned base_lr always wins.
+FINETUNE_BASE_LR: Final = 1.0e-3
+# Effective batch FINETUNE_BASE_LR was validated at; the anchor for the
+# LR<->batch scaling below. Matches the family configs' 4x4 = 16.
+REFERENCE_BATCH: Final = 16
 
 
 @dataclass(frozen=True)
@@ -203,19 +227,27 @@ def derive_overrides(
         }
 
     # ----- solver -----
-    # Training length is the only solver field the recipe touches: a
-    # target-total-steps budget resolved to epochs (the engine resolves
-    # epochs back to iterations at train time). Anchored to the
-    # single-rank effective batch (world_size excluded by design —
-    # recipe runs pre-DDP).
+    # Two solver fields, both anchored to the single-rank effective batch
+    # (world_size excluded by design — recipe runs pre-DDP):
+    #   * base_lr — the regime-dependent fine-tune LR (see FINETUNE_BASE_LR),
+    #     scaled off its validated batch-16 anchor to this run's effective
+    #     batch: linear for SGD, sqrt for AdamW (gradient-noise scaling).
+    #   * num_epochs — a target-total-steps budget resolved to epochs (the
+    #     engine resolves epochs back to iterations at train time).
     # Same epoch definition as resolve_schedule (engine/optim.py) — keep the
     # formulas in sync; not imported so the tuning package stays torch-free.
-    iters_per_epoch = max(1, math.ceil(stats.num_images / max(1, cfg.solver.effective_batch())))
+    eff_batch = cfg.solver.effective_batch()
+    iters_per_epoch = max(1, math.ceil(stats.num_images / max(1, eff_batch)))
     num_epochs = min(
         MAX_FINETUNE_EPOCHS,
         max(MIN_FINETUNE_EPOCHS, math.ceil(TARGET_TOTAL_STEPS / iters_per_epoch)),
     )
-    solver_overrides: dict[str, Any] = {"num_epochs": num_epochs}
+    lr_ratio = eff_batch / REFERENCE_BATCH
+    lr_factor = lr_ratio if cfg.solver.optimizer_name == "SGD" else math.sqrt(lr_ratio)
+    solver_overrides: dict[str, Any] = {
+        "base_lr": FINETUNE_BASE_LR * lr_factor,
+        "num_epochs": num_epochs,
+    }
 
     # ----- input augs -----
     input_overrides: dict[str, Any] = {
