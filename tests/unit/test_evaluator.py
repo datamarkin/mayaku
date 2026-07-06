@@ -356,7 +356,11 @@ def test_coco_evaluator_remaps_gappy_coco_category_ids(tmp_path: Path) -> None:
     assert metrics["bbox"]["AP"] == pytest.approx(1.0, abs=1e-3)
 
 
-def test_coco_evaluator_no_predictions_yields_empty_dict(toy_coco_gt: Path) -> None:
+def test_coco_evaluator_no_predictions_yields_zero_ap(toy_coco_gt: Path) -> None:
+    # Eval ran on GT-bearing images and the model detected nothing → 0 AP,
+    # NOT a missing result. A missing "bbox"/"AP" surfaces as None downstream
+    # (api.train's final_box_ap) and conflates "detected nothing" with "no
+    # eval" — the source of a torch-RNG-dependent flake on toy runs.
     evaluator = COCOEvaluator(toy_coco_gt)
     evaluator.reset()
     # Empty Instances per image → process appends nothing.
@@ -366,7 +370,11 @@ def test_coco_evaluator_no_predictions_yields_empty_dict(toy_coco_gt: Path) -> N
     inst.scores = torch.zeros(0)
     inst.pred_classes = torch.zeros(0, dtype=torch.long)
     evaluator.process(inputs, [{"instances": inst}])
-    assert evaluator.evaluate() == {}
+    metrics = evaluator.evaluate()
+    assert metrics == {
+        "bbox": {"AP": 0.0, "AP50": 0.0, "AP75": 0.0, "APs": 0.0, "APm": 0.0, "APl": 0.0}
+    }
+    assert isinstance(metrics["bbox"]["AP"], float)
 
 
 def test_coco_evaluator_writes_results_json_when_output_dir_set(

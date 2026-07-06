@@ -147,6 +147,21 @@ def inference_on_dataset(
 
 _COCO_TASKS = ("bbox", "segm", "keypoints")
 
+# Metrics for a task the model made zero detections for. Eval DID run on
+# GT-bearing images and nothing was detected → 0 AP (0 recall) — the value
+# COCOeval yields for a GT category with an all-zero PR curve. Kept distinct
+# from "eval didn't run" (which stays a missing key / None downstream) so a
+# real run that detects nothing reports 0.0, not None. Same keys as a real
+# _evaluate_one_task result so every consumer sees one uniform shape.
+_ZERO_COCO_METRICS: dict[str, float] = {
+    "AP": 0.0,
+    "AP50": 0.0,
+    "AP75": 0.0,
+    "APs": 0.0,
+    "APm": 0.0,
+    "APl": 0.0,
+}
+
 
 class COCOEvaluator(DatasetEvaluator):
     """COCO mAP for boxes (always), masks (if present), keypoints (if present).
@@ -279,14 +294,17 @@ class COCOEvaluator(DatasetEvaluator):
         if not is_main_process():
             return {}
 
+        tasks = self.tasks if self.tasks is not None else _detect_tasks(merged)
+
+        # No detections at all → 0 AP per task (see _ZERO_COCO_METRICS), not {}.
+        # (_detect_tasks([]) is ("bbox",), so an all-empty run still scores bbox.)
         if not merged:
-            return {}
+            return {task: dict(_ZERO_COCO_METRICS) for task in tasks}
 
         if self.output_dir is not None:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             (self.output_dir / "coco_instances_results.json").write_text(json.dumps(merged))
 
-        tasks = self.tasks if self.tasks is not None else _detect_tasks(merged)
         results: dict[str, Any] = {}
         coco_gt = self._load_gt()
         for task in tasks:
@@ -472,7 +490,9 @@ def _evaluate_one_task(
     # complains that bbox-only predictions lack ``segmentation`` etc.
     filtered = _filter_task_predictions(predictions, task)
     if not filtered:
-        return {}
+        # No detections for this task → 0 AP (see _ZERO_COCO_METRICS), not a
+        # missing metric. pycocotools' loadRes([]) can't run, so synthesize it.
+        return dict(_ZERO_COCO_METRICS)
 
     with contextlib.redirect_stdout(io.StringIO()):
         coco_dt = coco_gt.loadRes(filtered)
