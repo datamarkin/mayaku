@@ -1,15 +1,13 @@
 """Tests for the freeze_at-without-pretrain warning in :mod:`mayaku.cli.train`.
 
 The warning's job is to catch the silent footgun of freezing early
-backbone stages on top of random-init features. Three init sources
-count as "backbone is pretrained" and should suppress it:
+backbone stages on top of random-init features. Two init sources count
+as "backbone is pretrained" and should suppress it:
 
-  1. ``pretrained_backbone=True`` (torchvision IMAGENET1K_V2)
-  2. ``weights`` (a full mayaku checkpoint)
-  3. ``cfg.model.backbone.weights_path`` (e.g. DINOv3 for ConvNeXt)
+  1. ``weights`` (a full mayaku checkpoint)
+  2. ``cfg.model.backbone.weights_path`` (e.g. DINOv3 for ConvNeXt)
 
-These tests exercise the third source — the first two are already
-exercised in :mod:`tests.unit.test_cli`.
+These tests exercise the second source.
 """
 
 from __future__ import annotations
@@ -55,10 +53,11 @@ def test_freeze_warning_suppressed_by_weights_path(
 ) -> None:
     """``cfg.model.backbone.weights_path`` set → warning does NOT fire.
 
-    Uses the toy ResNet config with a non-None ``weights_path`` placeholder:
-    the ResNet builder ignores it (only ConvNeXt consumes it), so nothing
-    tries to load the file. The predicate under test is purely the boolean
-    check in run_train.
+    Uses the toy ResNet config with a non-None ``weights_path`` placeholder.
+    No backbone currently consumes ``weights_path`` (both families are
+    architecture-only), so nothing tries to load the file — the predicate
+    under test is purely the boolean check in run_train, which still counts a
+    set ``weights_path`` as an init source pending the weights_path cleanup.
 
     ``auto_config`` is disabled here on purpose. The schema rejects
     ``weights_path`` on a ResNet backbone (it's ConvNeXt-only), so this

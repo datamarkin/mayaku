@@ -153,7 +153,7 @@ class TestDynamicConv:
 class TestUniQuery:
     def test_forward_train(self) -> None:
         cfg = _make_cfg()
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.train()
         batch = _make_batch(batch_size=2)
         losses = model(batch)
@@ -164,7 +164,7 @@ class TestUniQuery:
 
     def test_forward_inference(self) -> None:
         cfg = _make_cfg(num_proposals=20)
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.eval()
         with torch.no_grad():
             results = model([{"image": torch.randn(3, 256, 256)}])
@@ -179,7 +179,7 @@ class TestUniQuery:
         # inference proposal dial would slice an arbitrary first-k. It must
         # error rather than silently degrade. (The QGN path applies top-k by
         # objectness and is exercised in TestUniQueryGenerator.)
-        model = build_uniquery(_make_cfg(num_proposals=20), backbone_weights=None)
+        model = build_uniquery(_make_cfg(num_proposals=20))
         model.eval()
         model.inference_num_proposals = 5
         with torch.no_grad(), pytest.raises(ValueError, match="QGN proposal path"):
@@ -187,7 +187,7 @@ class TestUniQuery:
 
     def test_gradient_flow(self) -> None:
         cfg = _make_cfg(num_proposals=5, num_stages=3)
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=1)
         losses = model(batch)
@@ -200,7 +200,7 @@ class TestUniQuery:
     def test_loss_balance(self) -> None:
         """Verify weight_dict is applied and losses are balanced."""
         cfg = _make_cfg(num_proposals=50, num_stages=2, num_classes=10)
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=5, num_classes=10)
         losses = model(batch)
@@ -248,7 +248,7 @@ class TestUniQuery:
                 "roi_heads": {"num_classes": 5},
             }
         )
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=3)
         losses = model(batch)
@@ -257,7 +257,7 @@ class TestUniQuery:
 
     def test_mask_forward_train(self) -> None:
         cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.train()
         batch = _make_batch(batch_size=2, num_gt=2, with_masks=True)
         losses = model(batch)
@@ -269,7 +269,7 @@ class TestUniQuery:
 
     def test_mask_forward_inference(self) -> None:
         cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.eval()
         with torch.no_grad():
             results = model([{"image": torch.randn(3, 256, 256)}])
@@ -281,7 +281,7 @@ class TestUniQuery:
 
     def test_mask_gradient_flow(self) -> None:
         cfg = _make_mask_cfg(num_proposals=5, num_stages=2, num_classes=5)
-        model = build_uniquery(cfg, backbone_weights=None)
+        model = build_uniquery(cfg)
         model.train()
         batch = _make_batch(batch_size=1, num_gt=2, with_masks=True)
         losses = model(batch)

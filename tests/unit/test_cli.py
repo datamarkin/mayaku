@@ -156,41 +156,7 @@ def test_finetune_re_resolves_letterbox_canvas_to_user_aspect(tmp_path: Path) ->
     assert sd["mayaku"]["config"]["input"]["canvas_hw"] == [512, 768]
 
 
-def test_run_train_pretrained_backbone_passes_through(
-    toy_workspace: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`--pretrained-backbone` must reach `build_detector(..., backbone_weights="DEFAULT")`.
-
-    We mock `build_detector` to inspect the call without actually
-    downloading torchvision's IMAGENET1K_V2 weights (CI-friendly).
-    """
-    from mayaku.cli import train as train_module
-
-    captured: dict[str, object] = {}
-    real_build_detector = train_module.build_detector
-
-    def spy(cfg: object, *, backbone_weights: object = None) -> object:
-        captured["backbone_weights"] = backbone_weights
-        # Forward to the real builder with the random-init path so the
-        # rest of the loop (mapper, sampler, trainer) actually runs.
-        return real_build_detector(cfg)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(train_module, "build_detector", spy)
-
-    out = tmp_path / "train_pretrained_out"
-    run_train(
-        toy_workspace["cfg"],
-        coco_gt_json=toy_workspace["json"],
-        image_root=toy_workspace["images"],
-        output_dir=out,
-        device="cpu",
-        pretrained_backbone=True,
-        num_epochs=1,
-    )
-    assert captured["backbone_weights"] == "DEFAULT"
-
-
-def test_run_train_pretrained_and_weights_are_mutually_exclusive(
+def test_run_train_resume_and_weights_are_mutually_exclusive(
     toy_workspace: dict[str, Path], tmp_path: Path
 ) -> None:
     out = tmp_path / "train_conflict_out"
@@ -201,7 +167,7 @@ def test_run_train_pretrained_and_weights_are_mutually_exclusive(
             image_root=toy_workspace["images"],
             output_dir=out,
             device="cpu",
-            pretrained_backbone=True,
+            resume=toy_workspace["weights"],
             weights=toy_workspace["weights"],
             num_epochs=1,
         )

@@ -57,7 +57,7 @@ def _faster_rcnn_cfg() -> MayakuConfig:
 def _export_uniquery_onnx(tmp_path: Path, *, num_classes: int = 4, sidecar: bool = True) -> Path:
     torch.manual_seed(0)
     cfg = _uniquery_cfg(num_classes)
-    model = build_uniquery(cfg, backbone_weights=None).eval()
+    model = build_uniquery(cfg).eval()
     out = tmp_path / "uq.onnx"
     class_names = [f"c{i}" for i in range(num_classes)]
     export_detector(
@@ -179,7 +179,7 @@ def test_missing_artifact_file_raises(tmp_path: Path) -> None:
 def _export_uniquery(tmp_path: Path, target: str, filename: str, *, num_classes: int = 4) -> Path:
     torch.manual_seed(0)
     cfg = _uniquery_cfg(num_classes)
-    model = build_uniquery(cfg, backbone_weights=None).eval()
+    model = build_uniquery(cfg).eval()
     out = tmp_path / filename
     export_detector(
         model,
