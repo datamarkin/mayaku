@@ -5,14 +5,18 @@ from __future__ import annotations
 import itertools
 import math
 
+import pytest
+
 from mayaku.config import MayakuConfig
 from mayaku.tuning.dataset_stats import DatasetStats
 from mayaku.tuning.recipe import (
     ARCHITECTURE_TUNED_PATHS,
+    FINETUNE_BASE_LR,
     MAX_FINETUNE_EPOCHS,
     MIN_BOXES_FOR_ANCHOR_TUNE,
     MIN_FINETUNE_EPOCHS,
     MIN_IMAGES_FOR_AUTO_CONFIG,
+    REFERENCE_BATCH,
     collect_set_paths,
     derive_overrides,
     filter_unset,
@@ -83,8 +87,9 @@ def _uniquery_cfg() -> MayakuConfig:
 
 def test_derive_overrides_never_emits_architecture_tuned_fields() -> None:
     # THE invariant: the recipe adapts the run to the dataset; the config
-    # that travels with the weights owns base_lr / freeze_at / EMA. A
-    # table edit that re-adds any of these must fail here.
+    # that travels with the weights owns freeze_at / EMA. A table edit that
+    # re-adds any of these must fail here. (base_lr is deliberately NOT in
+    # the frozen set — it's regime-dependent and IS emitted; see below.)
     for cfg in (MayakuConfig(), _uniquery_cfg()):
         for n in (100, 1_500, 10_000, 100_000):
             overrides = derive_overrides(_stats(num_images=n), cfg)
@@ -93,6 +98,32 @@ def test_derive_overrides_never_emits_architecture_tuned_fields() -> None:
                 f"recipe emitted architecture-tuned field(s) "
                 f"{sorted(emitted & ARCHITECTURE_TUNED_PATHS)} at n={n}"
             )
+
+
+def test_derive_overrides_emits_finetune_base_lr() -> None:
+    # base_lr is a recipe-emitted fine-tune default, not inherited from the
+    # checkpoint's pretraining LR. At the validated reference batch the
+    # emitted value is exactly FINETUNE_BASE_LR (SGD default cfg, ratio 1).
+    cfg = MayakuConfig()
+    assert cfg.solver.effective_batch() == REFERENCE_BATCH
+    overrides = derive_overrides(_stats(num_images=2_000), cfg)
+    assert overrides["solver"]["base_lr"] == pytest.approx(FINETUNE_BASE_LR)
+
+
+def test_finetune_base_lr_scales_with_effective_batch() -> None:
+    # The fine-tune LR is batch-scaled off its batch-16 anchor: linear for
+    # SGD, sqrt for AdamW (the LR<->batch coupling the recipe now owns).
+    sgd = MayakuConfig.model_validate(
+        {"solver": {"ims_per_batch": 32, "grad_accum_steps": 1, "optimizer_name": "SGD"}}
+    )
+    adamw = MayakuConfig.model_validate(
+        {"solver": {"ims_per_batch": 32, "grad_accum_steps": 1, "optimizer_name": "AdamW"}}
+    )
+    assert sgd.solver.effective_batch() == 2 * REFERENCE_BATCH
+    sgd_lr = derive_overrides(_stats(num_images=2_000), sgd)["solver"]["base_lr"]
+    adamw_lr = derive_overrides(_stats(num_images=2_000), adamw)["solver"]["base_lr"]
+    assert sgd_lr == pytest.approx(FINETUNE_BASE_LR * 2)  # linear in batch
+    assert adamw_lr == pytest.approx(FINETUNE_BASE_LR * math.sqrt(2))  # sqrt in batch
 
 
 def test_anchor_overrides_gated_to_anchor_consuming_archs() -> None:
