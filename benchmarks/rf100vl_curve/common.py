@@ -15,12 +15,30 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import functools
 import io
 import json
 from pathlib import Path
 
 VAL_SPLIT_NAMES = ("valid", "val", "test")
 COCO_ANN = "_annotations.coco.json"
+
+# The 12 COCO summary stats, in pycocotools ``COCOeval.stats`` order: 6 AP figures
+# then 6 AR figures. Same names, same order, for every leg's curve.csv.
+COCO_STATS = (
+    "ap",  # AP @ IoU=0.50:0.95, all areas, maxDets=100  (the headline metric)
+    "ap50",  # AP @ IoU=0.50
+    "ap75",  # AP @ IoU=0.75
+    "ap_small",  # AP for small objects
+    "ap_medium",  # AP for medium objects
+    "ap_large",  # AP for large objects
+    "ar1",  # AR @ maxDets=1
+    "ar10",  # AR @ maxDets=10
+    "ar100",  # AR @ maxDets=100
+    "ar_small",  # AR for small objects
+    "ar_medium",  # AR for medium objects
+    "ar_large",  # AR for large objects
+)
 
 
 def _split_dir(dataset_dir: Path, names: tuple[str, ...]) -> Path | None:
@@ -70,24 +88,37 @@ def images(gt_json: Path, images_dir: Path) -> list[tuple[int, Path]]:
     return [(im["id"], images_dir / im["file_name"]) for im in data["images"]]
 
 
-def coco_ap(gt_json: Path, detections: list[dict]) -> dict:
-    """pycocotools bbox AP for ``detections`` in COCO result format.
-
-    Each detection: ``{image_id, category_id, bbox:[x,y,w,h], score}``.
+@functools.lru_cache(maxsize=4)
+def _coco_gt(gt_json: str):
+    """Parse + index a COCO ground-truth file once. Cached so a dataset's many
+    per-checkpoint ``coco_ap`` calls reuse one immutable GT object instead of
+    re-reading and re-indexing the same file every time (``loadRes``/``COCOeval``
+    only read it). maxsize=4 bounds memory to a few datasets' GT at a time.
     """
     from pycocotools.coco import COCO
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        return COCO(gt_json)
+
+
+def coco_ap(gt_json: Path, detections: list[dict]) -> dict:
+    """pycocotools bbox metrics for ``detections`` in COCO result format.
+
+    Returns all 12 ``COCOeval.stats`` (see ``COCO_STATS``) plus ``n_dets``. Each
+    detection: ``{image_id, category_id, bbox:[x,y,w,h], score}``.
+    """
     from pycocotools.cocoeval import COCOeval
 
     if not detections:
-        return {"ap": 0.0, "ap50": 0.0, "n_dets": 0}
+        return {**dict.fromkeys(COCO_STATS, 0.0), "n_dets": 0}
+    coco_gt = _coco_gt(str(gt_json))
     with contextlib.redirect_stdout(io.StringIO()):
-        coco_gt = COCO(str(gt_json))
         coco_dt = coco_gt.loadRes(detections)
         ev = COCOeval(coco_gt, coco_dt, iouType="bbox")
         ev.evaluate()
         ev.accumulate()
         ev.summarize()
-    return {"ap": float(ev.stats[0]), "ap50": float(ev.stats[1]), "n_dets": len(detections)}
+    return {**{k: float(v) for k, v in zip(COCO_STATS, ev.stats)}, "n_dets": len(detections)}
 
 
 def to_yolo(dataset_dir: Path) -> Path:
@@ -168,6 +199,6 @@ def write_curve(run_dir: Path, rows: list[dict]) -> None:
     """Write ``curve.csv`` (one row per checkpoint), sorted by wall-clock."""
     rows = sorted(rows, key=lambda r: r["wall_clock_s"])
     with (Path(run_dir) / "curve.csv").open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["checkpoint", "wall_clock_s", "ap", "ap50", "n_dets"])
+        w = csv.DictWriter(fh, fieldnames=["checkpoint", "wall_clock_s", *COCO_STATS, "n_dets"])
         w.writeheader()
         w.writerows(rows)
