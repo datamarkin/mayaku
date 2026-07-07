@@ -184,31 +184,34 @@ def _cfg_with_eval_period(toy_workspace: dict[str, Path], tmp_path: Path, period
     return out
 
 
-def test_run_train_eval_period_requires_val_paths(
-    toy_workspace: dict[str, Path], tmp_path: Path
+def test_run_train_eval_period_without_val_trains_without_eval(
+    toy_workspace: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # eval_period > 0 but no val paths must NOT crash — it informs and trains
+    # without periodic eval (eval-every-epoch is the default, so a no-val run is fine).
     cfg_with_eval = _cfg_with_eval_period(toy_workspace, tmp_path, period=2)
     out = tmp_path / "train_eval_missing_val"
-    with pytest.raises(ValueError, match="val-json"):
-        run_train(
-            cfg_with_eval,
-            coco_gt_json=toy_workspace["json"],
-            image_root=toy_workspace["images"],
-            output_dir=out,
-            device="cpu",
-            num_epochs=2,
-        )
+    run_train(
+        cfg_with_eval,
+        coco_gt_json=toy_workspace["json"],
+        image_root=toy_workspace["images"],
+        output_dir=out,
+        device="cpu",
+        num_epochs=2,
+    )
+    assert "training without periodic eval" in capsys.readouterr().out
 
 
 def test_run_train_warns_when_val_paths_supplied_but_eval_period_zero(
     toy_workspace: dict[str, Path], tmp_path: Path
 ) -> None:
+    # Explicitly disabled eval (eval_period=0) but val paths still supplied → warn
+    # the val set is unused. (eval_period defaults to 1, so this must be set to 0.)
+    cfg_zero = _cfg_with_eval_period(toy_workspace, tmp_path, period=0)
     out = tmp_path / "train_eval_unused_val"
-    # Use the original cfg (eval_period=0). The freeze_at warning will
-    # also fire on this random-init path, so we filter for our message.
     with pytest.warns(UserWarning) as record:
         run_train(
-            toy_workspace["cfg"],
+            cfg_zero,
             coco_gt_json=toy_workspace["json"],
             image_root=toy_workspace["images"],
             output_dir=out,
