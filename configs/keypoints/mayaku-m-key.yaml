@@ -1,5 +1,5 @@
-# mayaku-xl (keypoints) — max accuracy. ConvNeXt-base + FPN + UniQuery (QGN, 2 stages).
-# ~117M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
+# mayaku-m-key (keypoints) — real-time hero. ConvNeXt-tiny + FPN + UniQuery (QGN, 2 stages).
+# ~33M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
 # dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.
 
 model:
@@ -7,26 +7,26 @@ model:
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_base
+    name: convnext_tiny
     freeze_at: 0
     norm: FrozenBN
   fpn:
     in_features: [res2, res3, res4, res5]
-    out_channels: 256   # MUST equal uniquery_head.hidden_dim
+    out_channels: 128   # MUST equal uniquery_head.hidden_dim
     norm: ''
     fuse_type: sum
   roi_heads:
     num_classes: 1
   uniquery_head:
     num_proposals: 300
-    hidden_dim: 256
+    hidden_dim: 128
     num_heads: 8
     num_stages: 2
     uniquery_generator: true
     dim_feedforward: 2048    # absolute (Sparse R-CNN), not scaled with hidden_dim
     dim_dynamic: 64         # absolute (Sparse R-CNN), not scaled with hidden_dim
     pooler_resolution: 7
-    pooler_sampling_ratio: 2   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier
+    pooler_sampling_ratio: 1   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier
     dropout: 0.0
     cost_class: 2.0
     cost_bbox: 5.0

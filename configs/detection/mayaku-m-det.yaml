@@ -1,5 +1,5 @@
-# mayaku-n (detection) — real-time edge. ConvNeXt-femto + FPN + UniQuery (QGN, 2 stages).
-# ~10M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
+# mayaku-m-det (detection) — real-time hero. ConvNeXt-tiny + FPN + UniQuery (QGN, 2 stages).
+# ~33M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
 # dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.
 
 model:
@@ -7,7 +7,7 @@ model:
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_femto
+    name: convnext_tiny
     freeze_at: 0
     norm: FrozenBN
   fpn:

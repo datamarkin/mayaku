@@ -1,5 +1,5 @@
-# mayaku-xxl (segmentation) — accuracy ceiling. ConvNeXt-base + FPN + UniQuery (QGN, 6 stages).
-# ~167M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
+# mayaku-s-seg (segmentation) — real-time. ConvNeXt-nano + FPN + UniQuery (QGN, 2 stages).
+# ~20M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
 # dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.
 
 model:
@@ -7,26 +7,26 @@ model:
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_base
+    name: convnext_nano
     freeze_at: 0
     norm: FrozenBN
   fpn:
     in_features: [res2, res3, res4, res5]
-    out_channels: 256   # MUST equal uniquery_head.hidden_dim
+    out_channels: 128   # MUST equal uniquery_head.hidden_dim
     norm: ''
     fuse_type: sum
   roi_heads:
     num_classes: 80
   uniquery_head:
     num_proposals: 300
-    hidden_dim: 256
+    hidden_dim: 128
     num_heads: 8
-    num_stages: 6
+    num_stages: 2
     uniquery_generator: true
     dim_feedforward: 2048    # absolute (Sparse R-CNN), not scaled with hidden_dim
     dim_dynamic: 64         # absolute (Sparse R-CNN), not scaled with hidden_dim
     pooler_resolution: 7
-    pooler_sampling_ratio: 2   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier
+    pooler_sampling_ratio: 1   # samples per ROI bin (fixed; same in train + deploy). 1 = real-time tier, 2 = accuracy tier
     dropout: 0.0
     cost_class: 2.0
     cost_bbox: 5.0
@@ -35,12 +35,12 @@ model:
     pooler_resolution: 14
     mask_resolution: 28
     num_conv: 4
-    conv_dim: 256     # scale the mask head with the model
+    conv_dim: 128     # scale the mask head with the model
     loss_weight: 1.0       # real GT masks; lower to 0.5 only for noisy pseudo-masks
 
 input:
   resize_mode: letterbox
-  size_budget: 800   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)
+  size_budget: 640   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)
   train_scale_min: 0.64   # multi-scale letterbox train: budget fraction floor → full deploy canvas
   random_flip: horizontal
   color_jitter_enabled: true

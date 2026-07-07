@@ -1,5 +1,5 @@
-# mayaku-l (segmentation) — best AP/speed. ConvNeXt-tiny + FPN + UniQuery (QGN, 2 stages).
-# ~57M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
+# mayaku-xl-key (keypoints) — max accuracy. ConvNeXt-base + FPN + UniQuery (QGN, 2 stages).
+# ~117M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
 # dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.
 
 model:
@@ -7,7 +7,7 @@ model:
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_tiny
+    name: convnext_base
     freeze_at: 0
     norm: FrozenBN
   fpn:
@@ -16,7 +16,7 @@ model:
     norm: ''
     fuse_type: sum
   roi_heads:
-    num_classes: 80
+    num_classes: 1
   uniquery_head:
     num_proposals: 300
     hidden_dim: 256
@@ -31,12 +31,10 @@ model:
     cost_class: 2.0
     cost_bbox: 5.0
     cost_giou: 2.0
-  uniquery_mask:
+  uniquery_keypoint:
     pooler_resolution: 14
-    mask_resolution: 28
-    num_conv: 4
-    conv_dim: 256     # scale the mask head with the model
-    loss_weight: 1.0       # real GT masks; lower to 0.5 only for noisy pseudo-masks
+    num_keypoints: 17        # COCO person-pose keypoints
+    loss_weight: 1.0
 
 input:
   resize_mode: letterbox
@@ -49,7 +47,6 @@ input:
   color_jitter_saturation: 0.7
   color_jitter_hue: 0.015
   color_jitter_prob: 0.5
-  mask_format: polygon   # COCO instance masks; use bitmask for RLE
 
 solver:
   optimizer_name: AdamW

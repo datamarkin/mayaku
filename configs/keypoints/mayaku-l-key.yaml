@@ -1,5 +1,5 @@
-# mayaku-xxl (detection) — accuracy ceiling. ConvNeXt-base + FPN + UniQuery (QGN, 6 stages).
-# ~167M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
+# mayaku-l-key (keypoints) — best AP/speed. ConvNeXt-tiny + FPN + UniQuery (QGN, 2 stages).
+# ~57M params (detection). Head dims are ABSOLUTE (Sparse R-CNN):
 # dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.
 
 model:
@@ -7,7 +7,7 @@ model:
   pixel_mean: [123.675, 116.28, 103.53]
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
-    name: convnext_base
+    name: convnext_tiny
     freeze_at: 0
     norm: FrozenBN
   fpn:
@@ -16,12 +16,12 @@ model:
     norm: ''
     fuse_type: sum
   roi_heads:
-    num_classes: 80
+    num_classes: 1
   uniquery_head:
     num_proposals: 300
     hidden_dim: 256
     num_heads: 8
-    num_stages: 6
+    num_stages: 2
     uniquery_generator: true
     dim_feedforward: 2048    # absolute (Sparse R-CNN), not scaled with hidden_dim
     dim_dynamic: 64         # absolute (Sparse R-CNN), not scaled with hidden_dim
@@ -31,10 +31,14 @@ model:
     cost_class: 2.0
     cost_bbox: 5.0
     cost_giou: 2.0
+  uniquery_keypoint:
+    pooler_resolution: 14
+    num_keypoints: 17        # COCO person-pose keypoints
+    loss_weight: 1.0
 
 input:
   resize_mode: letterbox
-  size_budget: 800   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)
+  size_budget: 640   # compute-budget dial (canvas = largest 128-aligned (H,W) under size_budget^2)
   train_scale_min: 0.64   # multi-scale letterbox train: budget fraction floor → full deploy canvas
   random_flip: horizontal
   color_jitter_enabled: true
