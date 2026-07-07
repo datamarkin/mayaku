@@ -11,6 +11,7 @@ from mayaku.config import MayakuConfig
 from mayaku.tuning.dataset_stats import DatasetStats
 from mayaku.tuning.recipe import (
     ARCHITECTURE_TUNED_PATHS,
+    FINETUNE_BACKBONE_LR_RATIO,
     FINETUNE_BASE_LR,
     MAX_FINETUNE_EPOCHS,
     MIN_BOXES_FOR_ANCHOR_TUNE,
@@ -20,6 +21,7 @@ from mayaku.tuning.recipe import (
     collect_set_paths,
     derive_overrides,
     filter_unset,
+    finetune_llrd_decay,
     size_bucket,
     walk_leaves,
 )
@@ -124,6 +126,62 @@ def test_finetune_base_lr_scales_with_effective_batch() -> None:
     adamw_lr = derive_overrides(_stats(num_images=2_000), adamw)["solver"]["base_lr"]
     assert sgd_lr == pytest.approx(FINETUNE_BASE_LR * 2)  # linear in batch
     assert adamw_lr == pytest.approx(FINETUNE_BASE_LR * math.sqrt(2))  # sqrt in batch
+
+
+# ---------------------------------------------------------------------------
+# Hot-head / cold-backbone LLRD decay
+# ---------------------------------------------------------------------------
+
+
+def _llrd_cfg(backbone: str = "convnext_femto", llrd_enabled: bool = True) -> MayakuConfig:
+    # UniQuery + a ConvNeXt backbone, the shape the checkpoint sidecar carries on
+    # the mayaku fine-tune path (llrd_enabled baked true). fpn.out_channels must
+    # equal uniquery_head.hidden_dim.
+    return MayakuConfig.model_validate(
+        {
+            "model": {
+                "meta_architecture": "uniquery",
+                "backbone": {"name": backbone},
+                "fpn": {"out_channels": 128},
+                "uniquery_head": {"hidden_dim": 128},
+            },
+            "solver": {"llrd_enabled": llrd_enabled, "optimizer_name": "AdamW"},
+        }
+    )
+
+
+def test_finetune_llrd_decay_lands_stem_at_ratio() -> None:
+    # The whole point: decay ** (num_layers + 1) == the head->stem ratio, for any
+    # depth. This is the invariant every emitted decay must satisfy.
+    for num_layers in (4, 6, 12):
+        decay = finetune_llrd_decay(num_layers)
+        assert decay ** (num_layers + 1) == pytest.approx(FINETUNE_BACKBONE_LR_RATIO)
+
+
+def test_derive_overrides_emits_depth_conditioned_llrd_decay() -> None:
+    # Shallow backbones (num_layers 6) get a steeper decay than deep ones
+    # (num_layers 12), both anchored to the same 1/10 head->stem ratio.
+    shallow = derive_overrides(_stats(), _llrd_cfg("convnext_femto"))["solver"]["llrd_decay"]
+    deep = derive_overrides(_stats(), _llrd_cfg("convnext_large"))["solver"]["llrd_decay"]
+    assert shallow == pytest.approx(0.1 ** (1 / 7))  # ~0.720
+    assert deep == pytest.approx(0.1 ** (1 / 13))  # ~0.838
+    assert shallow < deep  # shallower net -> steeper per-layer decay
+
+
+def test_derive_overrides_no_llrd_decay_when_llrd_disabled() -> None:
+    # The recipe delivers the split THROUGH LLRD; if the config doesn't run
+    # LLRD, the recipe must not silently turn it on via a decay override.
+    overrides = derive_overrides(_stats(), _llrd_cfg("convnext_femto", llrd_enabled=False))
+    assert "llrd_decay" not in overrides["solver"]
+    # The default (resnet, SGD, llrd off) config likewise emits none.
+    assert "llrd_decay" not in derive_overrides(_stats(), MayakuConfig())["solver"]
+
+
+def test_llrd_decay_is_overridable_by_user() -> None:
+    # A pinned llrd_decay must survive auto-config, like any explicit value.
+    overrides = derive_overrides(_stats(), _llrd_cfg("convnext_femto"))
+    filtered = filter_unset(overrides, {"solver.llrd_decay"})
+    assert "llrd_decay" not in filtered["solver"]
 
 
 def test_anchor_overrides_gated_to_anchor_consuming_archs() -> None:

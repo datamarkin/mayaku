@@ -215,6 +215,62 @@ def test_resolve_llrd_num_layers_resnet_is_four() -> None:
     assert _resolve_llrd_num_layers(nn.Module(), "", "resnet") == 4
 
 
+# --- Anti-drift: the recipe's name-based num_layers must match the engine's --
+#
+# The fine-tune LLRD decay (tuning/recipe.py) is chosen so the backbone stem
+# lands at ~1/10 the head LR; that target only lands if the recipe's num_layers
+# (derived torch-free from the backbone NAME) equals what the engine derives
+# from the BUILT model. We pin them against an INDEPENDENT ground truth for
+# stage-2 depth — never against recipe's own _CONVNEXT_STAGE2_BLOCKS, or the
+# test couldn't catch that table drifting.
+
+
+def test_recipe_llrd_stage2_table_covers_all_convnext_variants() -> None:
+    from typing import get_args
+
+    from mayaku.models.backbones.convnext import ConvNeXtVariant
+    from mayaku.tuning.recipe import _CONVNEXT_STAGE2_BLOCKS
+
+    # The table must cover exactly the real variant Literal — no more, no less.
+    assert set(_CONVNEXT_STAGE2_BLOCKS) == set(get_args(ConvNeXtVariant))
+
+
+def _engine_num_layers_for_stage2(stage2_blocks: int) -> int:
+    model = nn.Sequential(_StubConvNeXtForNumLayers(stage2_blocks))
+    return _resolve_llrd_num_layers(model, "0", "convnext")
+
+
+def test_llrd_finetune_num_layers_matches_engine() -> None:
+    from mayaku.models.backbones.convnext import _CUSTOM_BLOCK_SETTINGS, ConvNeXtBackbone
+    from mayaku.tuning.recipe import _llrd_num_layers
+
+    # Custom variants (atto/femto/pico/nano): ground-truth stage-2 depth from
+    # the settings table the backbone is actually built from — an independent
+    # source from recipe's table, and free (no allocation).
+    for name, settings in _CUSTOM_BLOCK_SETTINGS.items():
+        stage2_blocks = settings[2][2]  # (c_in, c_out, depth) of stage 2 ("res4")
+        assert _llrd_num_layers(name) == _engine_num_layers_for_stage2(stage2_blocks)
+
+    # Torchvision variants: torchvision itself is the only ground truth, so
+    # build ONE real backbone per LLRD bucket (tiny -> 6, small -> 12) rather
+    # than all four — base/large are 88M/196M params and share small's
+    # [3,3,27,3] stage-2, pinned below.
+    for name in ("convnext_tiny", "convnext_small"):
+        blocks = len(ConvNeXtBackbone(name)._res_stages["res4"])
+        assert _llrd_num_layers(name) == _engine_num_layers_for_stage2(blocks)
+    # base/large share small's stage-2 depth (torchvision [3,3,27,3]); pin their
+    # num_layers to small's so a table typo can't slip past the skipped builds.
+    for name in ("convnext_base", "convnext_large"):
+        assert _llrd_num_layers(name) == _llrd_num_layers("convnext_small")
+
+
+def test_llrd_finetune_num_layers_resnet_matches_engine() -> None:
+    from mayaku.tuning.recipe import _llrd_num_layers
+
+    for name in ("resnet50", "resnet101", "resnext101_32x8d"):
+        assert _llrd_num_layers(name) == _resolve_llrd_num_layers(nn.Module(), "", "resnet")
+
+
 # --- GOLDEN-VALUE TEST (synthetic names, hand-derived expected) -----------
 
 # Hand-written enumeration of every ConvNeXt adapter branch. Each row is a
