@@ -830,6 +830,9 @@ class AutoConfig(_BaseModel):
       the checkpoint bakes the *pretraining* LR, and fine-tuning wants
       ~10x more, so the recipe emits a flat fine-tune default
       (``FINETUNE_BASE_LR``) batch-scaled to the run's effective batch
+    * ``solver.llrd_decay`` — only when the config runs LLRD: a
+      depth-adjusted decay that puts the backbone stem at ~1/10 the head
+      LR (hot-head/cold-backbone fine-tune split; ``base_lr`` is the head)
     * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
       dataset size bucket
     * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to

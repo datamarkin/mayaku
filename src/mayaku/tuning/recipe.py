@@ -22,7 +22,11 @@ It only ever emits three kinds of fields:
   regressed every far-from-COCO set). The recipe emits a flat fine-tune
   default (:data:`FINETUNE_BASE_LR`), batch-scaled off its validated
   anchor; a pinned ``base_lr`` (YAML/overrides) still wins via
-  :func:`filter_unset`.
+  :func:`filter_unset`. When the config runs LLRD, ``base_lr`` is the
+  *head* LR and the recipe also emits a depth-adjusted ``llrd_decay``
+  (:func:`finetune_llrd_decay`) that ramps the backbone down to ~1/10 of
+  it — the hot-head/cold-backbone split (see
+  :data:`FINETUNE_BACKBONE_LR_RATIO`).
 
 Genuinely architecture-tuned hyperparameters — ``freeze_at``, the EMA
 constants, optimizer settings, loss weights — are NEVER emitted: the
@@ -57,6 +61,7 @@ from mayaku.tuning.dataset_stats import DatasetStats
 
 __all__ = [
     "ARCHITECTURE_TUNED_PATHS",
+    "FINETUNE_BACKBONE_LR_RATIO",
     "FINETUNE_BASE_LR",
     "MAX_FINETUNE_EPOCHS",
     "MIN_BOXES_FOR_ANCHOR_TUNE",
@@ -67,6 +72,7 @@ __all__ = [
     "collect_set_paths",
     "derive_overrides",
     "filter_unset",
+    "finetune_llrd_decay",
     "size_bucket",
     "walk_leaves",
 ]
@@ -139,6 +145,77 @@ FINETUNE_BASE_LR: Final = 1.0e-3
 # Effective batch FINETUNE_BASE_LR was validated at; the anchor for the
 # LR<->batch scaling below. Matches the family configs' 4x4 = 16.
 REFERENCE_BATCH: Final = 16
+
+# Hot-head / cold-backbone fine-tune split, delivered through LLRD's existing
+# per-layer ramp (no new solver knob). The re-initialised head/neck sit at
+# base_lr (LLRD scale 1.0); the recipe picks llrd_decay so the input-most
+# backbone layer (LLRD layer_id 0 — the stem) lands at FINETUNE_BACKBONE_LR_RATIO
+# of the head LR. That is the ~10x discriminative-fine-tune separation (ULMFiT):
+# the random head learns fast while the pretrained backbone barely moves. The
+# 10x head->stem ratio is benchmark-validated on the smallest model; the
+# deeper-scale decays it implies are principled starting points to sweep.
+#
+# The stem's LLRD scale is decay ** (num_layers + 1): from
+# engine.optim._build_llrd_groups, scale = decay ** ((num_layers + 2) - layer_id
+# - 1), and layer_id 0 gives the exponent num_layers + 1. Solving
+# decay ** (num_layers + 1) = ratio for the decay gives finetune_llrd_decay()
+# below. Because num_layers is set by backbone DEPTH, one fixed head->stem ratio
+# yields a steeper decay for shallow backbones and a shallower one for deep ones
+# — the depth-invariant way to port the ratio across model scales (at ratio=0.1:
+# num_layers 6 -> 0.720, num_layers 12 -> 0.838). NB: this is a *ramp*, so the
+# upper backbone stages train well above the ratio (only the stem hits it) — a
+# hotter-backbone regime than a flat 1/10 split; confirm on the smallest model.
+FINETUNE_BACKBONE_LR_RATIO: Final = 0.1
+
+# ConvNeXt "res4" (== MMDet stage-2) block count per variant — the sole input to
+# LLRD's num_layers bucketing (<= 9 blocks -> 6, else 12). Torch-free mirror of
+# the depths in models/backbones/convnext.py; the resulting num_layers MUST
+# match engine.optim._resolve_llrd_num_layers (which derives it from the built
+# model). Kept honest by test_llrd_finetune_num_layers_matches_engine.
+_CONVNEXT_STAGE2_BLOCKS: Final = {
+    "convnext_atto": 6,
+    "convnext_femto": 6,
+    "convnext_pico": 6,
+    "convnext_nano": 8,
+    "convnext_tiny": 9,
+    "convnext_small": 27,
+    "convnext_base": 27,
+    "convnext_large": 27,
+}
+# ResNet/ResNeXt LLRD depth: stem(0) + res{2,3,4,5}(1..4). Fixed at 4, matching
+# engine.optim._resolve_llrd_num_layers's resnet branch.
+_RESNET_LLRD_NUM_LAYERS: Final = 4
+
+
+def finetune_llrd_decay(
+    num_layers: int, ratio: float = FINETUNE_BACKBONE_LR_RATIO
+) -> float:
+    """LLRD decay putting the stem (layer_id 0) at ``ratio`` x the head LR.
+
+    Inverts the stem's LLRD scale ``decay ** (num_layers + 1)`` (see
+    :data:`FINETUNE_BACKBONE_LR_RATIO`). ``num_layers`` is the backbone's LLRD
+    depth as resolved by :func:`_llrd_num_layers`.
+    """
+    return float(ratio ** (1.0 / (num_layers + 1)))
+
+
+def _llrd_num_layers(backbone_name: str) -> int | None:
+    """LLRD ``num_layers`` for a backbone variant, or ``None`` if unsupported.
+
+    Mirrors :func:`mayaku.engine.optim._resolve_llrd_num_layers` from the name
+    alone — the tuning package stays torch-free and can't build the model to
+    count blocks. The two are cross-checked by
+    ``test_llrd_finetune_num_layers_matches_engine``.
+    """
+    if backbone_name.startswith("convnext_"):
+        # The name is a closed BackboneName Literal and the table is proven
+        # exhaustive over convnext variants (test_recipe_llrd_stage2_table_
+        # covers_all_convnext_variants), so a missing key is a genuine bug —
+        # let it KeyError loudly rather than silently drop the decay.
+        return 6 if _CONVNEXT_STAGE2_BLOCKS[backbone_name] <= 9 else 12
+    if backbone_name.startswith(("resnet", "resnext")):
+        return _RESNET_LLRD_NUM_LAYERS
+    return None
 
 
 @dataclass(frozen=True)
@@ -248,6 +325,16 @@ def derive_overrides(
         "base_lr": FINETUNE_BASE_LR * lr_factor,
         "num_epochs": num_epochs,
     }
+    # Hot-head/cold-backbone split via LLRD (see FINETUNE_BACKBONE_LR_RATIO).
+    # Only when the checkpoint config actually runs LLRD (the mayaku family
+    # does): pick a depth-adjusted decay so the stem lands at ~1/10 the head LR.
+    # base_lr (above) is the head LR; this decay ramps the backbone below it.
+    # Like base_lr, the recipe owns the fine-tune value — the config's baked
+    # llrd_decay is overridden, and filter_unset still lets a pinned one win.
+    if cfg.solver.llrd_enabled:
+        num_layers = _llrd_num_layers(cfg.model.backbone.name)
+        if num_layers is not None:
+            solver_overrides["llrd_decay"] = finetune_llrd_decay(num_layers)
 
     # ----- input augs -----
     input_overrides: dict[str, Any] = {
