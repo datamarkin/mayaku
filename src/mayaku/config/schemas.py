@@ -798,9 +798,11 @@ class TestConfig(_BaseModel):
     # 100 starves recall on dense/multi-class scenes.
     detections_per_image: Annotated[int, Field(gt=0)] = 300
     # Eval cadence in EPOCHS (resolved to iterations against the dataset size at
-    # train time, like ``num_epochs``). ``0`` disables periodic eval. Epoch-
-    # relative so it fires the same number of times regardless of dataset size.
-    eval_period: Annotated[int, Field(ge=0)] = 0
+    # train time, like ``num_epochs``). Default ``1`` = eval every epoch when a val
+    # dataset is provided; ``0`` disables periodic eval. With no val dataset eval is
+    # skipped regardless, without error (see run_train). Epoch-relative so it fires
+    # the same number of times regardless of dataset size.
+    eval_period: Annotated[int, Field(ge=0)] = 1
     precise_bn_enabled: bool = False
     precise_bn_num_iter: Annotated[int, Field(gt=0)] = 200
 

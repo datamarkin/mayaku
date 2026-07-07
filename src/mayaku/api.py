@@ -210,10 +210,12 @@ def train(
     # --- No-val short-circuit (after overrides, so eval_period is final) --
     eval_after = val_annotations is not None
     if not eval_after and cfg.test.eval_period > 0:
-        warnings.warn(
-            "test.eval_period > 0 but no val_annotations/val_images provided — "
-            "mid-training eval disabled. Pass val_annotations + val_images to enable.",
-            stacklevel=2,
+        # Eval every epoch is the default; with no val set, skip it (info, not a
+        # warning — a no-val fine-tune is a normal, expected use, not a misconfig).
+        print(
+            "[mayaku.train] no val_annotations/val_images provided — training "
+            "without periodic eval.",
+            flush=True,
         )
         cfg = merge_overrides(cfg, {"test": {"eval_period": 0}})
 

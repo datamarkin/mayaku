@@ -150,21 +150,22 @@ def run_train(
         # even though the value didn't come from the YAML.
         user_set_paths.add("solver.num_epochs")
 
-    # Periodic eval requires both the dataset paths *and* an enabled
-    # period; rejecting the half-configured cases up front means users
-    # see the error at config-load, not at the first periodic firing
-    # which could be hours into training.
+    # Periodic eval needs both an enabled period AND a val dataset; resolve the two
+    # half-configured cases here (never a crash — eval-every-epoch is the default,
+    # so a no-val run must stay valid). No val paths → train without eval; val paths
+    # but the period explicitly off → note the val set goes unused.
     if cfg.test.eval_period > 0 and (val_json is None or val_image_root is None):
-        raise ValueError(
-            f"test.eval_period={cfg.test.eval_period} > 0 requires --val-json "
-            "and --val-images to be passed. Either set test.eval_period=0 to "
-            "disable periodic eval, or supply the val dataset paths."
+        print(
+            f"[train] test.eval_period={cfg.test.eval_period} but no val dataset "
+            "(--val-json/--val-images) provided — training without periodic eval.",
+            flush=True,
         )
-    if cfg.test.eval_period == 0 and (val_json is not None or val_image_root is not None):
+        cfg = merge_overrides(cfg, {"test": {"eval_period": 0}})
+    elif cfg.test.eval_period == 0 and (val_json is not None or val_image_root is not None):
         warnings.warn(
             "--val-json/--val-images supplied but test.eval_period=0; the val "
-            "dataset will be ignored. Set test.eval_period to a positive "
-            "iteration count to enable mid-training eval.",
+            "dataset will be ignored. Set test.eval_period to a positive epoch "
+            "count to enable mid-training eval.",
             stacklevel=2,
         )
 
