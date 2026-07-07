@@ -61,7 +61,6 @@ from __future__ import annotations
 
 import json
 import time
-import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
