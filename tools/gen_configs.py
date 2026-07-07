@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the ``mayaku-{n,s,m,l,xl,xxl}`` config family — the source of truth.
+"""Generate the ``mayaku-{n,s,m,l,xl,xxl}-{det,seg,key}`` config family — the source of truth.
 
 The 18 family configs (6 tiers × {detection, segmentation, keypoints}) are *derived* from
 the :data:`TIERS` table below, not hand-maintained. A tier supplies five inputs
@@ -62,6 +62,14 @@ TIERS: tuple[Tier, ...] = (
     Tier("xxl", "convnext_base", 256, 6, 800, False, "accuracy ceiling", "167M"),
 )
 
+# Task → filename/weight token. First three letters of the task, so the config
+# stem matches its weight stem: mayaku-n-det.yaml pairs with mayaku-n-det.pth.
+TASK_TOKEN: dict[str, str] = {
+    "detection": "det",
+    "segmentation": "seg",
+    "keypoints": "key",
+}
+
 
 def _backbone_display(backbone: str) -> str:
     """``convnext_femto`` -> ``ConvNeXt-femto`` for the header comment."""
@@ -73,7 +81,7 @@ def _header(tier: Tier, task: str) -> str:
     """The 3-line header comment block (task-aware title; shared body)."""
     bb = _backbone_display(tier.backbone)
     return (
-        f"# mayaku-{tier.name} ({task}) — {tier.desc}. "
+        f"# mayaku-{tier.name}-{TASK_TOKEN[task]} ({task}) — {tier.desc}. "
         f"{bb} + FPN + UniQuery (QGN, {tier.num_stages} stages).\n"
         f"# ~{tier.params} params (detection). Head dims are ABSOLUTE (Sparse R-CNN):\n"
         f"# dim_feedforward = 2048, dim_dynamic = 64, pooler 7 — NOT scaled with hidden_dim.\n"
@@ -237,7 +245,7 @@ def _targets() -> list[tuple[Path, str]]:
         for tier in TIERS:
             text = render(tier, task)
             _validate(text)
-            out.append((CONFIGS / task / f"mayaku-{tier.name}.yaml", text))
+            out.append((CONFIGS / task / f"mayaku-{tier.name}-{TASK_TOKEN[task]}.yaml", text))
     return out
 
 
