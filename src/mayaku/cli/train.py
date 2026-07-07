@@ -160,7 +160,7 @@ def run_train(
             "(--val-json/--val-images) provided — training without periodic eval.",
             flush=True,
         )
-        cfg = merge_overrides(cfg, {"test": {"eval_period": 0}})
+        cfg = cfg.model_copy(update={"test": cfg.test.model_copy(update={"eval_period": 0})})
     elif cfg.test.eval_period == 0 and (val_json is not None or val_image_root is not None):
         warnings.warn(
             "--val-json/--val-images supplied but test.eval_period=0; the val "
