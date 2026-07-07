@@ -1,18 +1,10 @@
 # Faster R-CNN — ConvNeXt-Small + FPN, 1x schedule (90k iters).
 # Backbone: ConvNeXt-Small (50M params, depths [3,3,27,3], dims [96,192,384,768]).
 #
-# Ships with `weights_path` pre-filled for the DINOv3 LVD-1689M
-# checkpoint. Swap for any compatible ConvNeXt .pth or .safetensors
-# (the original Liu et al. release, other distillations, your own
-# fine-tunes), or drop the field and pair with `--pretrained-backbone`
-# for torchvision ImageNet-1k init instead.
-#
 # Recipe: cosine LR, EMA weight averaging, photometric jitter.
-# Whole-backbone fine-tune (freeze_at=0).
-#
-# DINOv3 weights are license-gated; download from
-# https://huggingface.co/facebook/dinov3-convnext-small-pretrain-lvd1689m
-# after accepting the upstream license.
+# The backbone is architecture-only (random init); warm-start a full
+# mayaku checkpoint with `--weights` to fine-tune. freeze_at=0 trains the
+# whole backbone (required for random init).
 #
 # VRAM rough guide (1x, 800-pixel short side, fp32):
 #   12 GB GPU: ims_per_batch=4, grad_accum_steps=4 (effective batch 16) — this file
@@ -22,7 +14,6 @@ model:
   backbone:
     name: convnext_small
     freeze_at: 0
-    weights_path: models/dinov3/dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth
   roi_heads:
     num_classes: 80
   roi_box_head:

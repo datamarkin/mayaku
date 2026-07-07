@@ -4,25 +4,14 @@
 # Optimizer: AdamW. ConvNeXt is an AdamW architecture — the original
 # Liu et al. 2022 paper, the official `facebookresearch/ConvNeXt`
 # object-detection repo, MMDet's ConvNeXt configs, and Detectron2's
-# ConvNeXt baselines all use AdamW. SGD at the R-50 LR (0.02) destroys
-# the pretrained features in the first thousand iterations on
-# LayerNorm/GELU-based architectures.
-#
-# Ships with `weights_path` pre-filled for the DINOv3 LVD-1689M
-# checkpoint (distillation from a frozen ViT-7B teacher). Swap it for
-# any compatible ConvNeXt .pth or .safetensors (the original Liu et al.
-# release, other distillations, your own fine-tunes), or drop the
-# field and pair with `--pretrained-backbone` for torchvision
-# ImageNet-1k init instead.
+# ConvNeXt baselines all use AdamW. SGD at the R-50 LR (0.02) is unstable
+# on LayerNorm/GELU-based architectures.
 #
 # Recipe: AdamW + cosine LR + EMA weight averaging + photometric jitter.
-# Whole-backbone fine-tune (freeze_at=0) — strong pretrained features
-# (e.g., DINOv3) make whole-backbone fine-tune the typical recipe;
-# freezing early stages tends to leave AP on the table.
-#
-# DINOv3 weights are license-gated; Mayaku ships no URLs. Download from
-# https://huggingface.co/facebook/dinov3-convnext-tiny-pretrain-lvd1689m
-# after accepting the upstream license.
+# The backbone is architecture-only (random init); warm-start a full
+# mayaku checkpoint with `--weights` to fine-tune. freeze_at=0 trains the
+# whole backbone — required here, since freezing random-init stages would
+# never converge.
 #
 # VRAM rough guide (1x schedule, 800-pixel short side, fp32):
 #   12 GB GPU: ims_per_batch=8, grad_accum_steps=2 (effective batch 16) — this file
@@ -31,22 +20,15 @@ model:
   meta_architecture: faster_rcnn
   backbone:
     name: convnext_tiny
-    # Strong pretrained features (e.g., DINOv3) cover low-level texture
-    # as well as semantics — whole-backbone fine-tune is the typical
-    # recipe and gives best AP on standard detection benchmarks. Bump
-    # to 1 (freeze stem) to recover ~10% backbone compute if VRAM-bound;
-    # freeze_at >= 2 is rarely worth it.
     freeze_at: 0
-    weights_path: /home/dataserver/Downloads/convnext_tiny_22k_224.pth
   roi_heads:
     num_classes: 80
   roi_box_head:
     num_conv: 0
     num_fc: 2
     fc_dim: 1024
-  # Pretrained ConvNeXt checkpoints use standard ImageNet RGB
-  # normalisation, same convention as torchvision's pretrained ResNet —
-  # std-normalised inputs in 0..255.
+  # Standard ImageNet RGB normalisation — std-normalised inputs in
+  # 0..255, same convention as torchvision.
   pixel_std: [58.395, 57.120, 57.375]
 
 input:

@@ -8,8 +8,6 @@ model:
   pixel_std:  [58.395, 57.12, 57.375]
   backbone:
     name: convnext_femto
-
-    weights_path: null
     freeze_at: 0
     norm: FrozenBN
   fpn:
