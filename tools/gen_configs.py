@@ -129,8 +129,6 @@ def render(tier: Tier, task: str) -> str:
         "  pixel_std:  [58.395, 57.12, 57.375]\n"
         "  backbone:\n"
         f"    name: {tier.backbone}\n"
-        "\n"
-        "    weights_path: null\n"
         "    freeze_at: 0\n"
         "    norm: FrozenBN\n"
         "  fpn:\n"

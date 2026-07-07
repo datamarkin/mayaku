@@ -339,15 +339,10 @@ def run_train(
     # Surface the most common silent footgun: freezing early backbone stages
     # at random init (the schema's freeze_at=2 default assumes a pretrained
     # backbone). Warn here rather than after model construction so the
-    # message lands before the slow torch.load / weight download.
-    #
-    # ``weights`` (a mayaku checkpoint loaded on top of the architecture-only
-    # backbone) is the only live init source. ``weights_path`` no longer seeds
-    # anything — the backbone is architecture-only — so this term is vestigial
-    # and goes away with the field in the weights_path cleanup; it's kept for
-    # now only so a config still carrying the field behaves as it did before.
-    backbone_initialized = weights is not None or cfg.model.backbone.weights_path is not None
-    if not backbone_initialized and cfg.model.backbone.freeze_at >= 1:
+    # message lands before the slow torch.load. Warm-starting via ``--weights``
+    # (a mayaku checkpoint loaded on top of the architecture-only backbone) is
+    # the only init source, so a set ``weights`` suppresses the warning.
+    if weights is None and cfg.model.backbone.freeze_at >= 1:
         warnings.warn(
             f"Backbone is random-init but freeze_at={cfg.model.backbone.freeze_at} "
             "is freezing the early stages. Random-init frozen features cannot "

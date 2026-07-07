@@ -7,9 +7,8 @@ eval, metadata.json) lives in :func:`mayaku.train`. For per-run knobs
 beyond the YAML's defaults, pass ``overrides=`` (a dict in the schema
 shape, e.g. ``{"solver": {"base_lr": 1e-3}}``).
 
-For ConvNeXt configs, the YAML's ``weights_path`` selects the
-pretrained checkpoint (e.g. DINOv3 LVD-1689M). When unset, torchvision
-ImageNet-1k init is used automatically.
+Backbones are architecture-only (random init); warm-start a full mayaku
+checkpoint by passing ``weights=`` to :func:`mayaku.train`.
 """
 
 from __future__ import annotations
@@ -24,14 +23,12 @@ from mayaku import train
 # ---------------------------------------------------------------------------
 
 # Pick a config from configs/detection/. Examples:
-#   ResNet-50      : configs/detection/faster_rcnn_R_50_FPN_1x.yaml
-#   ConvNeXt-Tiny  : configs/detection/faster_rcnn_convnext_tiny_FPN_1x.yaml
-#   ConvNeXt-Small : configs/detection/faster_rcnn_convnext_small_FPN_1x.yaml
-#   ConvNeXt-Base  : configs/detection/faster_rcnn_convnext_base_FPN_1x.yaml
-#   ConvNeXt-Large : configs/detection/faster_rcnn_convnext_large_FPN_1x.yaml
-# The ConvNeXt configs ship with weights_path pre-filled for the DINOv3
-# LVD-1689M checkpoints in models/dinov3/; edit that field to swap.
-CONFIG       = Path("configs/detection/faster_rcnn_convnext_small_FPN_1x.yaml")
+#   ResNet-50      : configs/detection/faster_rcnn_R_50_FPN.yaml
+#   ConvNeXt-Tiny  : configs/detection/faster_rcnn_convnext_tiny_FPN.yaml
+#   ConvNeXt-Small : configs/detection/faster_rcnn_convnext_small_FPN.yaml
+#   ConvNeXt-Base  : configs/detection/faster_rcnn_convnext_base_FPN.yaml
+#   ConvNeXt-Large : configs/detection/faster_rcnn_convnext_large_FPN.yaml
+CONFIG       = Path("configs/detection/faster_rcnn_convnext_small_FPN.yaml")
 
 TRAIN_JSON   = Path("/path/coco/annotations/instances_train2017.json")
 TRAIN_IMAGES = Path("/path/coco/train2017")

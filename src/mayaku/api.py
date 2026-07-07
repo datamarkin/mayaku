@@ -332,7 +332,6 @@ def train(
     metadata: dict[str, Any] = {
         "config_stem": config_stem,
         "backbone": cfg.model.backbone.name,
-        "weights_path": cfg.model.backbone.weights_path,
         "num_classes": cfg.model.roi_heads.num_classes,
         "num_gpus": num_gpus,
         "num_epochs": cfg.solver.num_epochs,

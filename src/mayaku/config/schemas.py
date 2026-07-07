@@ -66,7 +66,7 @@ BackboneName = Literal[
     "resnext101_32x8d",
     # ConvNeXt variants. Atto/Femto/Pico/Nano use V2 size configs with
     # V1-style blocks (no GRN). Tiny/Small/Base/Large are torchvision's
-    # reference. Weight provenance is carried by weights_path, not name.
+    # reference.
     "convnext_atto",
     "convnext_femto",
     "convnext_pico",
@@ -108,7 +108,7 @@ class BackboneConfig(_BaseModel):
     The same config covers ResNet/ResNeXt and ConvNeXt variants;
     a model-validator rejects field combinations that don't apply to
     the chosen architecture (e.g. ``stride_in_1x1`` only makes sense
-    for ResNets, ``weights_path`` only for ConvNeXts).
+    for ResNets).
     """
 
     name: BackboneName = "resnet50"
@@ -123,22 +123,6 @@ class BackboneConfig(_BaseModel):
     # produces wrong activations (same shapes, identical kernels, different
     # downsampling step). Flip this to True when loading D2 model-zoo weights.
     stride_in_1x1: bool = False
-
-    # Local path to a pretrained ConvNeXt checkpoint. Accepts both
-    # torchvision key naming (``features.*.block.*.layer_scale``) and
-    # facebookresearch / Liu et al. key naming (``stages.*.{dwconv,
-    # norm,pwconv1,pwconv2,gamma}``, ``downsample_layers.*``). File
-    # formats: ``.pth`` / ``.pt`` / ``.bin`` (PyTorch pickle) and
-    # ``.safetensors`` (HuggingFace).
-    #
-    # Mayaku ships no URLs and no auto-download — the user supplies the
-    # file. Common sources: the original ConvNeXt release, the DINOv3
-    # LVD-1689M distillation
-    # (``facebook/dinov3-convnext-{tiny,small,base,large}-pretrain-lvd1689m``
-    # on HuggingFace, license-gated; accept the upstream license and
-    # download manually), or a user fine-tune. Only valid for
-    # ``convnext_*`` variants.
-    weights_path: str | None = None
 
     @model_validator(mode="after")
     def _check_arch_specific_fields(self) -> BackboneConfig:
@@ -165,12 +149,6 @@ class BackboneConfig(_BaseModel):
                 )
             if self.res5_dilation != 1:
                 raise ValueError("backbone.res5_dilation only applies to ResNet variants.")
-        else:
-            if self.weights_path is not None:
-                raise ValueError(
-                    f"backbone.weights_path is only valid for ConvNeXt variants "
-                    f"(got name={self.name!r})."
-                )
         return self
 
 
