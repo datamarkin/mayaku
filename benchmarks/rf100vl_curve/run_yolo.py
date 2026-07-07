@@ -48,10 +48,14 @@ def train_one(model_id: str, variant: str, name: str, dataset_dir: Path, out_roo
     """Default YOLO fine-tune on one dataset; per-epoch checkpoints the only extra."""
     out_dir = out_root / variant  # Ultralytics writes out_dir/name/weights/epoch*.pt
     run = out_dir / name
+    # Convert COCO→YOLO before the clock starts: it's a one-time data-prep cost YOLO
+    # alone pays (RF-DETR/Mayaku read COCO directly), so charging it to wall-clock
+    # would shift YOLO's whole curve right — most visibly at the smallest budget.
+    data_yaml = str(common.to_yolo(dataset_dir))
     t0 = time.time()
     kw = {"device": device} if device else {}
     YOLO(model_id).train(
-        data=str(common.to_yolo(dataset_dir)),
+        data=data_yaml,
         save_period=1,
         project=str(out_dir),
         name=name,
