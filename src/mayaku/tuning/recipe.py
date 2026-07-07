@@ -187,9 +187,7 @@ _CONVNEXT_STAGE2_BLOCKS: Final = {
 _RESNET_LLRD_NUM_LAYERS: Final = 4
 
 
-def finetune_llrd_decay(
-    num_layers: int, ratio: float = FINETUNE_BACKBONE_LR_RATIO
-) -> float:
+def finetune_llrd_decay(num_layers: int, ratio: float = FINETUNE_BACKBONE_LR_RATIO) -> float:
     """LLRD decay putting the stem (layer_id 0) at ``ratio`` x the head LR.
 
     Inverts the stem's LLRD scale ``decay ** (num_layers + 1)`` (see
