@@ -48,7 +48,7 @@ def test_committed_config_matches_generator(path: Path, want: str) -> None:
 def test_derived_invariants_hold(task: str, tier) -> None:
     from mayaku.config import load_yaml
 
-    cfg = load_yaml(_REPO / "configs" / task / f"mayaku-{tier.name}.yaml")
+    cfg = load_yaml(_REPO / "configs" / task / f"mayaku-{tier.name}-{gen.TASK_TOKEN[task]}.yaml")
     head = cfg.model.uniquery_head
     assert cfg.model.fpn.out_channels == head.hidden_dim == tier.hidden_dim
     # Head capacity is ABSOLUTE (Sparse R-CNN), not scaled with hidden_dim — the
