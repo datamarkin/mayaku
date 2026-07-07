@@ -155,6 +155,86 @@ def test_train_derives_config_from_weights(toy_workspace: dict[str, Any], tmp_pa
     )
     assert result["final_weights"].exists()
 
+    # The checkpoint's operational fields must NOT leak into the fine-tune: the
+    # toy sidecar carries checkpoint_period=2 and ims_per_batch=1, which the
+    # warm-start path resets to the fine-tune defaults (see
+    # _strip_operational_for_finetune). eval_period is separately zeroed here by
+    # the no-val short-circuit, so it isn't asserted (covered by the unit test).
+    from mayaku.config import load_yaml
+
+    resolved = load_yaml(out / "train" / "config.yaml")
+    assert resolved.solver.checkpoint_period == 1
+    assert resolved.solver.ims_per_batch == 4
+    assert resolved.solver.grad_accum_steps == 4
+    assert resolved.solver.amp_enabled is True
+    assert resolved.solver.amp_dtype == "bf16"
+
+
+def test_strip_operational_for_finetune_resets_only_operational_fields() -> None:
+    """The warm-start graft resets host/cadence fields to fine-tune defaults
+    while preserving the model architecture and the recipe regime."""
+    from mayaku.api import _strip_operational_for_finetune
+    from mayaku.config import (
+        DataLoaderConfig,
+        InputConfig,
+        MayakuConfig,
+        ModelConfig,
+        SolverConfig,
+        TestConfig,
+    )
+
+    # A config shaped like a mayaku pretrain sidecar: modern recipe regime plus
+    # operational values that belong to the *pretrain* run, not a new fine-tune.
+    ckpt = MayakuConfig(
+        model=ModelConfig(),  # faster_rcnn defaults — architecture to preserve
+        input=InputConfig(resize_mode="letterbox", color_jitter_enabled=True),
+        solver=SolverConfig(
+            optimizer_name="AdamW",
+            llrd_enabled=True,
+            ema_enabled=True,
+            # operational leftovers from the pretrain:
+            ims_per_batch=16,
+            grad_accum_steps=1,
+            amp_enabled=False,
+            amp_dtype="fp16",
+            checkpoint_period=20000,
+            grad_norm_log_enabled=True,
+        ),
+        test=TestConfig(eval_period=20000, detections_per_image=100, precise_bn_enabled=True),
+        dataloader=DataLoaderConfig(
+            num_workers=10, prefetch_factor=4, sampler_train="RepeatFactorTrainingSampler"
+        ),
+    )
+
+    stripped = _strip_operational_for_finetune(ckpt)
+
+    # test + dataloader reset wholesale to schema defaults (equality subsumes
+    # every operational field the ckpt set — eval_period, detections_per_image,
+    # precise_bn, num_workers, sampler, ...).
+    assert stripped.test == TestConfig()
+    assert stripped.dataloader == DataLoaderConfig()
+
+    # solver: operational subset reset (batch/AMP to fine-tune defaults, cadence
+    # to schema defaults); recipe regime preserved.
+    assert stripped.solver.checkpoint_period == 1
+    assert stripped.solver.grad_norm_log_enabled is False
+    assert stripped.solver.ims_per_batch == 4
+    assert stripped.solver.grad_accum_steps == 4
+    assert stripped.solver.amp_enabled is True
+    assert stripped.solver.amp_dtype == "bf16"
+    assert stripped.solver.optimizer_name == "AdamW"
+    assert stripped.solver.llrd_enabled is True
+    assert stripped.solver.ema_enabled is True
+
+    # model + input kept verbatim.
+    assert stripped.model == ckpt.model
+    assert stripped.input == ckpt.input
+    assert stripped.input.resize_mode == "letterbox"
+
+    # Effective batch is unchanged (4x4 == 16x1 == 16), so auto-config's
+    # LR/epoch derivation is not perturbed by the batch-layout reset.
+    assert stripped.solver.effective_batch() == ckpt.solver.effective_batch() == 16
+
 
 def test_train_weights_without_embedded_config_raises(
     toy_workspace: dict[str, Any], tmp_path: Path

@@ -63,6 +63,8 @@ __all__ = [
     "ARCHITECTURE_TUNED_PATHS",
     "FINETUNE_BACKBONE_LR_RATIO",
     "FINETUNE_BASE_LR",
+    "FINETUNE_GRAD_ACCUM_STEPS",
+    "FINETUNE_IMS_PER_BATCH",
     "MAX_FINETUNE_EPOCHS",
     "MIN_BOXES_FOR_ANCHOR_TUNE",
     "MIN_FINETUNE_EPOCHS",
@@ -145,6 +147,14 @@ FINETUNE_BASE_LR: Final = 1.0e-3
 # Effective batch FINETUNE_BASE_LR was validated at; the anchor for the
 # LR<->batch scaling below. Matches the family configs' 4x4 = 16.
 REFERENCE_BATCH: Final = 16
+
+# Fine-tune micro-batch layout: split REFERENCE_BATCH into a smaller per-step
+# batch so the default memory footprint is safe on modest GPUs, while the
+# effective batch (and thus the LR/epoch derivation) is unchanged. grad_accum is
+# derived so ims_per_batch * grad_accum == REFERENCE_BATCH by construction. A
+# memory-profiled per-host value is a future enhancement.
+FINETUNE_IMS_PER_BATCH: Final = 4
+FINETUNE_GRAD_ACCUM_STEPS: Final = REFERENCE_BATCH // FINETUNE_IMS_PER_BATCH
 
 # Hot-head / cold-backbone fine-tune split, delivered through LLRD's existing
 # per-layer ramp (no new solver knob). The re-initialised head/neck sit at

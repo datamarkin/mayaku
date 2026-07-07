@@ -25,6 +25,8 @@ from __future__ import annotations
 from mayaku.tuning.anchor_kmeans import cluster_aspect_ratios, cluster_sizes
 from mayaku.tuning.dataset_stats import DatasetStats, analyze_dataset
 from mayaku.tuning.recipe import (
+    FINETUNE_GRAD_ACCUM_STEPS,
+    FINETUNE_IMS_PER_BATCH,
     MIN_IMAGES_FOR_AUTO_CONFIG,
     SizeBucket,
     collect_set_paths,
@@ -35,6 +37,8 @@ from mayaku.tuning.recipe import (
 )
 
 __all__ = [
+    "FINETUNE_GRAD_ACCUM_STEPS",
+    "FINETUNE_IMS_PER_BATCH",
     "MIN_IMAGES_FOR_AUTO_CONFIG",
     "DatasetStats",
     "SizeBucket",

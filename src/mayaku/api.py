@@ -70,11 +70,18 @@ import torch
 from mayaku.cli._weights import resolve_weights
 from mayaku.cli.eval import run_eval
 from mayaku.cli.train import run_train, run_train_worker
-from mayaku.config import MayakuConfig, load_yaml, merge_overrides
+from mayaku.config import (
+    DataLoaderConfig,
+    MayakuConfig,
+    SolverConfig,
+    TestConfig,
+    load_yaml,
+    merge_overrides,
+)
 from mayaku.config.schemas import DeviceSetting
 from mayaku.engine import launch, resolve_ddp_device
 from mayaku.inference import from_pretrained
-from mayaku.tuning import collect_set_paths
+from mayaku.tuning import FINETUNE_GRAD_ACCUM_STEPS, FINETUNE_IMS_PER_BATCH, collect_set_paths
 from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
 
 __all__ = ["evaluate", "train"]
@@ -427,11 +434,48 @@ def _resolve_model_source(
         weights_path = resolve_weights(weights)
         assert weights_path is not None  # weights is not None on this path
         cfg, _ = config_from_checkpoint(weights_path)
+        cfg = _strip_operational_for_finetune(cfg)
         return cfg, weights_path.stem, weights_path
     raise ValueError(
         "Provide config= (a YAML path or MayakuConfig) or "
         "weights= (a bundled model name or a trained .pth) so the model "
         "architecture is defined."
+    )
+
+
+def _strip_operational_for_finetune(cfg: MayakuConfig) -> MayakuConfig:
+    """Reset host/run-cadence fields on a checkpoint-derived fine-tune config.
+
+    The warm-start path (``weights=`` with no ``config=``) inherits its base
+    config from the pretrain checkpoint's sidecar, which embeds the *entire*
+    config the pretrain ran with. Only the model architecture and the recipe
+    regime (optimizer, geometry, LLRD, EMA, augmentation) should survive into a
+    fresh fine-tune; the operational knobs must not — otherwise the pretrain's
+    epoch-sized ``eval_period`` / ``checkpoint_period`` silently disable periodic
+    eval and checkpointing, and its ``num_workers`` / ``detections_per_image`` /
+    batch layout leak in.
+
+    ``test`` and ``dataloader`` are wholly operational, so reset wholesale to
+    schema defaults; only the operational subset of ``solver`` is reset. Batch
+    layout and AMP take fine-tune defaults rather than the schema's
+    D2-replication values (``FINETUNE_*`` micro-batch, and ``amp_enabled/bf16``
+    which ``Device.resolve_amp_dtype`` clamps to the live hardware). ``model``
+    and ``input`` are kept verbatim. Read-side and train-only; deployment reads
+    the full checkpoint config via ``load_detector``.
+    """
+    defaults = SolverConfig()  # schema defaults for the reset-to-default fields
+    solver = cfg.solver.model_copy(
+        update={
+            "checkpoint_period": defaults.checkpoint_period,
+            "grad_norm_log_enabled": defaults.grad_norm_log_enabled,
+            "ims_per_batch": FINETUNE_IMS_PER_BATCH,
+            "grad_accum_steps": FINETUNE_GRAD_ACCUM_STEPS,
+            "amp_enabled": True,
+            "amp_dtype": "bf16",
+        }
+    )
+    return cfg.model_copy(
+        update={"test": TestConfig(), "dataloader": DataLoaderConfig(), "solver": solver}
     )
 
 
