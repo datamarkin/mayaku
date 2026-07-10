@@ -264,6 +264,7 @@ def finetune_base_lr(
         lr = FINETUNE_LR_SAFE_DEFAULT
     return float(min(FINETUNE_LR_MAX, max(FINETUNE_LR_MIN, lr)))
 
+
 # Hot-head / cold-backbone fine-tune split, delivered through LLRD's existing
 # per-layer ramp (no new solver knob). The re-initialised head/neck sit at
 # base_lr (LLRD scale 1.0); the recipe picks llrd_decay so the input-most
