@@ -121,15 +121,15 @@ def test_derive_overrides_emits_finetune_base_lr() -> None:
 
 
 def test_base_lr_slides_down_with_dataset_size_and_tier() -> None:
-    # Monotonicity contract: bigger dataset (more steps) -> lower LR; wider head
-    # (bigger tier) -> lower LR. Both directions verified through derive_overrides.
+    # Monotonicity contract: bigger dataset -> lower LR (size glide); wider head
+    # (bigger tier) -> lower LR (anchor). Both verified through derive_overrides.
     def lr_for(num_images: int, hidden: int) -> float:
         cfg = _uniquery_cfg(hidden_dim=hidden, optimizer="AdamW")
         return derive_overrides(_stats(num_images=num_images), cfg)["solver"]["base_lr"]
 
-    # step budget: 300-img (small) >= 5000-img (large) at the same tier
+    # size glide: 300-img (small) >= 5000-img (large) at the same tier
     assert lr_for(300, 128) >= lr_for(5_000, 128)
-    # tier: nano (128) >= L (256) at the same dataset size
+    # tier anchor: nano (128) >= wide (256) at the same dataset size
     assert lr_for(1_000, 128) >= lr_for(1_000, 256)
 
 
@@ -145,14 +145,14 @@ def test_finetune_base_lr_batch_scaling_ratio() -> None:
 @pytest.mark.parametrize(
     "kw",
     [
-        {"total_steps": -5, "hidden_dim": 128},  # negative steps + int() guard
-        {"total_steps": 10**12, "hidden_dim": 128},  # huge steps
-        {"total_steps": 500, "hidden_dim": -5},  # negative width -> max(1, .)
-        {"total_steps": 500, "hidden_dim": 99999},  # min head-factor clamp
-        {"total_steps": 500, "hidden_dim": 128, "domain_loss": float("nan")},  # non-finite
-        {"total_steps": 500, "hidden_dim": 128, "domain_loss": 1.0},  # exercises k_domain floor
-        {"total_steps": 500, "hidden_dim": 128, "eff_batch": 100000},  # upper batch clamp
-        {"total_steps": 500, "hidden_dim": 128, "eff_batch": 0},  # zero batch -> max(1, .)
+        {"num_images": -5, "hidden_dim": 128},  # negative images + int() guard
+        {"num_images": 10**12, "hidden_dim": 128},  # huge dataset
+        {"num_images": 0, "hidden_dim": 128},  # zero images -> max(1, .) in glide
+        {"num_images": 500, "hidden_dim": -5},  # negative width -> narrow anchor
+        {"num_images": 500, "hidden_dim": 99999},  # unseen wide width -> wide anchor
+        {"num_images": float("nan"), "hidden_dim": 128},  # non-finite -> safe default
+        {"num_images": 500, "hidden_dim": 128, "eff_batch": 100000},  # upper batch clamp
+        {"num_images": 500, "hidden_dim": 128, "eff_batch": 0},  # zero batch -> max(1, .)
     ],
 )
 def test_finetune_base_lr_is_always_bounded_and_never_raises(kw: dict) -> None:
