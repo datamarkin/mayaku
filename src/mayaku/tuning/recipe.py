@@ -65,6 +65,8 @@ __all__ = [
     "FINETUNE_BASE_LR",
     "FINETUNE_GRAD_ACCUM_STEPS",
     "FINETUNE_IMS_PER_BATCH",
+    "FINETUNE_LR_MAX",
+    "FINETUNE_LR_MIN",
     "MAX_FINETUNE_EPOCHS",
     "MIN_BOXES_FOR_ANCHOR_TUNE",
     "MIN_FINETUNE_EPOCHS",
@@ -74,6 +76,7 @@ __all__ = [
     "collect_set_paths",
     "derive_overrides",
     "filter_unset",
+    "finetune_base_lr",
     "finetune_llrd_decay",
     "size_bucket",
     "walk_leaves",
@@ -155,6 +158,111 @@ REFERENCE_BATCH: Final = 16
 # memory-profiled per-host value is a future enhancement.
 FINETUNE_IMS_PER_BATCH: Final = 4
 FINETUNE_GRAD_ACCUM_STEPS: Final = REFERENCE_BATCH // FINETUNE_IMS_PER_BATCH
+
+# ---------------------------------------------------------------------------
+# Fine-tune base-LR law: base_lr = anchor x k_head x k_steps x k_domain, then
+# batch-scaled and HARD-CLAMPED to a band where no swept dataset ever cratered.
+#
+# Design contract (see the RF100 LR sweeps): the optimum is a flat plateau, so
+# this targets the regret-ROBUST band, never per-dataset peaks — and it is
+# fail-safe: every path returns a finite value inside [LR_MIN, LR_MAX], bad
+# input collapses to a safe band-centre, and nothing raises. A wrong LR breaks
+# training, so the clamp is the last line of defence and is never bypassed.
+#
+# Calibration tags: [nano] measured & complete · [L] provisional (mid-sweep) ·
+# [todo] placeholder to refine after the experiments (unseen tiers / domain).
+# ---------------------------------------------------------------------------
+
+# Hard output clamp — the safe zone. Below LR_MIN undertrains, above LR_MAX
+# blows up; no dataset's optimum fell outside this across both tiers.
+FINETUNE_LR_MIN: Final = 5.0e-5
+FINETUNE_LR_MAX: Final = 1.5e-3
+# Returned on any degenerate/unexpected input (centre of the flat plateau).
+FINETUNE_LR_SAFE_DEFAULT: Final = 5.0e-4
+
+# k_head: base_lr is the HEAD/neck LR (LLRD scale 1.0); the backbone is scaled
+# separately by the LLRD ramp (see finetune_llrd_decay), so this factor keys on
+# the HEAD spec, not model "tier". Head width == fpn.out_channels == uniquery
+# hidden_dim. Tiers with identical heads share a k_head *by design*: n/s/m all
+# have width-128 2-stage heads (differ only in backbone -> LLRD's job). muP
+# prior: optimal LR for a tensor scales ~1/width, and the head's width is this.
+# nano(128)->1.0 [nano], L(256)->0.3 [L]. NOTE: those two anchors differ in
+# backbone AND width, so the 1.0->0.3 ratio is backbone-confounded; the m(tiny/
+# 128) vs l(tiny/256) pair would isolate width to validate/correct it. num_stages
+# (xxl=6 vs 2) is a head-depth difference this factor does NOT yet see -> the
+# known gap to calibrate when xxl data lands. Unseen widths use a clamped
+# ~1/width**alpha fallback (never fires for the shipped 128/256 family).
+_HEAD_WIDTH_REF: Final = 128
+_K_HEAD_TABLE: Final = {128: 1.0, 256: 0.3}
+_HEAD_WIDTH_ALPHA: Final = 1.74
+_K_HEAD_MIN: Final = 0.15
+_K_HEAD_MAX: Final = 1.0
+
+# k_domain: warm-start localisation-loss probe (far/high-loss -> higher LR).
+# None -> 1.0 = assume far / err-high (the safe side). [todo] the probe is
+# validated but not yet plumbed into run_train, so it is None in production now.
+_LOC_LOSS_REF: Final = 5.0
+_K_DOMAIN_MIN: Final = 0.3
+
+# k_steps thresholds: LR slides down as total optimiser steps grow. <2k -> 1.0,
+# 2k-20k -> 0.3 (RF100 large end), >=20k -> 0.1 (COCO-scale; matches COCO ~1e-4).
+_STEPS_SMALL: Final = 2_000
+_STEPS_LARGE: Final = 20_000
+
+
+def _k_head(hidden_dim: int) -> float:
+    if hidden_dim in _K_HEAD_TABLE:
+        return _K_HEAD_TABLE[hidden_dim]
+    val = (_HEAD_WIDTH_REF / max(1, hidden_dim)) ** _HEAD_WIDTH_ALPHA
+    return float(min(_K_HEAD_MAX, max(_K_HEAD_MIN, val)))
+
+
+def _k_steps(total_steps: int) -> float:
+    if total_steps < _STEPS_SMALL:
+        return 1.0
+    if total_steps < _STEPS_LARGE:
+        return 0.3
+    return 0.1
+
+
+def _k_domain(domain_loss: float | None) -> float:
+    if domain_loss is None or not math.isfinite(domain_loss) or domain_loss <= 0:
+        return 1.0
+    return min(1.0, max(_K_DOMAIN_MIN, domain_loss / _LOC_LOSS_REF))
+
+
+def finetune_base_lr(
+    total_steps: int,
+    hidden_dim: int,
+    *,
+    eff_batch: int = REFERENCE_BATCH,
+    adamw: bool = True,
+    domain_loss: float | None = None,
+) -> float:
+    """Bounded, fail-safe fine-tune base LR.
+
+    ``base_lr = FINETUNE_BASE_LR x k_head x k_steps x k_domain``, batch-scaled
+    (sqrt for AdamW, linear for SGD) off the batch-16 anchor, then clamped to
+    ``[FINETUNE_LR_MIN, FINETUNE_LR_MAX]``. ALWAYS returns a finite value in that
+    band and never raises; any degenerate input yields
+    ``FINETUNE_LR_SAFE_DEFAULT``. ``base_lr`` is the head/neck LR, so ``k_head``
+    keys on the head width (``hidden_dim``); the backbone LR is the LLRD ramp's
+    job. ``domain_loss`` is the reserved input for the warm-start localisation
+    probe (Phase 2; ``None`` => neutral / err-high until it is plumbed in). See
+    the module header for the design contract.
+    """
+    try:
+        lr = FINETUNE_BASE_LR * _k_head(int(hidden_dim)) * _k_steps(int(total_steps))
+        lr *= _k_domain(domain_loss)
+        ratio = max(1, int(eff_batch)) / REFERENCE_BATCH
+        lr *= ratio if not adamw else math.sqrt(ratio)
+    except Exception:
+        # Any bad-type/degenerate arg -> the safe band centre. isfinite below
+        # also catches a nan/inf that slipped through; the clamp does the rest.
+        lr = FINETUNE_LR_SAFE_DEFAULT
+    if not math.isfinite(lr):
+        lr = FINETUNE_LR_SAFE_DEFAULT
+    return float(min(FINETUNE_LR_MAX, max(FINETUNE_LR_MIN, lr)))
 
 # Hot-head / cold-backbone fine-tune split, delivered through LLRD's existing
 # per-layer ramp (no new solver knob). The re-initialised head/neck sit at
@@ -327,10 +435,17 @@ def derive_overrides(
         MAX_FINETUNE_EPOCHS,
         max(MIN_FINETUNE_EPOCHS, math.ceil(TARGET_TOTAL_STEPS / iters_per_epoch)),
     )
-    lr_ratio = eff_batch / REFERENCE_BATCH
-    lr_factor = lr_ratio if cfg.solver.optimizer_name == "SGD" else math.sqrt(lr_ratio)
+    # base_lr from the tier x step-budget law (domain probe: future), batch-
+    # scaled and hard-clamped to the safe band. total_steps == the same figure
+    # resolve_schedule computes, so the LR tracks the realised schedule length.
+    total_steps = num_epochs * iters_per_epoch
     solver_overrides: dict[str, Any] = {
-        "base_lr": FINETUNE_BASE_LR * lr_factor,
+        "base_lr": finetune_base_lr(
+            total_steps,
+            cfg.model.fpn.out_channels,
+            eff_batch=eff_batch,
+            adamw=cfg.solver.optimizer_name != "SGD",
+        ),
         "num_epochs": num_epochs,
     }
     # Hot-head/cold-backbone split via LLRD (see FINETUNE_BACKBONE_LR_RATIO).
