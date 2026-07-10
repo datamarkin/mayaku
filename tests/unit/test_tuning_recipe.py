@@ -24,6 +24,7 @@ from mayaku.tuning.recipe import (
     filter_unset,
     finetune_base_lr,
     finetune_llrd_decay,
+    finetune_num_epochs,
     size_bucket,
     walk_leaves,
 )
@@ -291,12 +292,27 @@ def test_epoch_budget_total_steps_monotone_in_dataset_size() -> None:
 
 def test_epoch_budget_clamped_at_both_ends() -> None:
     cfg = MayakuConfig()
-    # Tiny dataset: target steps would demand hundreds of epochs → MAX.
+    # Tiny dataset: below the taper's low anchor → MAX passes.
     tiny = derive_overrides(_stats(num_images=50), cfg)["solver"]["num_epochs"]
     assert tiny == MAX_FINETUNE_EPOCHS
-    # Huge dataset: one epoch already exceeds the target → MIN.
+    # Huge dataset: above the taper's high anchor → MIN passes.
     huge = derive_overrides(_stats(num_images=200_000), cfg)["solver"]["num_epochs"]
     assert huge == MIN_FINETUNE_EPOCHS
+
+
+def test_finetune_num_epochs_smooth_log_taper() -> None:
+    # MAX at/below the low anchor, MIN at/above the high anchor, and a smooth
+    # (non-increasing, no-cliff) descent in between, all inside [MIN, MAX].
+    assert finetune_num_epochs(500) == MAX_FINETUNE_EPOCHS
+    assert finetune_num_epochs(1_000) == MAX_FINETUNE_EPOCHS
+    assert finetune_num_epochs(20_000) == MIN_FINETUNE_EPOCHS
+    assert finetune_num_epochs(100_000) == MIN_FINETUNE_EPOCHS
+    ladder = [finetune_num_epochs(n) for n in (1_000, 2_000, 5_000, 10_000, 20_000)]
+    assert ladder == sorted(ladder, reverse=True)  # monotone non-increasing
+    assert all(MIN_FINETUNE_EPOCHS <= e <= MAX_FINETUNE_EPOCHS for e in ladder)
+    # The point of the taper: a mid-size set gets meaningfully more than the old
+    # flat MIN=16 floor that used to bind by ~3k images.
+    assert finetune_num_epochs(3_000) > MIN_FINETUNE_EPOCHS
 
 
 def test_multi_sample_aug_stays_conservative_on_small_datasets() -> None:

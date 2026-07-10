@@ -79,6 +79,7 @@ __all__ = [
     "filter_unset",
     "finetune_base_lr",
     "finetune_llrd_decay",
+    "finetune_num_epochs",
     "size_bucket",
     "walk_leaves",
 ]
@@ -121,23 +122,22 @@ MIN_BOXES_FOR_ANCHOR_TUNE: Final = 50
 # detection datasets are usually less skewed than instance-seg LVIS.
 _IMBALANCE_TRIGGER: Final = 10.0
 
-# Fine-tune schedule: aim for a fixed total-optimizer-steps budget so
-# total training work is monotone in dataset size (the old per-bucket
-# epoch table trained a 515-image set for FEWER steps than a 478-image
-# one). epochs = clamp(ceil(target / iters_per_epoch), min, max) —
-# at effective batch 16 that's clamp(48_000 / n_images, 16, 30):
-#   * <= ~1,600 images: MAX binds (30 epochs — mayaku saturates around
-#     30 epochs empirically; more is wasted wall-clock even though small
-#     sets make extra epochs cheap in steps),
-#   * ~1,600-3,000 images: the target's taper (30 -> 16 epochs, flat
-#     ~3k steps),
-#   * >= ~3,000 images: MIN binds (16 epochs — enough passes to learn,
-#     steps grow with data again).
+# Fine-tune schedule: a smooth log taper on epochs — MAX passes on small
+# datasets down to MIN on large ones, log-linear across the taper's image band
+# (see finetune_num_epochs). Small sets get many
+# passes (cheap in steps, and they need them); large sets get few (expensive,
+# and they saturate). Total training work stays monotone in dataset size — image
+# count grows faster than the epoch count shrinks — which the old per-bucket
+# table violated (it trained a 515-image set for FEWER steps than a 478 one):
+#   * <= 1,000 images: MAX binds (30 epochs),
+#   * 1,000-20,000 images: smooth 30 -> 16 taper (no hard cliff),
+#   * >= 20,000 images: MIN binds (16 epochs, steps grow with data).
 # The [16, 30] band is deliberately narrow — near fixed-epochs like the
 # competitors, but wall-time bounded. Knee to be re-swept on the benchmark.
-TARGET_TOTAL_STEPS: Final = 3_000
 MIN_FINETUNE_EPOCHS: Final = 16
 MAX_FINETUNE_EPOCHS: Final = 30
+_EPOCH_TAPER_IMG_LO: Final = 1_000
+_EPOCH_TAPER_IMG_HI: Final = 20_000
 
 # Fine-tune learning rate. base_lr is regime-dependent: the checkpoint
 # bakes the PRETRAINING LR (1e-4 AdamW, right for COCO-scale data), but
@@ -268,6 +268,19 @@ def finetune_base_lr(
     if not math.isfinite(lr):
         lr = FINETUNE_LR_SAFE_DEFAULT
     return float(min(FINETUNE_LR_MAX, max(FINETUNE_LR_MIN, lr)))
+
+
+def finetune_num_epochs(num_images: int) -> int:
+    """Fine-tune epoch budget: a smooth log taper from MAX_FINETUNE_EPOCHS on
+    small datasets to MIN_FINETUNE_EPOCHS on large ones, log-linear in image
+    count from 1,000 up to 20,000 images and clamped to that band. Small sets
+    get more passes (cheap in steps, and they need them); large sets fewer
+    (expensive, and they saturate). Replaces the old fixed-step-budget clamp,
+    whose hard MIN floor undertrained mid-size sets at a sharp cliff.
+    """
+    t = _log_frac(num_images, _EPOCH_TAPER_IMG_LO, _EPOCH_TAPER_IMG_HI)
+    epochs = MAX_FINETUNE_EPOCHS - t * (MAX_FINETUNE_EPOCHS - MIN_FINETUNE_EPOCHS)
+    return round(epochs)
 
 
 # Hot-head / cold-backbone fine-tune split, delivered through LLRD's existing
@@ -431,16 +444,10 @@ def derive_overrides(
     #   * base_lr — the regime-dependent fine-tune LR (see FINETUNE_BASE_LR),
     #     scaled off its validated batch-16 anchor to this run's effective
     #     batch: linear for SGD, sqrt for AdamW (gradient-noise scaling).
-    #   * num_epochs — a target-total-steps budget resolved to epochs (the
-    #     engine resolves epochs back to iterations at train time).
-    # Same epoch definition as resolve_schedule (engine/optim.py) — keep the
-    # formulas in sync; not imported so the tuning package stays torch-free.
+    #   * num_epochs — a smooth log taper on dataset size (finetune_num_epochs);
+    #     the engine resolves epochs back to iterations at train time.
     eff_batch = cfg.solver.effective_batch()
-    iters_per_epoch = max(1, math.ceil(stats.num_images / max(1, eff_batch)))
-    num_epochs = min(
-        MAX_FINETUNE_EPOCHS,
-        max(MIN_FINETUNE_EPOCHS, math.ceil(TARGET_TOTAL_STEPS / iters_per_epoch)),
-    )
+    num_epochs = finetune_num_epochs(stats.num_images)
     # base_lr from the head-width anchor x dataset-size glide, batch-scaled and
     # hard-clamped to the safe band. Keys on num_images (the size lever) and the
     # head width; the backbone LR is the LLRD decay's job (below).
