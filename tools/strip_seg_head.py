@@ -15,8 +15,15 @@ edited together — drop the tensors AND null the config — or the next
 re-saves over the same file (mutate in place; no backup — the originals are
 the segmentation checkpoints, kept separately).
 
+It also drops a third field when present: ``model.backbone.weights_path``, the
+training-box pretrain-init path (e.g. ``/home/vision/mayaku/convnext_*.pth``)
+recorded by checkpoints trained before the backbone went architecture-only. The
+current ``BackboneConfig`` removed that field and forbids extras, so a checkpoint
+carrying it fails ``model_validate`` (i.e. won't load) until the key is dropped.
+
 The edit is idempotent: a checkpoint already stripped (no ``mask_head.*``
-tensors and ``uniquery_mask`` null) is reported and left untouched.
+tensors, ``uniquery_mask`` null, and no ``backbone.weights_path`` key) is
+reported and left untouched.
 
 Usage:
     python tools/strip_seg_head.py models/detection/mayaku-n-det/**/mayaku-n-det.pth
@@ -67,20 +74,32 @@ def strip_checkpoint(path: Path, *, verify: bool) -> str:
         raise ValueError(f"{path} sidecar has no embedded model config.")
 
     mask_keys = [k for k in state if k.startswith(_MASK_PREFIX)]
-    had_uniquery_mask = config["model"].get("uniquery_mask") is not None
+    model_cfg = config["model"]
+    backbone_cfg = model_cfg.get("backbone") or {}
+    had_uniquery_mask = model_cfg.get("uniquery_mask") is not None
+    had_weights_path = "weights_path" in backbone_cfg
 
-    if not mask_keys and not had_uniquery_mask:
+    if not mask_keys and not had_uniquery_mask and not had_weights_path:
         return f"{path.name}: already detection-only — skipped"
 
     # 1) Drop the mask-head tensors from the weights.
     for k in mask_keys:
         del state[k]
 
-    # 2) Null the mask config, then re-validate so a malformed edit is caught
-    #    before we overwrite the file. model_validate normalises the dump.
+    # 2) Null the mask config and DELETE any ``backbone.weights_path`` — the
+    #    latter is a training-box pretrain-init path (e.g.
+    #    /home/vision/mayaku/convnext_*.pth) recorded by checkpoints trained
+    #    before the backbone went architecture-only. The current BackboneConfig
+    #    schema removed that field and forbids extras, so the key must be dropped
+    #    (not nulled) or model_validate below rejects it — which is also why such
+    #    a checkpoint fails to load until stripped. Re-validate so a malformed
+    #    edit is caught before we overwrite the file; model_validate normalises
+    #    the dump.
     from mayaku.config import MayakuConfig
 
-    config["model"]["uniquery_mask"] = None
+    model_cfg["uniquery_mask"] = None
+    if had_weights_path:
+        del model_cfg["backbone"]["weights_path"]
     validated = MayakuConfig.model_validate(config)
     sidecar["config"] = validated.model_dump(mode="json")
 
@@ -94,9 +113,10 @@ def strip_checkpoint(path: Path, *, verify: bool) -> str:
         load_detector(path)  # raises on any missing/unexpected key
 
     verified = " verified" if verify else ""
+    wp = ", backbone.weights_path removed" if had_weights_path else ""
     return (
         f"{path.name}: dropped {len(mask_keys)} mask_head tensor(s), "
-        f"uniquery_mask -> null{verified}"
+        f"uniquery_mask -> null{wp}{verified}"
     )
 
 
