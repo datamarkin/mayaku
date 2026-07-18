@@ -121,17 +121,19 @@ def test_derive_overrides_emits_finetune_base_lr() -> None:
     assert FINETUNE_LR_MIN <= lr <= FINETUNE_LR_MAX
 
 
-def test_base_lr_slides_down_with_dataset_size_and_tier() -> None:
-    # Monotonicity contract: bigger dataset -> lower LR (size glide); wider head
-    # (bigger tier) -> lower LR (anchor). Both verified through derive_overrides.
+def test_base_lr_is_flat_across_dataset_size_and_tier() -> None:
+    # Flat-plateau contract: base_lr is the SAME regardless of dataset size or
+    # head width — neither predicts the plateau optimum, so the recipe emits a
+    # single plateau-centre constant. Verified through derive_overrides (batch is
+    # identical across the cases, so batch-scaling can't skew the comparison).
     def lr_for(num_images: int, hidden: int) -> float:
         cfg = _uniquery_cfg(hidden_dim=hidden, optimizer="AdamW")
         return derive_overrides(_stats(num_images=num_images), cfg)["solver"]["base_lr"]
 
-    # size glide: 300-img (small) >= 5000-img (large) at the same tier
-    assert lr_for(300, 128) >= lr_for(5_000, 128)
-    # tier anchor: nano (128) >= wide (256) at the same dataset size
-    assert lr_for(1_000, 128) >= lr_for(1_000, 256)
+    # dataset size does not move it (glide retired)
+    assert lr_for(300, 128) == pytest.approx(lr_for(5_000, 128))
+    # head width does not move it (per-width anchor retired)
+    assert lr_for(1_000, 128) == pytest.approx(lr_for(1_000, 256))
 
 
 def test_finetune_base_lr_batch_scaling_ratio() -> None:

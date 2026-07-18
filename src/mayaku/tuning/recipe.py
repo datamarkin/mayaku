@@ -19,10 +19,10 @@ It only ever emits three kinds of fields:
   (1e-4 AdamW, right for COCO-scale data); fine-tuning from those
   weights to a new dataset wants ~10x more to move off the pretrained
   basin in a short run (benchmark-confirmed: inheriting the baked 1e-4
-  regressed every far-from-COCO set). The recipe emits base_lr from a
-  head-width anchor (nano's :data:`FINETUNE_BASE_LR`) scaled by a
-  dataset-size glide (see :func:`finetune_base_lr`), batch-scaled off its
-  validated anchor; a pinned ``base_lr`` (YAML/overrides) still wins via
+  regressed every far-from-COCO set). The recipe emits a flat fine-tune
+  default (:data:`FINETUNE_BASE_LR`, the regret-robust plateau centre;
+  see :func:`finetune_base_lr`), batch-scaled off its validated batch-16
+  anchor; a pinned ``base_lr`` (YAML/overrides) still wins via
   :func:`filter_unset`. When the config runs LLRD, ``base_lr`` is the
   *head* LR and the recipe also emits a depth-adjusted ``llrd_decay``
   (:func:`finetune_llrd_decay`) that ramps the backbone down to ~1/10 of
@@ -141,13 +141,13 @@ _EPOCH_TAPER_IMG_HI: Final = 20_000
 
 # Fine-tune learning rate. base_lr is regime-dependent: the checkpoint
 # bakes the PRETRAINING LR (1e-4 AdamW, right for COCO-scale data), but
-# fine-tuning to a new dataset from those weights wants ~10x more to move
-# the head+backbone off the pretrained basin within a short run. 1e-3 is
-# benchmark-validated (recovers the far-from-COCO wins that 1e-4
-# regressed). This is the nano/narrow-head anchor — finetune_base_lr()
-# takes it down for wider heads and larger datasets. LLRD still scales it
-# down per backbone depth. Emitted via filter_unset, so a pin always wins.
-FINETUNE_BASE_LR: Final = 1.0e-3
+# fine-tuning to a new dataset from those weights wants more to move the
+# head+backbone off the pretrained basin within a short run. 3e-4 is the
+# regret-robust plateau centre — flat across dataset size and head width, so
+# base_lr is a single fine-tune default (no size glide, no per-width anchor).
+# LLRD still scales it down per backbone depth. Emitted via filter_unset, so a
+# pin always wins.
+FINETUNE_BASE_LR: Final = 3.0e-4
 # Effective batch FINETUNE_BASE_LR was validated at; the anchor for the
 # LR<->batch scaling below. Matches the family configs' 4x4 = 16.
 REFERENCE_BATCH: Final = 16
@@ -161,23 +161,19 @@ FINETUNE_IMS_PER_BATCH: Final = 4
 FINETUNE_GRAD_ACCUM_STEPS: Final = REFERENCE_BATCH // FINETUNE_IMS_PER_BATCH
 
 # ---------------------------------------------------------------------------
-# Fine-tune base-LR law: base_lr = width_anchor(hidden_dim) x size_glide(images),
-# held at/above an operating floor, then batch-scaled and HARD-CLAMPED to a band
-# where no swept dataset ever cratered.
+# Fine-tune base-LR law: a flat plateau-centre constant (FINETUNE_BASE_LR),
+# batch-scaled and HARD-CLAMPED to a band where no swept dataset ever cratered.
 #
-# Design contract: the fine-tune optimum is a flat plateau — every LR in
-# [3e-4, 1e-3] lands within ~1 AP of the per-dataset best, and the few outliers
-# (far-domain sets want high, near-ceiling sets want low) pull opposite ways and
-# are unpredictable from images, tier, OR a domain probe. So this targets the
-# regret-ROBUST plateau centre, never per-dataset peaks, with just two real
-# levers: a head-width anchor and a nano-validated size glide.
+# Design contract: the fine-tune optimum is a broad flat plateau — every LR in
+# [3e-4, 1e-3] lands within ~1 AP of the per-dataset best, and where in that
+# plateau a dataset's peak sits is not predictable from size, head width, or
+# object scale (the residual is domain). So the law targets the regret-ROBUST
+# plateau centre (3e-4, on the safe side — the plateau is skewed, under-shooting
+# costs ~3x an equal over-shoot), never per-dataset peaks. No size glide, no
+# per-width anchor.
 # It is fail-safe: every path returns a finite value inside [LR_MIN, LR_MAX],
 # bad input collapses to a safe band-centre, and nothing raises. A wrong LR
 # breaks training, so the clamp is the last line of defence and is never bypassed.
-#
-# Calibration: nano(128) glide 1e-3->3e-4 is measured & complete. wide(256) is
-# measured ~5e-4-flat on small data only; the operating floor keeps it near-flat
-# because large-model + big-data (>~5k images) is the one regime not yet tested.
 # ---------------------------------------------------------------------------
 
 # Hard output clamp — the safe zone. Below LR_MIN undertrains, above LR_MAX
@@ -187,34 +183,6 @@ FINETUNE_LR_MAX: Final = 1.5e-3
 # Returned on any degenerate/unexpected input (centre of the flat plateau).
 FINETUNE_LR_SAFE_DEFAULT: Final = 5.0e-4
 
-# Head-width anchors: the plateau-centre LR per head spec. base_lr is the
-# HEAD/neck LR (LLRD scale 1.0); the backbone is scaled separately by the LLRD
-# ramp (see finetune_llrd_decay), so the anchor keys on head width, not model
-# "tier". Head width == fpn.out_channels == uniquery hidden_dim, and tiers that
-# share a width share an anchor *by design* (they differ only in backbone ->
-# LLRD's job). Only two widths ship: nano(128) -> FINETUNE_BASE_LR (1e-3,
-# measured); wide(256, = s/m/l/xl) -> 5e-4. 5e-4 is a hedge — 1e-3 was margin-
-# ally lower-regret on the measured (small) wide-tier data, but 5e-4 protects
-# the unmeasured wide + big-data regime from over-stepping. Unseen widths
-# log-interpolate between the two anchors and never extrapolate past them.
-_ANCHOR_NARROW_WIDTH: Final = 128
-_ANCHOR_WIDE_WIDTH: Final = 256
-_ANCHOR_WIDE_LR: Final = 5.0e-4
-
-# Size glide: the anchor slides down as the dataset grows, log-linearly from
-# full anchor at <=500 images to anchor x GLIDE_FLOOR_K at >=5000. Validated on
-# nano (LR bends down past ~1-2k images); the wide tier is held near-flat by the
-# operating floor below, since its big-data behaviour is not yet swept.
-_GLIDE_IMG_SMALL: Final = 500
-_GLIDE_IMG_LARGE: Final = 5_000
-_GLIDE_FLOOR_K: Final = 0.3
-
-# Operating floor: 3e-4 was safe on every dataset tested across both tiers. The
-# glide never drops below it, so no tier slides into the cold zone that measur-
-# ably costs AP. Well above the LR_MIN failsafe, which only guards degenerate
-# inputs and post-batch-scaling for tiny batches.
-FINETUNE_LR_FLOOR: Final = 3.0e-4
-
 
 def _log_frac(x: float, lo: float, hi: float) -> float:
     """Clamped log-linear position of ``x`` within ``[lo, hi]`` — 0 at/below
@@ -222,22 +190,6 @@ def _log_frac(x: float, lo: float, hi: float) -> float:
     zero/negative ``x`` (which clamps to 0, i.e. the ``lo`` end)."""
     t = (math.log(max(1, x)) - math.log(lo)) / (math.log(hi) - math.log(lo))
     return min(1.0, max(0.0, t))
-
-
-def _width_anchor(hidden_dim: int) -> float:
-    """Plateau-centre LR for a head width: geometric (log-space) interpolation
-    between the two measured anchors, clamped to their band by _log_frac (never
-    hotter than nano's 1e-3 nor colder than wide's 5e-4)."""
-    t = _log_frac(hidden_dim, _ANCHOR_NARROW_WIDTH, _ANCHOR_WIDE_WIDTH)
-    lo_lr, hi_lr = math.log(FINETUNE_BASE_LR), math.log(_ANCHOR_WIDE_LR)
-    return math.exp(lo_lr + t * (hi_lr - lo_lr))
-
-
-def _size_glide(num_images: int) -> float:
-    """Fraction (GLIDE_FLOOR_K..1) the anchor is scaled by as the dataset grows
-    from SMALL to LARGE images, log-linear in image count."""
-    t = _log_frac(num_images, _GLIDE_IMG_SMALL, _GLIDE_IMG_LARGE)
-    return float(_GLIDE_FLOOR_K**t)
 
 
 def finetune_base_lr(
@@ -249,18 +201,19 @@ def finetune_base_lr(
 ) -> float:
     """Bounded, fail-safe fine-tune base LR (the head/neck LR).
 
-    ``base_lr = width_anchor(hidden_dim) x size_glide(num_images)``, held at or
-    above ``FINETUNE_LR_FLOOR``, then batch-scaled (sqrt for AdamW, linear for
-    SGD) off the batch-16 anchor and HARD-CLAMPED to ``[FINETUNE_LR_MIN,
-    FINETUNE_LR_MAX]``. ALWAYS returns a finite value in that band and never
+    A flat plateau-centre constant (``FINETUNE_BASE_LR``), batch-scaled (sqrt for
+    AdamW, linear for SGD) off the batch-16 anchor and HARD-CLAMPED to
+    ``[FINETUNE_LR_MIN, FINETUNE_LR_MAX]``. The value is deliberately independent
+    of ``num_images`` and ``hidden_dim`` — neither predicts where in the flat
+    plateau a dataset's optimum sits (see the law header). The args are kept
+    because callers pass what they know and the value may key on them again if a
+    real predictor turns up. ALWAYS returns a finite value in the band and never
     raises; any degenerate input yields ``FINETUNE_LR_SAFE_DEFAULT``. base_lr is
-    the head LR, so the anchor keys on head width (``hidden_dim``); the backbone
-    LR is the LLRD ramp's job. See the module header for the design contract.
+    the head LR; the backbone LR is the LLRD ramp's job.
     """
     try:
-        lr = max(_width_anchor(int(hidden_dim)) * _size_glide(int(num_images)), FINETUNE_LR_FLOOR)
         ratio = max(1, int(eff_batch)) / REFERENCE_BATCH
-        lr *= ratio if not adamw else math.sqrt(ratio)
+        lr = FINETUNE_BASE_LR * (math.sqrt(ratio) if adamw else ratio)
     except Exception:
         # Any bad-type/degenerate arg -> the safe band centre. isfinite below
         # also catches a nan/inf that slipped through; the clamp does the rest.
@@ -448,9 +401,9 @@ def derive_overrides(
     #     the engine resolves epochs back to iterations at train time.
     eff_batch = cfg.solver.effective_batch()
     num_epochs = finetune_num_epochs(stats.num_images)
-    # base_lr from the head-width anchor x dataset-size glide, batch-scaled and
-    # hard-clamped to the safe band. Keys on num_images (the size lever) and the
-    # head width; the backbone LR is the LLRD decay's job (below).
+    # base_lr is a flat plateau-centre default, batch-scaled and hard-clamped to
+    # the safe band (no size/width lever — neither predicts the plateau optimum).
+    # The backbone LR is the LLRD decay's job (below).
     solver_overrides: dict[str, Any] = {
         "base_lr": finetune_base_lr(
             stats.num_images,
