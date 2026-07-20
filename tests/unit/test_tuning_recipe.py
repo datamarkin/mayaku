@@ -328,6 +328,18 @@ def test_multi_sample_aug_stays_conservative_on_small_datasets() -> None:
     )
 
 
+def test_recipe_emits_close_mosaic_frac_while_schema_default_stays_neutral() -> None:
+    # The recipe owns the "close mosaic" opinion (alongside mosaic_prob); the
+    # schema default stays 0.0 so config= runs (D2 replication) are never silently
+    # altered. Auto-config turns it on so mosaic-trained runs keep a clean tail.
+    from mayaku.config.schemas import InputConfig
+
+    assert InputConfig().close_mosaic_frac == 0.0
+    assert derive_overrides(_stats(num_images=10_000), MayakuConfig())["input"][
+        "close_mosaic_frac"
+    ] == 0.2
+
+
 def test_derive_overrides_enables_repeat_factor_sampler_when_imbalanced() -> None:
     stats = _stats(num_images=1_500, imbalance_high=True)
     overrides = derive_overrides(stats, MayakuConfig())

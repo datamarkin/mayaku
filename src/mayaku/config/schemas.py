@@ -632,6 +632,14 @@ class InputConfig(_BaseModel):
     mixup_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
     mixup_alpha: Annotated[float, Field(gt=0.0)] = 8.0
     copy_paste_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+    # Close all multi-sample augmentation (mosaic/mixup/copy_paste) for the final
+    # fraction of training — the standard "close mosaic" phase. Composite images
+    # regularise well early but cap final AP if never removed, so the tail runs on
+    # clean images to settle (and let the EMA shadow converge on them). e.g. 0.2 =
+    # last 20% clean; 0.0 disables. No-op when no multi-sample aug is active.
+    # Defaults to 0.0 (D2-replication-neutral, like the ``*_prob`` knobs above);
+    # the size-bucket recipe turns it on alongside mosaic (tuning.recipe.SizeBucket).
+    close_mosaic_frac: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
 
     @model_validator(mode="after")
     def _check_copy_paste_needs_bitmask(self) -> InputConfig:
@@ -795,7 +803,7 @@ class DataLoaderConfig(_BaseModel):
     # waits while workers rebuild it. Raise it (4-6) for small/fast models
     # on big-image datasets to give the workers runway to stay ahead.
     # Ignored when ``num_workers == 0`` (no worker processes to prefetch).
-    prefetch_factor: Annotated[int, Field(ge=1)] = 2
+    prefetch_factor: Annotated[int, Field(ge=1)] = 6
     aspect_ratio_grouping: bool = True
     sampler_train: Literal["TrainingSampler", "RepeatFactorTrainingSampler"] = "TrainingSampler"
     filter_empty_annotations: bool = True

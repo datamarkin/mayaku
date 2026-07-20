@@ -316,6 +316,10 @@ class SizeBucket:
     mosaic_prob: float
     mixup_prob: float
     copy_paste_prob: float
+    # Fraction of training at the END to run with all multi-sample aug off (the
+    # "close mosaic" tail). Composite aug never removed caps final AP; the tail on
+    # clean images lets the model — and the EMA shadow — settle. See InputConfig.
+    close_mosaic_frac: float
 
 
 _BUCKETS: Final[tuple[tuple[float, SizeBucket], ...]] = (
@@ -326,11 +330,12 @@ _BUCKETS: Final[tuple[tuple[float, SizeBucket], ...]] = (
     # fixes, so the direction is UNSETTLED — re-A/B on the benchmark
     # sweep before raising these (report-1 Tier 1); stay conservative
     # until then.
-    (500, SizeBucket("xs", mosaic_prob=0.1, mixup_prob=0.0, copy_paste_prob=0.0)),
-    (2_000, SizeBucket("s", mosaic_prob=0.2, mixup_prob=0.0, copy_paste_prob=0.0)),
-    (5_000, SizeBucket("m", mosaic_prob=0.3, mixup_prob=0.0, copy_paste_prob=0.0)),
-    (50_000, SizeBucket("l", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.0)),
-    (math.inf, SizeBucket("xl", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1)),
+    # close_mosaic_frac: whenever mosaic is on, keep the last 20% clean.
+    (500, SizeBucket("xs", mosaic_prob=0.1, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
+    (2_000, SizeBucket("s", mosaic_prob=0.2, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
+    (5_000, SizeBucket("m", mosaic_prob=0.3, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
+    (50_000, SizeBucket("l", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
+    (math.inf, SizeBucket("xl", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1, close_mosaic_frac=0.2)),
 )
 
 
@@ -428,6 +433,9 @@ def derive_overrides(
     input_overrides: dict[str, Any] = {
         "mosaic_prob": bucket.mosaic_prob,
         "mixup_prob": bucket.mixup_prob,
+        # Emitted alongside mosaic (always on in the recipe); a no-op on the rare
+        # config that pins mosaic off. The config= path keeps the schema 0.0.
+        "close_mosaic_frac": bucket.close_mosaic_frac,
     }
     # CopyPaste needs mask_format='bitmask' AND a mask-bearing meta-
     # architecture. Only emit when the user is actually training masks.

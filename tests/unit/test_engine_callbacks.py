@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from mayaku.engine.callbacks import (
+    CloseMosaicHook,
     EvalHook,
     IterationTimer,
     LRScheduler,
@@ -57,6 +58,29 @@ def test_iteration_timer_accumulates_total() -> None:
 # ---------------------------------------------------------------------------
 # LRScheduler hook
 # ---------------------------------------------------------------------------
+
+
+def test_close_mosaic_hook_flips_flag_at_threshold() -> None:
+    """The flag stays clear before ``close_at_iter`` and is set once the count of
+    completed steps (trainer.iter + 1) reaches it; it only fires once."""
+    flag = torch.zeros((), dtype=torch.bool)
+    hook = CloseMosaicHook(close_at_iter=80, close_flag=flag)
+    trainer = _ToyTrainer()
+    hook.trainer = trainer  # type: ignore[assignment]
+
+    trainer.iter = 78  # 79 completed
+    hook.after_step()
+    assert not bool(flag.item())
+
+    trainer.iter = 79  # 80 completed -> fires
+    hook.after_step()
+    assert bool(flag.item())
+
+    # Idempotent: manually clearing the flag proves the hook won't re-fire.
+    flag.fill_(False)
+    trainer.iter = 90
+    hook.after_step()
+    assert not bool(flag.item())
 
 
 def test_lr_scheduler_hook_steps_after_each_iter() -> None:

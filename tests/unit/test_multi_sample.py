@@ -136,6 +136,28 @@ def test_wrapper_passes_through_when_no_augs_fire(tmp_path: Path) -> None:
     assert len(out["instances"]) == 1
 
 
+def test_close_flag_bypasses_augmentation(tmp_path: Path) -> None:
+    """When the shared close-mosaic flag is set, an always-firing aug is skipped
+    and the plain mapped sample is returned (the "close mosaic" tail phase)."""
+    import torch
+
+    p = _make_image(tmp_path, "img_0.png", 64, 64, fill=128)
+    dicts = [_make_dict(p, 64, 64, [_ann(1, 1, 16, 16)])]
+    aug = _AlwaysFiresAug(num_extras=1)
+    flag = torch.zeros((), dtype=torch.bool)
+    wrapper = MultiSampleMappedDataset(dicts, _make_mapper(), [aug], close_flag=flag)
+
+    # Flag clear → aug fires.
+    _ = wrapper[0]
+    assert aug.invocations == 1
+
+    # Flag set → aug is bypassed, plain mapper output returned unchanged.
+    flag.fill_(True)
+    out = wrapper[0]
+    assert aug.invocations == 1  # not called again
+    assert "image" in out and len(out["instances"]) == 1
+
+
 def test_wrapper_calls_aug_when_it_fires(tmp_path: Path) -> None:
     """First aug to fire wins; its ``apply_and_map`` is called once."""
     paths = [_make_image(tmp_path, f"img_{i}.png", 32, 32, fill=20 * i) for i in range(3)]

@@ -47,6 +47,7 @@ from mayaku.data import (
 )
 from mayaku.engine import (
     AMPTrainer,
+    CloseMosaicHook,
     COCOEvaluator,
     EMAHook,
     EvalHook,
@@ -454,9 +455,18 @@ def run_train(
         # validator — no need to re-check here.
         multi_sample_augs.append(CopyPaste(prob=cfg.input.copy_paste_prob))
 
+    # Shared "close mosaic" flag: a 0-dim bool tensor in shared memory that the
+    # CloseMosaicHook flips near the end of training and every data worker reads
+    # per sample (see MultiSampleMappedDataset). Only created when there is
+    # multi-sample augmentation to close and a positive close fraction.
+    close_flag: torch.Tensor | None = None
     mapped: Any
     if multi_sample_augs:
-        mapped = MultiSampleMappedDataset(dataset_dicts, mapper, multi_sample_augs)
+        if cfg.input.close_mosaic_frac > 0.0:
+            close_flag = torch.zeros((), dtype=torch.bool).share_memory_()
+        mapped = MultiSampleMappedDataset(
+            dataset_dicts, mapper, multi_sample_augs, close_flag=close_flag
+        )
     else:
         mapped = _MappedList(dataset_dicts, mapper)
     # Single training seed: both the samplers and the per-worker augmentation
@@ -597,6 +607,12 @@ def run_train(
         timer,
         LRScheduler(scheduler),
     ]
+    # Close multi-sample augmentation for the final ``close_mosaic_frac`` of the
+    # run so the tail trains on clean images. Logic-only (flips a shared flag the
+    # workers read) — fires on every rank to keep the data pipeline in sync.
+    if close_flag is not None:
+        close_at_iter = round((1.0 - cfg.input.close_mosaic_frac) * max_iter)
+        hooks.append(CloseMosaicHook(close_at_iter, close_flag))
     # Side-effect hooks (stdout / disk writes) run on rank 0 only.
     # Logic-only hooks (timer, LR scheduler, EMA update) fire on every
     # rank — they need to to keep state in sync.

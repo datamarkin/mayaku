@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mayaku.engine.callbacks import (
+    CloseMosaicHook,
     EvalHook,
     HookBase,
     IterationTimer,
@@ -37,6 +38,7 @@ from mayaku.engine.trainer import AMPTrainer, SimpleTrainer, TrainerBase
 __all__ = [
     "AMPTrainer",
     "COCOEvaluator",
+    "CloseMosaicHook",
     "DatasetEvaluator",
     "EMAHook",
     "EvalHook",

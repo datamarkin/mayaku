@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from mayaku.engine.trainer import TrainerBase
 
 __all__ = [
+    "CloseMosaicHook",
     "EvalHook",
     "HookBase",
     "IterationTimer",
@@ -121,6 +122,43 @@ class LRScheduler(_BaseHook):
 
     def after_step(self) -> None:
         self.scheduler.step()
+
+
+# ---------------------------------------------------------------------------
+# CloseMosaicHook
+# ---------------------------------------------------------------------------
+
+
+class CloseMosaicHook(_BaseHook):
+    """Turn multi-sample augmentation (mosaic/mixup/copy_paste) off for the tail
+    of training — the standard "close mosaic" phase.
+
+    At ``close_at_iter`` it flips a shared 0-dim bool tensor to ``True``. The data
+    workers read that flag in :meth:`MultiSampleMappedDataset.__getitem__` (shared
+    memory, so a persistent worker sees the change without a rebuild) and stop
+    applying composite augmentation, so the final iterations train on clean
+    images. Fires once; the in-flight prefetched batches (a few) still carry the
+    old augmentation, an acceptable ~prefetch-depth lag.
+    """
+
+    def __init__(self, close_at_iter: int, close_flag: torch.Tensor) -> None:
+        self._close_at_iter = int(close_at_iter)
+        self._flag = close_flag
+        self._fired = False
+
+    def after_step(self) -> None:
+        assert self.trainer is not None, "trainer reference not bound"
+        if self._fired:
+            return
+        # trainer.iter is the just-completed step; +1 is the count done so far.
+        if self.trainer.iter + 1 >= self._close_at_iter:
+            self._flag.fill_(True)
+            self._fired = True
+            print(
+                f"[train] closing multi-sample augmentation at iter "
+                f"{self.trainer.iter + 1} — training tail runs on clean images.",
+                flush=True,
+            )
 
 
 # ---------------------------------------------------------------------------

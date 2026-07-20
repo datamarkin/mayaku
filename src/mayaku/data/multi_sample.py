@@ -119,6 +119,7 @@ class MultiSampleMappedDataset:
         mapper: DatasetMapper,
         multi_sample_augs: Sequence[MultiSampleAugmentation],
         rng: np.random.Generator | None = None,
+        close_flag: Any = None,
     ) -> None:
         # Accepts either a plain ``list[dict]`` or a
         # :class:`mayaku.data.SerializedList` — both quack the same way
@@ -128,6 +129,12 @@ class MultiSampleMappedDataset:
         self._mapper = mapper
         self._augs: list[MultiSampleAugmentation] = list(multi_sample_augs)
         self._rng = rng if rng is not None else np.random.default_rng()
+        # Optional 0-dim shared (``share_memory_``) bool tensor. When set to True
+        # by the "close mosaic" hook near the end of training, every worker reads
+        # it here — inherited on fork / preserved on spawn — and skips all
+        # multi-sample augmentation so the tail trains on clean images. ``None``
+        # keeps the augmentation always on (the pre-existing behaviour).
+        self._close_flag = close_flag
 
     def reseed(self, rng: np.random.Generator) -> None:
         """Point both the multi-sample sampler and the per-sample mapper at
@@ -142,6 +149,10 @@ class MultiSampleMappedDataset:
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         primary = self._dataset_dicts[idx]
+        # Closed tail phase (see CloseMosaicHook): skip all multi-sample
+        # augmentation and return the plain mapped sample.
+        if self._close_flag is not None and self._close_flag.item():
+            return self._mapper(primary)
         for aug in self._augs:
             if aug.fires(self._rng):
                 extras = self._sample_extras(idx, aug.num_extras())
