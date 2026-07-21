@@ -24,5 +24,16 @@ htmlcov/
 *.xml
 *.bin
 *.engine
-/models
+/cache
 /to_remove
+/bench
+/research-images
+/convnext-v1
+/runs
+/qgn2_full_convnext_tiny_coco
+/scratch
+
+
+
+dense.md
+/models
