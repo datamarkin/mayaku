@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/datamarkin/mayaku/actions/workflows/ci.yml/badge.svg)](https://github.com/datamarkin/mayaku/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/datamarkin/mayaku/blob/main/LICENSE)
 
 **The computer vision library that learns *your* data fastest.**
 
@@ -206,5 +206,5 @@ recipe, and the fine-tuning defaults that make them converge quickly on small da
 
 ## License
 
-Apache 2.0 — see [`LICENSE`](LICENSE). Applies to the full library and every published
+Apache 2.0 — see [`LICENSE`](https://github.com/datamarkin/mayaku/blob/main/LICENSE). Applies to the full library and every published
 model weight.
