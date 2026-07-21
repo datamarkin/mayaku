@@ -13,7 +13,7 @@ transfer to *your* classes quickly. Pure Python, zero custom CUDA kernels: one `
 Apple Silicon, ROCm, or CPU, and exports to ONNX, CoreML, OpenVINO, and TensorRT.
 Apache 2.0.
 
-![RF100-VL, nano class: mean AP vs training time, normalized to Mayaku's time per dataset](curve_nano.png)
+![RF100-VL, nano class: mean AP vs training time, normalized to Mayaku's time per dataset](https://raw.githubusercontent.com/datamarkin/mayaku/main/curve_nano.png)
 
 On [RF100-VL](https://rf100-vl.org/) — a 100-dataset benchmark of real, custom
 datasets — Mayaku's nano model reaches a higher mean AP than either comparison, and reaches
