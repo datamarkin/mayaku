@@ -73,7 +73,7 @@ def test_coreml_export_writes_mlpackage(tmp_path: Path) -> None:
     assert result.output_names == ("p2", "p3", "p4", "p5", "p6")
     # extras carries the input shape + compute units the artefact was
     # built with — useful for downstream provenance.
-    assert result.extras["compute_units"] == "CPU_ONLY"
+    assert result.extras["compute_units"] == "ALL"
     assert result.extras["input_shape"] == "1x3x96x96"
 
 
