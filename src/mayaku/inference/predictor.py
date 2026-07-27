@@ -101,8 +101,6 @@ class Predictor:
             raise ValueError(
                 f"min_size_test / max_size_test must be > 0; got ({min_size_test}, {max_size_test})"
             )
-        if gpu_preprocess and resize_mode == "letterbox":
-            raise ValueError("gpu_preprocess is only supported with resize_mode='shortest_edge'")
         if pinned_memory and not gpu_preprocess:
             raise ValueError(
                 "pinned_memory=True requires gpu_preprocess=True; the staging "
@@ -202,7 +200,11 @@ class Predictor:
             # Passing height/width = the canvas dims makes the model emit boxes in
             # canvas space (identity rescale) so the transform's inverse is exact.
             transform = LetterboxTransform(h, w, self.canvas)
-            img_tensor = self._to_tensor(transform.apply_image(arr))
+            img_tensor = (
+                self._gpu_letterbox(arr, transform)
+                if self.gpu_preprocess
+                else self._to_tensor(transform.apply_image(arr))
+            )
             instances = self._forward(
                 [{"image": img_tensor, "height": transform.out_h, "width": transform.out_w}]
             )
@@ -223,9 +225,16 @@ class Predictor:
         return instances
 
     def _to_tensor(self, hwc: npt.NDArray[np.uint8]) -> torch.Tensor:
-        """``(H, W, 3)`` uint8 RGB → ``(3, H, W)`` float32 on the model device."""
-        chw = np.ascontiguousarray(hwc.transpose(2, 0, 1))
-        return torch.from_numpy(chw).to(dtype=torch.float32, device=self.device)
+        """``(H, W, 3)`` uint8 RGB → ``(3, H, W)`` float32 on the model device.
+
+        Transposed and widened *on the device*, and in that order: a host-side
+        transpose copies the whole canvas, and widening before the transfer
+        would put float32 on the bus for a value range that is still 8-bit.
+        Made contiguous because the transpose it replaces was — the permute
+        alone returns a channels-last view, which is the same values in a
+        different layout for everything downstream.
+        """
+        return _upload(hwc, self.device).permute(2, 0, 1).contiguous().float()
 
     def _forward(self, inputs: list[dict[str, object]]) -> Instances:
         with torch.no_grad():
@@ -240,6 +249,37 @@ class Predictor:
         instances: Instances = outputs[0]["instances"]
         return instances
 
+    def _gpu_letterbox(
+        self, arr: npt.NDArray[np.uint8], transform: LetterboxTransform
+    ) -> torch.Tensor:
+        """On-device equivalent of ``LetterboxTransform.apply_image`` + ``_to_tensor``.
+
+        Uploads the uint8 RGB array once and does the resize and the pad on the
+        device, so the host does no per-pixel work at all. The CPU path resizes
+        with Pillow *then* uploads the full canvas — a bigger transfer and a
+        per-pixel host resize.
+
+        Antialiased, so agreement with the CPU path is within about one level
+        on a 0-255 scale — but still not bit-exact, which is why this is
+        opt-in. Note this is a *tighter* bound than :meth:`_gpu_preprocess`
+        gives; see :meth:`_resize_nchw`.
+        """
+        chw = self._resize_nchw(
+            self._upload_nchw(arr),
+            (transform.new_h, transform.new_w),
+            src_hw=(transform.h, transform.w),
+            antialias=True,
+        )
+        pad = (
+            transform.pad_left,
+            transform.out_w - transform.new_w - transform.pad_left,
+            transform.pad_top,
+            transform.out_h - transform.new_h - transform.pad_top,
+        )
+        if any(pad):
+            chw = torch.nn.functional.pad(chw, pad, value=transform.pad_value)
+        return chw[0]
+
     def _gpu_preprocess(self, arr: npt.NDArray[np.uint8], h: int, w: int) -> torch.Tensor:
         """GPU-side equivalent of the CPU resize path.
 
@@ -253,7 +293,47 @@ class Predictor:
         the CPU path. This is opt-in via ``gpu_preprocess=True``.
         """
         new_h, new_w = compute_resized_hw(h, w, self.min_size_test, self.max_size_test)
-        src = torch.from_numpy(arr)
+        chw = self._resize_nchw(
+            self._upload_nchw(arr), (new_h, new_w), src_hw=(h, w), antialias=False
+        )
+        return chw[0]
+
+    @staticmethod
+    def _resize_nchw(
+        chw: torch.Tensor,
+        size: tuple[int, int],
+        *,
+        src_hw: tuple[int, int],
+        antialias: bool,
+    ) -> torch.Tensor:
+        """On-device bilinear resize to ``size``; a no-op when already that size.
+
+        The single place either on-device path resamples, so "how do we resize"
+        is one decision rather than two literals that can drift.
+
+        ``antialias`` is the one thing the two callers disagree on, so it is an
+        argument rather than a constant. Pillow's bilinear is filter-scaled on
+        downscale, so ``True`` tracks it to about one level on a 0-255 scale
+        while ``False`` aliases and lands ~50x further out. It only affects
+        downscaling; torch ignores it when upsampling. The letterbox path opted
+        in; the shortest-edge path predates the comparison and is left as it
+        was, since changing it would move an existing deployment's numerics.
+        """
+        if size == src_hw:
+            return chw
+        return torch.nn.functional.interpolate(
+            chw, size=size, mode="bilinear", align_corners=False, antialias=antialias
+        )
+
+    def _upload_nchw(self, arr: npt.NDArray[np.uint8]) -> torch.Tensor:
+        """``(H, W, 3)`` uint8 RGB → ``(1, 3, H, W)`` float32 on the model device.
+
+        The shared front half of both on-device preprocess paths, so
+        ``pinned_memory`` applies to either one rather than only to whichever
+        path happened to implement it. Uploads uint8 and widens on the far
+        side — see :meth:`_to_tensor` for why that order.
+        """
+        h, w = arr.shape[0], arr.shape[1]
         if self.pinned_memory:
             buf = self._pinned_buf
             if buf is None or buf.shape[0] < h or buf.shape[1] < w:
@@ -261,16 +341,11 @@ class Predictor:
                 buf_w = max(buf.shape[1] if buf is not None else 0, w)
                 buf = torch.empty((buf_h, buf_w, 3), dtype=torch.uint8, pin_memory=True)
                 self._pinned_buf = buf
-            buf[:h, :w, :].copy_(src)
+            buf[:h, :w, :].copy_(torch.from_numpy(np.ascontiguousarray(arr)))
             gpu_uint8 = buf[:h, :w, :].to(self.device, non_blocking=True)
         else:
-            gpu_uint8 = src.to(self.device)
-        chw = gpu_uint8.permute(2, 0, 1).unsqueeze(0).float()
-        if (new_h, new_w) != (h, w):
-            chw = torch.nn.functional.interpolate(
-                chw, size=(new_h, new_w), mode="bilinear", align_corners=False
-            )
-        return chw[0]
+            gpu_uint8 = _upload(arr, self.device)
+        return gpu_uint8.permute(2, 0, 1).unsqueeze(0).float()
 
     def batch(self, images: Sequence[ImageInput]) -> list[Instances]:
         """Run :meth:`__call__` over a sequence of images.
@@ -359,6 +434,16 @@ class Predictor:
 # ---------------------------------------------------------------------------
 
 
+def _upload(arr: npt.NDArray[np.uint8], device: torch.device) -> torch.Tensor:
+    """``arr`` as a uint8 tensor on ``device``.
+
+    ``ascontiguousarray`` copies only for strided input — which a caller can
+    easily produce (``image[:, :, ::-1]`` to flip BGR) and which
+    ``torch.from_numpy`` rejects outright.
+    """
+    return torch.from_numpy(np.ascontiguousarray(arr)).to(device)
+
+
 def _resolve_device(model: nn.Module) -> torch.device:
     try:
         return next(p.device for p in model.parameters())
@@ -399,7 +484,8 @@ def from_pretrained(
     Args:
         source: Path to a ``.pth`` / exported artifact, or a bundled model name.
         device: ``"cpu" | "cuda" | "mps" | "auto"`` (default ``"auto"``).
-        gpu_preprocess: Do resize/normalize on-device (shortest-edge only).
+        gpu_preprocess: Do the resize (and letterbox pad) on-device instead of
+            on the host. Faster, but not bit-exact against the Pillow path.
         pinned_memory: Use a pinned staging buffer (requires ``gpu_preprocess``).
 
     Example:
