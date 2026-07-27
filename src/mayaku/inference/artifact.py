@@ -153,7 +153,13 @@ class ArtifactPredictor:
         # One pass to a contiguous float32 (C, H, W): astype-on-a-transposed-view
         # would copy anyway, so fold the contiguity + dtype conversion together.
         chw = np.ascontiguousarray(hwc.transpose(2, 0, 1), dtype=np.float32)
-        chw = (chw - self._mean) / self._std
+        # In place, and in this order: `(chw - mean) / std` allocates a second
+        # and third 4.9MB buffer at 640px, and writing through `out=` is the
+        # whole saving. Same two operations in the same sequence, so the result
+        # is bit-identical — not the algebraically equal `chw * (1/std)` form,
+        # which would round differently.
+        np.subtract(chw, self._mean, out=chw)
+        np.divide(chw, self._std, out=chw)
         return chw[None]
 
 
