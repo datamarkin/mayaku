@@ -250,12 +250,9 @@ class UniQuery(nn.Module):
         pred_boxes = outputs["pred_boxes"]  # (B, N, 4) absolute xyxy
 
         batch_size = pred_logits.shape[0]
-        num_proposals = pred_logits.shape[1]
         results = []
 
         scores = pred_logits.sigmoid()  # (B, N, K)
-        labels = torch.arange(self.num_classes, device=pred_logits.device)
-        labels = labels.unsqueeze(0).repeat(num_proposals, 1).flatten(0, 1)  # (N*K,)
 
         per_image_proposal_indices: list[Tensor] = []
 
@@ -268,23 +265,27 @@ class UniQuery(nn.Module):
             scores_flat, topk_indices = scores_per_image.flatten(0, 1).topk(
                 min(self.detections_per_image, scores_per_image.numel()), sorted=False
             )
-            labels_per_image = labels[topk_indices]
-            proposal_indices = topk_indices // self.num_classes
+            # Resolve the score mask to indices once. Every boolean-mask index
+            # runs its own nonzero (and its own device sync); filtering the flat
+            # index up front means one nonzero, and one gather per output.
+            keep = (scores_flat > self.score_thresh).nonzero(as_tuple=False).squeeze(1)
+            kept_flat = topk_indices.index_select(0, keep)
 
-            box_pred_expanded = box_pred.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
-            boxes_per_image = box_pred_expanded[topk_indices]
-
+            # Decompose the flat (N*K) index directly instead of materialising
+            # the (N*K,) label arange and the (N*K, 4) per-class box expansion —
+            # at K=365 those are ~110k-row temporaries built to read 100 rows.
+            proposal_indices = kept_flat // self.num_classes
+            boxes_per_image = box_pred.index_select(0, proposal_indices)  # (kept, 4)
             boxes_per_image[:, 0::2].clamp_(min=0, max=w)
             boxes_per_image[:, 1::2].clamp_(min=0, max=h)
 
-            keep = scores_flat > self.score_thresh
             inst = Instances(
                 image_size=(h, w),
-                pred_boxes=Boxes(boxes_per_image[keep]),
-                scores=scores_flat[keep],
-                pred_classes=labels_per_image[keep],
+                pred_boxes=Boxes(boxes_per_image),
+                scores=scores_flat.index_select(0, keep),
+                pred_classes=kept_flat % self.num_classes,
             )
-            per_image_proposal_indices.append(proposal_indices[keep])
+            per_image_proposal_indices.append(proposal_indices)
             results.append({"instances": inst})
 
         if self.mask_on:
