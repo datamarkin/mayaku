@@ -197,13 +197,67 @@ def test_train_mapper_letterboxes_to_square() -> None:
     assert len(dd["instances"]) == 1  # GT carried through the transform
 
 
-def test_letterbox_rejects_gpu_preprocess() -> None:
-    import pytest
+def test_letterbox_gpu_preprocess_matches_the_host_path() -> None:
+    """The on-device letterbox is the Pillow path's equivalent, not its own geometry.
 
-    with pytest.raises(ValueError, match="gpu_preprocess"):
-        Predictor(
-            _FakeDetector([0.0, 0.0, 1.0, 1.0]),
+    It resamples differently (device bilinear vs Pillow), so agreement is
+    approximate by construction — but the canvas shape, the content placement
+    and the pad bars have to land in exactly the same place, or predictions
+    would come back in the wrong coordinate space.
+    """
+    predictor = Predictor(
+        _FakeDetector([0.0, 0.0, 1.0, 1.0]),
+        resize_mode="letterbox",
+        canvas=64,
+        gpu_preprocess=True,
+        device=torch.device("cpu"),
+    )
+    rng = np.random.default_rng(0)
+    image = rng.integers(0, 256, (30, 60, 3), dtype=np.uint8)
+    transform = LetterboxTransform(30, 60, 64)
+
+    on_device = predictor._gpu_letterbox(image, transform)
+    on_host = predictor._to_tensor(transform.apply_image(image))
+
+    assert on_device.shape == on_host.shape == (3, 64, 64)
+    # Pad bars are exact — they are written, not resampled.
+    assert torch.equal(on_device[:, : transform.pad_top], on_host[:, : transform.pad_top])
+    # Content agrees to within resampler differences, on a 0-255 scale. The
+    # bound is tight on purpose: `antialias=True` tracks Pillow to about one
+    # level, so a loose bound here would not notice it being dropped.
+    assert (on_device - on_host).abs().max() < 2.0
+
+
+def test_letterbox_gpu_preprocess_returns_boxes_in_original_coords() -> None:
+    """The whole configuration, end to end, not just the preprocess helper.
+
+    ``gpu_preprocess`` with ``resize_mode="letterbox"`` used to be rejected in
+    the constructor. What that guard was protecting is this: the un-letterbox
+    inverse has to still land predictions in original-image coordinates, which
+    only shows up by running the public call.
+    """
+    rng = np.random.default_rng(0)
+    image = rng.integers(0, 256, (30, 60, 3), dtype=np.uint8)
+    # Canvas-space box covering the content region for a 60x30 image on a 64
+    # canvas: scale 64/60, content rows [1, 63) after centring.
+    canvas_box = [0.0, 1.0, 64.0, 63.0]
+
+    def run(gpu: bool) -> Instances:
+        predictor = Predictor(
+            _FakeDetector(canvas_box),
             resize_mode="letterbox",
-            gpu_preprocess=True,
+            canvas=64,
+            gpu_preprocess=gpu,
             device=torch.device("cpu"),
         )
+        return predictor(image)
+
+    host, on_device = run(False), run(True)
+
+    assert host.image_size == on_device.image_size == (30, 60)
+    # The detector returns a fixed canvas-space box either way, so the mapping
+    # back to original coords must be identical — the preprocess choice must
+    # not leak into the output geometry.
+    np.testing.assert_allclose(
+        on_device.pred_boxes.tensor.numpy(), host.pred_boxes.tensor.numpy(), atol=1e-5
+    )

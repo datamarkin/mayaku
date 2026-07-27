@@ -7,6 +7,7 @@ import torch
 
 from mayaku.models.poolers import ROIPooler, assign_boxes_to_levels
 from mayaku.structures.boxes import Boxes
+from mayaku.utils.export_mode import exporting
 
 # ---------------------------------------------------------------------------
 # Level assignment math
@@ -148,6 +149,21 @@ def _pyramid(device: torch.device, channels: int = 4) -> list[torch.Tensor]:
     return [torch.rand(1, channels, h, w, generator=gen).to(device) for h, w in sizes]
 
 
+def _pooler_case(device: torch.device) -> tuple[ROIPooler, list[torch.Tensor], list[Boxes]]:
+    """A pooler + pyramid + two boxes that between them span fine and coarse levels.
+
+    ``eval()`` is load-bearing, not hygiene: ``forward`` only reaches the
+    one-pass ``grid_sample`` path when not training, and a freshly constructed
+    ``nn.Module`` is in train mode. Without it these tests would exercise
+    torchvision ``roi_align`` and pass without touching what they name.
+    """
+    pooler = ROIPooler(output_size=7, scales=_SCALES, sampling_ratio=2).eval()
+    boxes = [
+        Boxes(torch.tensor([[0.0, 0.0, 30.0, 30.0], [20.0, 40.0, 200.0, 220.0]], device=device))
+    ]
+    return pooler, _pyramid(device), boxes
+
+
 def _train_vs_deploy(
     pooler: ROIPooler, feats: list[torch.Tensor], boxes: list[Boxes]
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -191,6 +207,52 @@ def test_deploy_matches_train(
     boxes = [Boxes(torch.tensor(box_rows, device=device))]
     ref, got = _train_vs_deploy(pooler, feats, boxes)
     torch.testing.assert_close(got, ref, **_TOL)
+
+
+def test_export_and_eager_sub_bin_average_agree(device: torch.device) -> None:
+    """The two sub-bin-average formulations must produce the same features.
+
+    Only one of them is ever *run*: eager uses ``avg_pool2d``, and the graph
+    written into an artifact uses two rank-5 ``ReduceMean``s instead, because
+    TensorRT-fp16 miscompiles ``AveragePool`` here and CoreML caps tensors at
+    rank 5 (bug.md Bug 6). Nothing else exercises the export formulation — the
+    exporters are the only callers — so without this the branch that exists to
+    keep artifacts correct is the one branch never checked.
+    """
+    pooler, feats, boxes = _pooler_case(device)
+
+    eager = pooler(feats, boxes)
+    with exporting():
+        exported = pooler(feats, boxes)
+
+    torch.testing.assert_close(exported, eager, **_TOL)
+
+
+def test_cache_pyramid_reuses_the_plan_without_changing_output(device: torch.device) -> None:
+    """The plan is actually reused, and reusing it changes nothing but the work.
+
+    Both halves matter: asserting only that outputs match would still pass if
+    the cache never hit, which is the entire point of the scope.
+    """
+    pooler, feats, boxes = _pooler_case(device)
+
+    uncached = pooler(feats, boxes)
+    with pooler.cache_pyramid():
+        first = pooler(feats, boxes)
+        plan = pooler._plan
+        second = pooler(feats, boxes)
+        assert pooler._plan is plan, "second call rebuilt the plan instead of reusing it"
+        assert plan is not None and plan.canvas(0) is plan.canvas(0), "canvas rebuilt per access"
+
+        # A different pyramid inside the same scope must not reuse the plan.
+        other_feats = [f * 0.5 for f in feats]
+        other = pooler(other_feats, boxes)
+        assert pooler._plan is not plan, "a new pyramid must invalidate the cached plan"
+
+    torch.testing.assert_close(first, uncached)
+    torch.testing.assert_close(second, uncached)
+    torch.testing.assert_close(other, pooler(other_feats, boxes))
+    assert pooler._plan is None, "the plan must not outlive the scope"
 
 
 def test_eff_sampling_ratio_resolves_nonpositive_to_two() -> None:

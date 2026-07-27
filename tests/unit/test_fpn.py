@@ -19,6 +19,8 @@ from mayaku.models.backbones import (
     ShapeSpec,
 )
 from mayaku.models.necks import FPN, LastLevelMaxPool, build_fpn
+from mayaku.models.necks.fpn import _upsample2x
+from mayaku.utils.export_mode import exporting
 
 # ---------------------------------------------------------------------------
 # Tiny fake backbone for cheap shape tests
@@ -221,3 +223,25 @@ def test_build_fpn_no_top_block() -> None:
     cfg = FPNConfig()
     fpn = build_fpn(cfg, _FakeBackbone(), with_top_block=False)
     assert set(fpn.output_shape()) == {"p2", "p3", "p4", "p5"}
+
+
+@pytest.mark.parametrize("shape", [(1, 8, 20, 20), (2, 4, 7, 11), (1, 3, 1, 1)])
+def test_upsample2x_formulations_agree(shape: tuple[int, int, int, int]) -> None:
+    """The eager and export upsample formulations must be interchangeable.
+
+    Eager broadcasts to an expanded view and reshapes, which skips a slow MPS
+    kernel; export keeps ``F.interpolate`` because the expanded view is rank 6
+    and CoreML rejects rank >= 6. Non-square and 1x1 inputs are included
+    because the eager form does its own shape arithmetic.
+    """
+    x = torch.randn(*shape)
+    eager = _upsample2x(x)
+    with exporting():
+        exported = _upsample2x(x)
+
+    assert eager.shape == (shape[0], shape[1], shape[2] * 2, shape[3] * 2)
+    assert torch.equal(eager, exported)
+    # Guard against the test going vacuous if the branch is ever removed.
+    assert torch.equal(
+        exported, torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+    )
