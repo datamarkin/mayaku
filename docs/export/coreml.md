@@ -42,27 +42,29 @@ Pinned details:
   for any real deployment** — Apple's Neural Engine only executes
   fp16, so an fp32 graph silently falls back to CPU+GPU regardless
   of `compute_units`.
-- **`compute_units` default = `CPU_ONLY`** for the parity check. The
-  Neural Engine path can quantise differently from the CPU path on the
-  same model; pinning CPU keeps parity reproducible. Pass
-  `CoreMLExporter(compute_units="ALL")` (or `CPU_AND_GPU`) to target
-  the deployment configuration.
+- **`compute_units` default = `CPU_AND_GPU`.** It is fastest, or within
+  noise of fastest, on every graph measured so far.
 
-  **Don't blindly pick `ALL` at deploy time.** When a model has ops
-  the NE can't run natively, CoreML thrashes trying to route there
-  and `ALL` ends up *slower* than `CPU_AND_GPU`. For the in-scope
-  Faster R-CNN R50-FPN backbone+FPN graph at fp16, the standalone
-  per-image cost is roughly:
+  **Don't pick `ALL`.** When a model has ops the NE can't run natively,
+  CoreML thrashes trying to route there and `ALL` ends up *slower* than
+  `CPU_AND_GPU` — sometimes by a lot. Two graphs, standalone per-image
+  cost:
 
-  | compute_units | ms / call (1344² input, fp16) |
-  |---|---|
-  | `CPU_ONLY` | 229 |
-  | **`CPU_AND_GPU`** | **85** |
-  | `ALL` | 463 |
+  | compute_units | R50-FPN body, 1344², fp16 | UniQuery det, 640², fp32 | UniQuery det, 640², fp16 |
+  |---|---|---|---|
+  | `CPU_ONLY` | 229 ms | 78 ms | 48 ms |
+  | **`CPU_AND_GPU`** | **85 ms** | **20 ms** | **18 ms** |
+  | `ALL` | 463 ms | 19 ms | 40 ms |
 
-  Always benchmark both `CPU_AND_GPU` and `ALL` against your specific
-  graph before shipping. See ADR 003 §1c.1 for the val2017 throughput
-  measurement.
+  Note the value is **advisory**: `MLModel(path)` picks its own compute
+  units at load and ignores what the converter recorded, so this pins
+  provenance rather than behaviour. A caller that wants a specific
+  placement must pass `compute_units` when *loading*. That is also why
+  `parity_check` pins `CPU_ONLY` at load rather than relying on the
+  exported value.
+
+  Always benchmark against your specific graph before shipping. See
+  ADR 003 §1c.1 for the val2017 throughput measurement.
 - **Static input shape.** Dynamic shapes via `coremltools.RangeDim`
   interact poorly with the constant folding the converter does for
   FPN's stride-2 ops; we trace at the deployment size and leave dynamic

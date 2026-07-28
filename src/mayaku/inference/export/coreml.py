@@ -60,14 +60,15 @@ class CoreMLExporter:
     Args:
         output_names: Names of the FPN feature outputs. Defaults to
             ``("p2", "p3", "p4", "p5", "p6")``.
-        compute_units: Compute-units pin recorded in the artifact.
-            Default ``"ALL"`` — the deployment configuration, and what
-            the runtime picks anyway. Note this is advisory: loading
-            with :class:`coremltools.models.MLModel` overrides it, so
-            it decides nothing for a caller that passes its own. Pin
-            ``"CPU_ONLY"`` only for an artifact that must not reach the
-            GPU or Neural Engine; measured on a UniQuery detector it is
-            ~4x slower than ``"ALL"``.
+        compute_units: Compute-units pin passed to the converter and
+            echoed in ``extras``. Advisory only —
+            :class:`coremltools.models.MLModel` picks its own at load
+            time, so this does not constrain where the artifact runs.
+            Default ``"CPU_AND_GPU"``: it is fastest or within noise of
+            fastest on every graph measured here, while ``"ALL"`` lets
+            CoreML route to the Neural Engine and is far slower when
+            the graph has ops the NE cannot take — see
+            `docs/export/coreml.md`.
     """
 
     name: str = "coreml"
@@ -79,7 +80,7 @@ class CoreMLExporter:
         self,
         *,
         output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        compute_units: str = "ALL",
+        compute_units: str = "CPU_AND_GPU",
         compute_precision: str = "fp32",
     ) -> None:
         if compute_units not in self._VALID_COMPUTE_UNITS:
@@ -241,10 +242,8 @@ class CoreMLExporter:
                 "CoreML verify requires the [coreml] extra: pip install mayaku[coreml]"
             ) from e
 
-        # Pin CPU here, not in the artifact: the check wants the same kernels on
-        # every macOS host, and loading is where that is decided. `MLModel(path)`
-        # defaults to ALL and ignores whatever the converter recorded, so a pin
-        # baked at convert time would not have made this deterministic anyway.
+        # Pin CPU here, not in the artifact: loading is where compute units are
+        # actually decided, and the check wants the same kernels on every host.
         ml = ct.models.MLModel(str(exported_path), compute_units=ct.ComputeUnit.CPU_ONLY)
         ort_inputs = {"image": sample.cpu().numpy()}
         ml_out = ml.predict(ort_inputs)
