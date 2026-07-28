@@ -105,6 +105,12 @@ class ROIPooler(nn.Module):
             ``224x224`` box samples from ``p4``.
     """
 
+    # Registered buffers, declared so they type as Tensor rather than
+    # nn.Module's `Tensor | Module` attribute fallback.
+    _scale_t: Tensor
+    _iy: Tensor
+    _ix: Tensor
+
     def __init__(
         self,
         output_size: int | tuple[int, int],
