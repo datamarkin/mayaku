@@ -60,15 +60,13 @@ class CoreMLExporter:
     Args:
         output_names: Names of the FPN feature outputs. Defaults to
             ``("p2", "p3", "p4", "p5", "p6")``.
-        compute_units: Compute-units pin passed to the converter and
-            echoed in ``extras``. Advisory only —
-            :class:`coremltools.models.MLModel` picks its own at load
-            time, so this does not constrain where the artifact runs.
-            Default ``"CPU_AND_GPU"``: it is fastest or within noise of
-            fastest on every graph measured here, while ``"ALL"`` lets
-            CoreML route to the Neural Engine and is far slower when
-            the graph has ops the NE cannot take — see
-            `docs/export/coreml.md`.
+        compute_units: Passed to the converter and echoed in
+            ``ExportResult.extras``. It does **not** travel with the
+            artifact — coremltools writes nothing about it into the
+            ``.mlpackage``, and :class:`~coremltools.models.MLModel`
+            defaults to ``ALL`` regardless. Where the graph actually
+            runs is chosen at load; see
+            :class:`mayaku.inference.artifact.ArtifactPredictor`.
     """
 
     name: str = "coreml"
@@ -159,14 +157,9 @@ class CoreMLExporter:
 
         compute = _compute_units(ct, self.compute_units)
         precision = _compute_precision(ct, self.compute_precision)
-        # Precision is the dominant deployment knob:
-        #   * `fp32` keeps eager-vs-CoreML parity tight (typical max
-        #     abs ~1e-3) and is what the random-init `parity_check`
-        #     tests rely on.
-        #   * `fp16` is the default coremltools picks and is what real
-        #     deployments use — Apple's Neural Engine only executes
-        #     fp16, so `compute_units=ALL` silently falls back to
-        #     CPU+GPU under fp32 and gives no NE acceleration.
+        # `fp32` keeps eager-vs-CoreML parity tight (max abs ~1e-3), which the
+        # random-init `parity_check` tests rely on; `fp16` is what deployments
+        # want. See docs/export/coreml.md.
         ml = ct.convert(
             traced,
             inputs=[ct.TensorType(name="image", shape=tuple(sample.shape))],
