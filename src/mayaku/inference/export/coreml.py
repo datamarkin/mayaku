@@ -60,11 +60,13 @@ class CoreMLExporter:
     Args:
         output_names: Names of the FPN feature outputs. Defaults to
             ``("p2", "p3", "p4", "p5", "p6")``.
-        compute_units: Override the converter's compute-units pin.
-            Default is ``"CPU_ONLY"`` so the parity check runs the
-            same kernels on every macOS host (no flakiness from
-            Neural Engine quantisation paths). Pass ``"ALL"`` to
-            target the actual deployment configuration.
+        compute_units: Passed to the converter and echoed in
+            ``ExportResult.extras``. It does **not** travel with the
+            artifact — coremltools writes nothing about it into the
+            ``.mlpackage``, and :class:`~coremltools.models.MLModel`
+            defaults to ``ALL`` regardless. Where the graph actually
+            runs is chosen at load; see
+            :class:`mayaku.inference.artifact.ArtifactPredictor`.
     """
 
     name: str = "coreml"
@@ -76,7 +78,7 @@ class CoreMLExporter:
         self,
         *,
         output_names: Sequence[str] = _DEFAULT_OUT_NAMES,
-        compute_units: str = "CPU_ONLY",
+        compute_units: str = "CPU_AND_GPU",
         compute_precision: str = "fp32",
     ) -> None:
         if compute_units not in self._VALID_COMPUTE_UNITS:
@@ -155,14 +157,9 @@ class CoreMLExporter:
 
         compute = _compute_units(ct, self.compute_units)
         precision = _compute_precision(ct, self.compute_precision)
-        # Precision is the dominant deployment knob:
-        #   * `fp32` keeps eager-vs-CoreML parity tight (typical max
-        #     abs ~1e-3) and is what the random-init `parity_check`
-        #     tests rely on.
-        #   * `fp16` is the default coremltools picks and is what real
-        #     deployments use — Apple's Neural Engine only executes
-        #     fp16, so `compute_units=ALL` silently falls back to
-        #     CPU+GPU under fp32 and gives no NE acceleration.
+        # `fp32` keeps eager-vs-CoreML parity tight (max abs ~1e-3), which the
+        # random-init `parity_check` tests rely on; `fp16` is what deployments
+        # want. See docs/export/coreml.md.
         ml = ct.convert(
             traced,
             inputs=[ct.TensorType(name="image", shape=tuple(sample.shape))],
@@ -238,7 +235,9 @@ class CoreMLExporter:
                 "CoreML verify requires the [coreml] extra: pip install mayaku[coreml]"
             ) from e
 
-        ml = ct.models.MLModel(str(exported_path))
+        # Pin CPU here, not in the artifact: loading is where compute units are
+        # actually decided, and the check wants the same kernels on every host.
+        ml = ct.models.MLModel(str(exported_path), compute_units=ct.ComputeUnit.CPU_ONLY)
         ort_inputs = {"image": sample.cpu().numpy()}
         ml_out = ml.predict(ort_inputs)
 

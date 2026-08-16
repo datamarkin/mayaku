@@ -153,7 +153,11 @@ class ArtifactPredictor:
         # One pass to a contiguous float32 (C, H, W): astype-on-a-transposed-view
         # would copy anyway, so fold the contiguity + dtype conversion together.
         chw = np.ascontiguousarray(hwc.transpose(2, 0, 1), dtype=np.float32)
-        chw = (chw - self._mean) / self._std
+        # In place: `(chw - mean) / std` would allocate two more 4.9MB buffers
+        # at 640px. Subtract-then-divide, not `chw * (1 / std)` — the reciprocal
+        # form folds to one pass but rounds differently.
+        np.subtract(chw, self._mean, out=chw)
+        np.divide(chw, self._std, out=chw)
         return chw[None]
 
 
@@ -166,7 +170,7 @@ def _build_session(path: Path, target: str, *, device: str) -> _RuntimeSession:
     if target == "onnx":
         return _ONNXSession(path, device=device)
     if target == "coreml":
-        return _CoreMLSession(path)
+        return _CoreMLSession(path, device=device)
     if target == "openvino":
         return _OpenVINOSession(path)
     if target == "tensorrt":
@@ -207,10 +211,20 @@ class _ONNXSession:
 class _CoreMLSession:
     """coremltools wrapper — macOS only."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, device: str = "auto") -> None:
         import coremltools as ct
 
-        self._model = ct.models.MLModel(str(path))
+        # Compute units are decided *here*, not by the exporter: nothing about
+        # them is written into the .mlpackage, and MLModel defaults to ALL.
+        #
+        # ALL is the wrong default for a detector. It lets CoreML route to the
+        # Neural Engine, which has to fall back for ops the NE can't take, and
+        # the thrashing costs more than it saves — measured on the UniQuery
+        # 640px graph, fp16 goes 18ms (CPU_AND_GPU) to 33ms (ALL), and on an
+        # R50-FPN body 85ms to 463ms. CPU_AND_GPU is fastest or within noise of
+        # it on every graph measured (docs/export/coreml.md).
+        units = ct.ComputeUnit.CPU_ONLY if device == "cpu" else ct.ComputeUnit.CPU_AND_GPU
+        self._model = ct.models.MLModel(str(path), compute_units=units)
         spec = self._model.get_spec()
         inp = spec.description.input[0]
         self._input_name = inp.name

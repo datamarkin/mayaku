@@ -22,6 +22,7 @@ from mayaku.inference.export.metadata import embed_sidecar
 from mayaku.inference.export.onnx import ONNXExporter
 from mayaku.inference.export.openvino import OpenVINOExporter
 from mayaku.inference.export.tensorrt import TensorRTExporter
+from mayaku.utils.export_mode import exporting
 
 __all__ = ["AVAILABLE_TARGETS", "TARGET_SUFFIX", "build_sample", "export_detector"]
 
@@ -76,24 +77,28 @@ def export_detector(
 
     sample = sample.to(next(model.parameters()).device)
 
-    # CoreML/OpenVINO embed the sidecar inline (they hold the model in memory and
-    # can't be re-saved over in place); ONNX/TensorRT embed post-hoc below.
-    if target == "onnx":
-        result = ONNXExporter(dynamic_input_shape=onnx_dynamic_input_shape).export(
-            model, sample, output
-        )
-    elif target == "coreml":
-        result = CoreMLExporter(compute_precision=coreml_precision).export(
-            model, sample, output, sidecar=sidecar
-        )
-    elif target == "openvino":
-        result = OpenVINOExporter().export(model, sample, output, sidecar=sidecar)
-    elif target == "tensorrt":
-        result = TensorRTExporter().export(model, sample, output)
-    else:  # pragma: no cover — every target in AVAILABLE_TARGETS has a branch.
-        raise AssertionError(
-            f"unhandled export target {target!r}; AVAILABLE_TARGETS is out of sync."
-        )
+    # Declared here, around every target, so modules that write a compiler-safe
+    # formulation don't have to infer it from the capture mechanism — see
+    # :mod:`mayaku.utils.export_mode`.
+    with exporting():
+        # CoreML/OpenVINO embed the sidecar inline (they hold the model in memory and
+        # can't be re-saved over in place); ONNX/TensorRT embed post-hoc below.
+        if target == "onnx":
+            result = ONNXExporter(dynamic_input_shape=onnx_dynamic_input_shape).export(
+                model, sample, output
+            )
+        elif target == "coreml":
+            result = CoreMLExporter(compute_precision=coreml_precision).export(
+                model, sample, output, sidecar=sidecar
+            )
+        elif target == "openvino":
+            result = OpenVINOExporter().export(model, sample, output, sidecar=sidecar)
+        elif target == "tensorrt":
+            result = TensorRTExporter().export(model, sample, output)
+        else:  # pragma: no cover — every target in AVAILABLE_TARGETS has a branch.
+            raise AssertionError(
+                f"unhandled export target {target!r}; AVAILABLE_TARGETS is out of sync."
+            )
 
     if sidecar is not None and target in ("onnx", "tensorrt"):
         embed_sidecar(result.path, target, sidecar)

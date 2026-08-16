@@ -71,20 +71,23 @@ def detector_postprocess(
     # which calls `results = results[output_boxes.nonempty()]` right
     # after the clip. Zero-area boxes otherwise consume slots in the
     # top-`detections_per_image` cap and count as FPs at every IoU.
-    keep = rescaled.nonempty()
+    # Indices, not a bool mask: each boolean-mask index would run its own
+    # nonzero (and its own device sync), and every field below is filtered by
+    # the same predicate. Resolve it once and gather.
+    keep = rescaled.nonempty().nonzero(as_tuple=False).squeeze(1)
 
     out = Instances(image_size=(output_height, output_width))
-    out.pred_boxes = Boxes(rescaled.tensor[keep])
+    out.pred_boxes = Boxes(rescaled.tensor.index_select(0, keep))
 
     # Carry simple per-instance fields, filtered to the kept set.
     for name in ("scores", "pred_classes"):
         if instances.has(name):
-            out.set(name, instances.get(name)[keep])
+            out.set(name, instances.get(name).index_select(0, keep))
 
     if instances.has("pred_masks"):
         masks = instances.pred_masks
         assert isinstance(masks, torch.Tensor)
-        kept = masks[keep]
+        kept = masks.index_select(0, keep)
         if kept.dim() == 4:
             # The mask head emits (R, 1, M, M) box-relative soft masks.
             # Drop the K=1 dim so ROIMasks sees its expected (N, M, M),
@@ -105,13 +108,16 @@ def detector_postprocess(
         kp = instances.pred_keypoints
         assert isinstance(kp, torch.Tensor)
         # (R, K, 3) — columns 0,1 are x,y; column 2 is the score.
-        rescaled_kp = kp[keep].clone()
+        rescaled_kp = kp.index_select(0, keep)  # already a fresh tensor
         rescaled_kp[..., 0] *= scale_x
         rescaled_kp[..., 1] *= scale_y
         out.pred_keypoints = rescaled_kp
         # Pass through the raw heatmaps if the keypoint head emitted them.
         if instances.has("pred_keypoint_heatmaps"):
-            out.set("pred_keypoint_heatmaps", instances.pred_keypoint_heatmaps[keep])
+            out.set(
+                "pred_keypoint_heatmaps",
+                instances.pred_keypoint_heatmaps.index_select(0, keep),
+            )
 
     return out
 

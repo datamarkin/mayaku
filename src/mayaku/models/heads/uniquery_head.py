@@ -209,17 +209,21 @@ class UniQueryHead(nn.Module):
         # Per-image bounds for clamping boxes between stages: (B, 1, 4)
         clamp_bounds = images_whwh[:, None, :]  # [W, H, W, H] per image
 
-        for stage in self.head_series[:num_stages]:
-            class_logits, pred_bboxes, proposal_features = stage(
-                features, bboxes, proposal_features, self.box_pooler, attn_mask
-            )
-            # Split matching queries from DN queries (DN occupies the tail).
-            outputs_class_list.append(class_logits[:, :num_match])
-            outputs_coord_list.append(pred_bboxes[:, :num_match])
-            if dn is not None:
-                dn_coord_list.append(pred_bboxes[:, num_match:])
-            bboxes = pred_bboxes.detach().clamp(min=0)
-            bboxes = torch.min(bboxes, clamp_bounds)
+        # Every stage pools from the same pyramid, so the pooler's stacked FPN
+        # canvas is identical across the loop — build it once. No-op on the
+        # training path, which pools via roi_align and never builds a canvas.
+        with self.box_pooler.cache_pyramid():
+            for stage in self.head_series[:num_stages]:
+                class_logits, pred_bboxes, proposal_features = stage(
+                    features, bboxes, proposal_features, self.box_pooler, attn_mask
+                )
+                # Split matching queries from DN queries (DN occupies the tail).
+                outputs_class_list.append(class_logits[:, :num_match])
+                outputs_coord_list.append(pred_bboxes[:, :num_match])
+                if dn is not None:
+                    dn_coord_list.append(pred_bboxes[:, num_match:])
+                bboxes = pred_bboxes.detach().clamp(min=0)
+                bboxes = torch.min(bboxes, clamp_bounds)
 
         # Strip DN from the final obj_features so downstream (mask/keypoint)
         # heads and the criterion only ever see the matching queries.

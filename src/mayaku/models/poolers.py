@@ -20,7 +20,8 @@ order matches the input order.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+from collections.abc import Iterator, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -28,8 +29,58 @@ from torch import Tensor, nn
 
 from mayaku.backends.ops.roi_align import roi_align
 from mayaku.structures.boxes import Boxes
+from mayaku.utils.export_mode import is_exporting
 
 __all__ = ["ROIPooler", "assign_boxes_to_levels"]
+
+
+class _PoolPlan:
+    """Everything the one-pass pooler derives from one feature pyramid.
+
+    All of it is a pure function of the feature maps, so an iterative head that
+    pools once per refinement stage can reuse a single plan across the loop —
+    see :meth:`ROIPooler.cache_pyramid`. Canvases are built lazily per batch
+    index, because a batched forward only pools the images that own boxes.
+    """
+
+    def __init__(self, features: tuple[Tensor, ...]) -> None:
+        # Held both as the cache key (by identity) and to build canvases from.
+        self.features = features
+        heights = [f.shape[2] for f in features]
+        widths = [f.shape[3] for f in features]
+        self.w_max = max(widths)
+        self.h_tot = sum(heights)
+        self._canvases: dict[int, Tensor] = {}
+        # One host->device transfer for all three rows, not three: at this size
+        # the cost is the transfer itself, so three separate ones cost 3x.
+        table = torch.tensor(
+            [heights, widths, [sum(heights[:i]) for i in range(len(features))]],
+            device=features[0].device,
+            dtype=features[0].dtype,
+        )
+        self.heights, self.widths, self.yoff = table[0], table[1], table[2]
+
+    def matches(self, features: Sequence[Tensor]) -> bool:
+        """True if ``features`` are the very same tensors this plan was built from.
+
+        Identity, not shape: a plan is only reusable for the exact pyramid it
+        came from, and holding the tensors is what makes identity sound — no
+        later allocation can reuse their storage while the plan is alive.
+        """
+        return all(a is b for a, b in zip(self.features, features, strict=True))
+
+    def canvas(self, b: int) -> Tensor:
+        """Image ``b``'s levels padded to a common width, stacked along height."""
+        hit = self._canvases.get(b)
+        if hit is not None:
+            return hit
+        bands = [
+            F.pad(f[b], (0, self.w_max - f.shape[3])) if f.shape[3] < self.w_max else f[b]
+            for f in self.features
+        ]
+        built = torch.cat(bands, dim=1).unsqueeze(0)  # (1, C, h_tot, w_max)
+        self._canvases[b] = built
+        return built
 
 
 class ROIPooler(nn.Module):
@@ -53,6 +104,12 @@ class ROIPooler(nn.Module):
             ``canonical_box_size`` lands on. Default ``4`` so a
             ``224x224`` box samples from ``p4``.
     """
+
+    # Registered buffers, declared so they type as Tensor rather than
+    # nn.Module's `Tensor | Module` attribute fallback.
+    _scale_t: Tensor
+    _iy: Tensor
+    _ix: Tensor
 
     def __init__(
         self,
@@ -78,6 +135,50 @@ class ROIPooler(nn.Module):
         self.canonical_box_size = canonical_box_size
         self.canonical_level = canonical_level
         self._min_level, self._max_level = _level_range(self.scales, canonical_level)
+        # Sampling constants that depend only on constructor arguments. Built
+        # once here rather than per call: a small host list -> device tensor is
+        # a queue drain (~0.2ms on MPS), not arithmetic, and the one-pass pooler
+        # needs all three every time it runs. Non-persistent so they stay out
+        # of state_dict; nn.Module still moves them with .to()/.half().
+        ph, pw = self.output_size
+        sr = self._eff_sampling_ratio
+        self.register_buffer("_scale_t", torch.tensor(self.scales), persistent=False)
+        self.register_buffer("_iy", (torch.arange(ph * sr) + 0.5) / sr, persistent=False)
+        self.register_buffer("_ix", (torch.arange(pw * sr) + 0.5) / sr, persistent=False)
+        # Retained only inside :meth:`cache_pyramid`.
+        self._plan: _PoolPlan | None = None
+        self._caching = False
+
+    @contextlib.contextmanager
+    def cache_pyramid(self) -> Iterator[None]:
+        """Reuse per-pyramid pooling state across calls on the same features.
+
+        An iterative head pools from the *same* feature pyramid once per
+        refinement stage, and everything the one-pass pooler derives from that
+        pyramid — the padded/stacked canvas and the per-level geometry tensors —
+        is identical every time. Held open across the stage loop, each is built
+        once instead of once per stage.
+
+        The cached plan is keyed on the identity of the features it was built
+        from, so entering this scope cannot return stale state if the features
+        change. Exiting drops it, which matters: the canvas is large
+        (C x sum(H) x max(W), ~24MB at 640px) and for a batched forward the
+        plan holds one canvas *per batch index* for the duration of the scope.
+        """
+        self._caching = True
+        try:
+            yield
+        finally:
+            self._caching, self._plan = False, None
+
+    def _plan_for(self, features: Sequence[Tensor]) -> _PoolPlan:
+        """The pooling plan for ``features``, reused if :meth:`cache_pyramid` is open."""
+        if self._plan is not None and self._plan.matches(features):
+            return self._plan
+        plan = _PoolPlan(tuple(features))
+        if self._caching:
+            self._plan = plan
+        return plan
 
     @property
     def _eff_sampling_ratio(self) -> int:
@@ -171,36 +272,25 @@ class ROIPooler(nn.Module):
         for samples >1px outside, where torchvision returns 0 and we clamp — a
         non-issue for decoded detection boxes).
 
-        The sub-bin average is two rank-5 ``ReduceMean``s (see below) — correct
-        on every backend including TensorRT-fp16 and CoreML (bug.md Bug 6).
+        The sub-bin average has two formulations — one written for backend
+        compilers, one for eager speed. See ``_pool`` below.
         """
         ph, pw = self.output_size
         dev, dt = features[0].device, features[0].dtype
         c = features[0].shape[1]
         sr = self._eff_sampling_ratio
         ny, nx = ph * sr, pw * sr
-        n_lvl = len(features)
-        w_max = max(f.shape[3] for f in features)
-        heights = [f.shape[2] for f in features]
-        widths = [f.shape[3] for f in features]
-        h_tot = sum(heights)
-        yoff = [sum(heights[:i]) for i in range(n_lvl)]
         batch = features[0].shape[0]
 
-        # Pad every level to w_max and stack along height -> per-image canvas.
-        def _canvas(b: int) -> Tensor:
-            bands = [
-                F.pad(f[b], (0, w_max - f.shape[3])) if f.shape[3] < w_max else f[b]
-                for f in features
-            ]
-            return torch.cat(bands, dim=1).unsqueeze(0)  # (1, C, h_tot, w_max)
-
-        scale_t = torch.as_tensor(self.scales, device=dev, dtype=dt)
-        yoff_t = torch.as_tensor(yoff, device=dev, dtype=dt)
-        widths_t = torch.as_tensor(widths, device=dev, dtype=dt)
-        heights_t = torch.as_tensor(heights, device=dev, dtype=dt)
-        iy = (torch.arange(ny, device=dev, dtype=dt) + 0.5) / sr
-        ix = (torch.arange(nx, device=dev, dtype=dt) + 0.5) / sr
+        plan = self._plan_for(features)
+        w_max, h_tot = plan.w_max, plan.h_tot
+        # Follow the *features*, not the module: the sampling constants are
+        # buffers, so a module left on the host would otherwise fault against
+        # device features. ``.to`` returns self when nothing has to change, so
+        # the matching case — every normal one — costs nothing.
+        scale_t = self._scale_t.to(device=dev, dtype=dt)
+        iy = self._iy.to(device=dev, dtype=dt)
+        ix = self._ix.to(device=dev, dtype=dt)
 
         def _pool(boxes: Tensor, lvl: Tensor, canvas: Tensor) -> Tensor:
             r = boxes.shape[0]
@@ -215,10 +305,10 @@ class ROIPooler(nn.Module):
             # Clamp to the level's real extent so an edge box's out-of-bounds
             # samples read the border pixel (as torchvision ROIAlign does), not
             # the zero-pad to w_max or the neighbouring level's band below it.
-            sx = torch.minimum(sx.clamp(min=0.0), widths_t[lvl][:, None] - 1.0)
-            sy = torch.minimum(sy.clamp(min=0.0), heights_t[lvl][:, None] - 1.0)
+            sx = torch.minimum(sx.clamp(min=0.0), plan.widths[lvl][:, None] - 1.0)
+            sy = torch.minimum(sy.clamp(min=0.0), plan.heights[lvl][:, None] - 1.0)
             # Route y into this box's level band on the stacked canvas.
-            sy = sy + yoff_t[lvl][:, None]
+            sy = sy + plan.yoff[lvl][:, None]
             gy = 2.0 * sy / (h_tot - 1) - 1.0
             gx = 2.0 * sx / (w_max - 1) - 1.0
             grid = torch.stack(
@@ -228,26 +318,33 @@ class ROIPooler(nn.Module):
             s = F.grid_sample(
                 canvas, grid, mode="bilinear", padding_mode="border", align_corners=True
             )
-            s = s.reshape(c, r, ny, nx).permute(1, 0, 2, 3)  # (r, c, ny, nx)
-            # Sub-bin average as two rank-5 ReduceMeans (height-sr then width-sr).
-            # NOT avg_pool2d: TensorRT-fp16 miscompiles AveragePool on the tall
-            # grid-sample output to NaN (bug.md Bug 6). NOT a single rank-6
-            # view().mean() either: CoreML caps tensors at rank 5. Two rank-5
-            # ReduceMeans satisfy both and are numerically identical.
-            s = s.reshape(r, c, ph, sr, nx).mean(dim=3)  # (r, c, ph, nx)
-            s = s.reshape(r, c, ph, pw, sr).mean(dim=4)  # (r, c, ph, pw)
-            return s
+            # Sub-bin average. Two formulations, numerically identical to float32
+            # rounding (~2e-7) — the graph we *export* is not the one we *run*.
+            if is_exporting():
+                # Export graph: two rank-5 ReduceMeans (height-sr then width-sr).
+                # NOT avg_pool2d: TensorRT-fp16 miscompiles AveragePool on the
+                # tall grid-sample output to NaN (bug.md Bug 6). NOT a single
+                # rank-6 view().mean() either: CoreML caps tensors at rank 5.
+                s = s.reshape(c, r, ny, nx).permute(1, 0, 2, 3)  # (r, c, ny, nx)
+                s = s.reshape(r, c, ph, sr, nx).mean(dim=3)  # (r, c, ph, nx)
+                return s.reshape(r, c, ph, pw, sr).mean(dim=4)  # (r, c, ph, pw)
+            # Eager: pool in grid_sample's own contiguous layout, then permute
+            # the 4x-smaller pooled result. The two ReduceMeans above have to
+            # permute *first*, which forces a copy of the full (r,c,ny,nx)
+            # sample tensor and costs ~12x more on MPS.
+            s = F.avg_pool2d(s.reshape(c * r, 1, ny, nx), sr)  # (c*r, 1, ph, pw)
+            return s.reshape(c, r, ph, pw).permute(1, 0, 2, 3)  # (r, c, ph, pw)
 
         # B==1 (export + most inference): one clean pass, no masking.
         if batch == 1:
-            return _pool(rois[:, 1:], levels, _canvas(0))
+            return _pool(rois[:, 1:], levels, plan.canvas(0))
 
         out = features[0].new_zeros((rois.shape[0], c, ph, pw))
         for b in range(batch):
             sel = (rois[:, 0].long() == b).nonzero(as_tuple=False).squeeze(1)
             if sel.numel() == 0:
                 continue
-            out[sel] = _pool(rois[sel, 1:], levels[sel], _canvas(b))
+            out[sel] = _pool(rois[sel, 1:], levels[sel], plan.canvas(b))
         return out
 
 

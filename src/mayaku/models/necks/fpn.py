@@ -40,6 +40,7 @@ from torch import Tensor, nn
 from mayaku.config.schemas import FPNConfig
 from mayaku.models.backbones._base import Backbone
 from mayaku.models.backbones._frozen_bn import FrozenBatchNorm2d
+from mayaku.utils.export_mode import is_exporting
 
 __all__ = ["FPN", "LastLevelMaxPool", "LastLevelP6P7", "build_fpn"]
 
@@ -181,9 +182,7 @@ class FPN(Backbone):
         results: list[Tensor] = [self.output_convs[-1](prev)]
         for i in range(len(self.in_features) - 2, -1, -1):
             lateral = self.lateral_convs[i](bu[self.in_features[i]])
-            # Nearest-neighbour upsample, factor 2. Using
-            # `interpolate(scale_factor=2)` is portable across CPU/MPS/CUDA.
-            upsampled = F.interpolate(prev, scale_factor=2.0, mode="nearest")
+            upsampled = _upsample2x(prev)
             prev = lateral + upsampled
             if self.fuse_type == "avg":
                 prev = prev * 0.5
@@ -214,6 +213,24 @@ class FPN(Backbone):
 # ---------------------------------------------------------------------------
 # Conv + norm helpers
 # ---------------------------------------------------------------------------
+
+
+def _upsample2x(x: Tensor) -> Tensor:
+    """Nearest-neighbour upsample by exactly 2. Two formulations, same values.
+
+    The top-down path runs this once per FPN level on every forward, and at
+    factor 2 the operation is just a copy — but the dedicated MPS upsample
+    kernel is markedly slower than expressing it as one. Broadcasting to an
+    expanded view and reshaping is bit-identical and eliminates that kernel.
+
+    It cannot go in an artifact, though: the expanded view is rank 6 and CoreML
+    rejects any tensor of rank >= 6. Export keeps ``F.interpolate``, which every
+    backend handles.
+    """
+    if is_exporting():
+        return F.interpolate(x, scale_factor=2.0, mode="nearest")
+    n, c, h, w = x.shape
+    return x[:, :, :, None, :, None].expand(n, c, h, 2, w, 2).reshape(n, c, h * 2, w * 2)
 
 
 def _make_norm(norm: NormChoice, channels: int) -> nn.Module | None:
