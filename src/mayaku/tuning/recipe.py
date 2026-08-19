@@ -357,6 +357,7 @@ def size_bucket(num_images: int) -> SizeBucket:
 def derive_overrides(
     stats: DatasetStats,
     cfg: MayakuConfig,
+    world_size: int = 1,
 ) -> dict[str, Any]:
     """Produce a nested override dict from dataset stats + base config.
 
@@ -397,14 +398,17 @@ def derive_overrides(
         }
 
     # ----- solver -----
-    # Two solver fields, both anchored to the single-rank effective batch
-    # (world_size excluded by design — recipe runs pre-DDP):
+    # Two solver fields:
     #   * base_lr — the regime-dependent fine-tune LR (see FINETUNE_BASE_LR),
-    #     scaled off its validated batch-16 anchor to this run's effective
-    #     batch: linear for SGD, sqrt for AdamW (gradient-noise scaling).
+    #     scaled off its validated batch-16 anchor to this run's CROSS-RANK
+    #     effective batch (ims_per_batch * grad_accum * world_size): linear for
+    #     SGD, sqrt for AdamW (gradient-noise scaling). Anchoring to the
+    #     cross-rank batch keeps DDP consistent — the schedule already resolves
+    #     epochs against the same cross-rank batch, so a num_gpus>1 run gets the
+    #     LR its true global batch warrants instead of the single-rank value.
     #   * num_epochs — a smooth log taper on dataset size (finetune_num_epochs);
     #     the engine resolves epochs back to iterations at train time.
-    eff_batch = cfg.solver.effective_batch()
+    eff_batch = cfg.solver.effective_batch(world_size)
     num_epochs = finetune_num_epochs(stats.num_images)
     # base_lr is a flat plateau-centre default, batch-scaled and hard-clamped to
     # the safe band (no size/width lever — neither predicts the plateau optimum).

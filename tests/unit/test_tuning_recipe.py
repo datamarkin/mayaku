@@ -145,6 +145,41 @@ def test_finetune_base_lr_batch_scaling_ratio() -> None:
     assert sgd / adamw == pytest.approx(math.sqrt(2), rel=1e-6)
 
 
+def _batch_cfg(ims_per_batch: int, grad_accum: int, optimizer: str = "AdamW") -> MayakuConfig:
+    # A config with an explicit per-rank micro-batch layout, for the DDP
+    # LR-scaling tests below.
+    return MayakuConfig.model_validate(
+        {
+            "solver": {
+                "optimizer_name": optimizer,
+                "ims_per_batch": ims_per_batch,
+                "grad_accum_steps": grad_accum,
+            }
+        }
+    )
+
+
+def test_base_lr_anchors_to_cross_rank_batch_not_per_rank() -> None:
+    # THE DDP invariant: base_lr keys off the CROSS-RANK effective batch
+    # (ims_per_batch * grad_accum * world_size), so the same global batch split
+    # different ways across GPUs derives the SAME LR. Here both sides land at a
+    # cross-rank batch of 16 (16x1 on one rank vs 8x1 across two ranks).
+    single = derive_overrides(_stats(), _batch_cfg(16, 1), world_size=1)
+    ddp = derive_overrides(_stats(), _batch_cfg(8, 1), world_size=2)
+    assert single["solver"]["base_lr"] == pytest.approx(ddp["solver"]["base_lr"])
+
+
+def test_base_lr_scales_up_with_world_size() -> None:
+    # Adding GPUs grows the cross-rank batch, so base_lr must scale off it:
+    # sqrt(world_size) for AdamW. One rank -> eff batch 16; two ranks -> 32, a
+    # 2x batch, so sqrt(2)x the LR. Kept in the safe band (no clamp) so the
+    # ratio is exact.
+    cfg = _batch_cfg(16, 1, optimizer="AdamW")
+    one = derive_overrides(_stats(), cfg, world_size=1)["solver"]["base_lr"]
+    two = derive_overrides(_stats(), cfg, world_size=2)["solver"]["base_lr"]
+    assert two / one == pytest.approx(math.sqrt(2), rel=1e-6)
+
+
 @pytest.mark.parametrize(
     "kw",
     [

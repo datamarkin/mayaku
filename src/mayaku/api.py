@@ -35,9 +35,10 @@ Behaviour:
   permitted" error.
 * ``num_gpus`` (default ``1``) spawns ``num_gpus`` DDP workers via
   :func:`mayaku.engine.launch` when ``> 1``. NCCL on CUDA/ROCm, gloo
-  elsewhere. Apply the linear LR scaling rule (multiply
-  ``solver.base_lr`` by ``num_gpus``) when scaling up. MPS is
-  single-device only and rejects ``num_gpus > 1``.
+  elsewhere. Auto-config scales ``solver.base_lr`` for the cross-rank
+  effective batch (sqrt for AdamW, linear for SGD); pin ``base_lr`` via
+  ``overrides`` to opt out. MPS is single-device only and rejects
+  ``num_gpus > 1``.
 * The backbone is architecture-only (random init) unless a mayaku
   checkpoint is supplied via ``weights=`` (or the config's
   ``model.weights``) — the library never fetches external weights.
@@ -345,8 +346,8 @@ def train(
         "ims_per_batch": cfg.solver.ims_per_batch,
         "grad_accum_steps": cfg.solver.grad_accum_steps,
         # Single-rank effective batch (ims_per_batch × grad_accum_steps); the
-        # cross-rank total is this × num_gpus. Apply the linear LR scaling rule
-        # against the cross-rank value when scaling up.
+        # cross-rank total is this × num_gpus. Auto-config scales base_lr against
+        # that cross-rank value, so the recipe already reflects the GPU count.
         "effective_batch_size": cfg.solver.effective_batch(),
         "base_lr": cfg.solver.base_lr,
         "ema_enabled": cfg.solver.ema_enabled,

@@ -249,7 +249,7 @@ def run_train(
                 resize_max_edge=cfg.input.max_size_test,
                 letterbox_canvas=canvas,
             )
-            proposed = derive_overrides(stats, cfg)
+            proposed = derive_overrides(stats, cfg, world_size)
             overrides = filter_unset(proposed, user_set_paths) or None
         # RFS repeat factors, decided against the *post*-auto-config dataloader
         # (auto-config may select RepeatFactorTrainingSampler). Computed on
