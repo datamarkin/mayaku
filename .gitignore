@@ -38,5 +38,28 @@ htmlcov/
 dense.md
 /models
 
+/benchmarks
+/experiments
+/datasets
+
+/scratch
+/det_dinov3_tiny_h256_768_coco
+/det_in22k_tiny_h256_768_coco
+
+/runs_floating_waste
+/o365
+/runs
+/fps_e2e
+
 # harvested image pools (tools/harvest_commons.py)
 images/
+
+# Model checkpoints. 270 MB of these were once staged for commit by accident;
+# git history is forever, so keep them out by default. Bundled weights are
+# fetched by name (train(weights="mayaku-n-det")), never committed.
+*.pth
+
+# Scratch plots written to the repo root by the benchmark/plot scripts.
+# Training and experiment logs are deliberately NOT ignored — they are the
+# record of what was run.
+/*.png
