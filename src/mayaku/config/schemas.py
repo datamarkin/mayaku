@@ -381,6 +381,27 @@ class UniQueryHeadConfig(_BaseModel):
     # cannot match a GT in that stage. Training-only — zero inference impact.
     cascade_iou_thresholds: tuple[float, ...] | None = None
 
+    # Classification loss. ``focal`` is the Sparse R-CNN original: every
+    # matched query is trained toward a hard 1.0 no matter how well its box
+    # fits. ``vfl`` (VarifocalNet) and ``mal`` (DEIM, CVPR 2025) instead use
+    # the matched prediction's own IoU as the target, so the emitted score
+    # estimates localization quality — which is what AP, a ranking metric,
+    # actually sorts on. Training-only: zero inference impact.
+    cls_loss_type: Literal["focal", "vfl", "mal"] = "focal"
+    # Exponent on MAL's IoU target (and its negative-branch modulator).
+    # DEIM ships 1.5; 2.0 matches the focal_gamma used elsewhere here.
+    mal_gamma: Annotated[float, Field(gt=0.0)] = 1.5
+    # Damping on MAL's negative branch. ``None`` (DEIM's default) means 1.0,
+    # which raises loss_ce ~4x against focal's alpha=0.25 and so shifts the
+    # classification/box balance. Set 0.25 to hold that balance fixed and
+    # isolate the IoU-target change from a loss-weight change.
+    mal_alpha: Annotated[float, Field(gt=0.0, le=8.0)] | None = None
+    # Weight on loss_ce. ``None`` keeps the Sparse R-CNN convention of reusing
+    # ``cost_class``, which ties the matcher's class cost to the loss weight —
+    # so "give classification more weight" cannot be tested without also
+    # perturbing the assignment. Set this to vary the loss weight alone.
+    cls_loss_weight: Annotated[float, Field(gt=0.0)] | None = None
+
     # Inference-time knobs: use fewer stages or proposals at test time
     # for speed without retraining. None = use training values.
     inference_num_stages: Annotated[int, Field(gt=0)] | None = None

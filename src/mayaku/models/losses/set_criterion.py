@@ -34,6 +34,9 @@ class SetCriterion(nn.Module):
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
         cascade_iou_thresholds: tuple[float, ...] = (),
+        cls_loss_type: str = "focal",
+        mal_gamma: float = 1.5,
+        mal_alpha: float | None = None,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -43,7 +46,24 @@ class SetCriterion(nn.Module):
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.cascade_iou_thresholds = cascade_iou_thresholds
-
+        if cls_loss_type not in ("focal", "vfl", "mal"):
+            raise ValueError(
+                f"cls_loss_type must be one of focal/vfl/mal, got {cls_loss_type!r}"
+            )
+        # ``focal`` trains every matched query toward a hard 1.0 regardless of
+        # how well its box fits, so a well-localized box and a barely-matched
+        # one get the same target and AP — a *ranking* metric — cannot tell them
+        # apart. ``vfl`` and ``mal`` replace that target with the prediction's
+        # own IoU, making the score a localization-quality estimate.
+        self.cls_loss_type = cls_loss_type
+        self.mal_gamma = mal_gamma
+        # Focal damps its negative branch by alpha=0.25. MAL, as DEIM ships it,
+        # does not — and with num_proposals x num_classes slots per image being
+        # almost all negative, dropping alpha raises the negative term ~4x and
+        # so the effective weight of loss_ce against the box losses. ``None`` is
+        # DEIM's default; set 0.25 to hold the classification/box balance at
+        # focal's, isolating the IoU-target change from a loss-weight change.
+        self.mal_alpha = mal_alpha
     def forward(
         self,
         outputs_list: list[dict[str, Tensor]],
@@ -102,7 +122,7 @@ class SetCriterion(nn.Module):
 
         indices = self._hungarian_match(pred_logits, pred_boxes, targets, stage_idx)
 
-        loss_ce = self._loss_labels(pred_logits, targets, indices, num_boxes)
+        loss_ce = self._loss_labels(pred_logits, pred_boxes, targets, indices, num_boxes)
         loss_bbox, loss_giou = self._loss_boxes(pred_boxes, targets, indices, num_boxes)
 
         return {"loss_ce": loss_ce, "loss_bbox": loss_bbox, "loss_giou": loss_giou}
@@ -236,11 +256,17 @@ class SetCriterion(nn.Module):
     def _loss_labels(
         self,
         pred_logits: Tensor,
+        pred_boxes: Tensor,
         targets: list[dict[str, Tensor]],
         indices: list[tuple[Tensor, Tensor]],
         num_boxes: float,
     ) -> Tensor:
-        """Sigmoid focal loss — sum reduction, divided by num_boxes."""
+        """Classification loss — sum reduction, divided by num_boxes.
+
+        ``focal`` uses one-hot targets. ``vfl``/``mal`` replace the positive
+        target with the matched prediction's own IoU against its GT, so the
+        score a query emits is trained to estimate how well it is localized.
+        """
         pred_logits = pred_logits.float()
         batch_size, num_queries, num_classes = pred_logits.shape
         target_classes = torch.full(
@@ -249,30 +275,61 @@ class SetCriterion(nn.Module):
             dtype=torch.long,
             device=pred_logits.device,
         )
+        # IoU of each matched query's box against the GT it was matched to.
+        # Detached: this is a *target*, not a path for box gradients (the box
+        # is already supervised by L1 + GIoU).
+        target_iou = pred_logits.new_zeros((batch_size, num_queries))
+        needs_iou = self.cls_loss_type != "focal"
         for b, (src_idx, tgt_idx) in enumerate(indices):
-            if src_idx.shape[0] > 0:
-                target_classes[b, src_idx] = targets[b]["labels"][tgt_idx]
+            if src_idx.shape[0] == 0:
+                continue
+            target_classes[b, src_idx] = targets[b]["labels"][tgt_idx]
+            if needs_iou:
+                target_iou[b, src_idx] = _paired_iou(
+                    pred_boxes[b, src_idx].detach().float(),
+                    targets[b]["boxes_xyxy"][tgt_idx].float(),
+                ).clamp(0.0, 1.0)
 
         # Flatten to (B*N, K) — matching original's flatten(0, 1)
         src_logits = pred_logits.flatten(0, 1)
         target_classes_flat = target_classes.flatten(0, 1)
 
-        # One-hot targets
         labels = torch.zeros_like(src_logits)
         pos_inds = (target_classes_flat != num_classes).nonzero(as_tuple=True)[0]
-        labels[pos_inds, target_classes_flat[pos_inds]] = 1.0
+        pos_cls = target_classes_flat[pos_inds]
 
-        # Focal loss: sum reduction, then / num_boxes
-        loss = (
-            sigmoid_focal_loss(
-                src_logits,
-                labels,
-                alpha=self.focal_alpha,
-                gamma=self.focal_gamma,
+        if self.cls_loss_type == "focal":
+            labels[pos_inds, pos_cls] = 1.0
+            loss = sigmoid_focal_loss(
+                src_logits, labels, alpha=self.focal_alpha, gamma=self.focal_gamma
             )
-            / num_boxes
-        )
-        return loss
+        else:
+            # ``labels`` doubles as the soft regression target *and* (via its
+            # own positive mask) the positive/negative selector, so a matched
+            # query with IoU 0 still counts as a positive slot rather than
+            # silently falling through to the negative branch.
+            q = target_iou.flatten(0, 1)[pos_inds]
+            is_pos = torch.zeros_like(src_logits, dtype=torch.bool)
+            is_pos[pos_inds, pos_cls] = True
+            if self.cls_loss_type == "mal":
+                labels[pos_inds, pos_cls] = q.pow(self.mal_gamma)
+                loss = matchability_aware_loss(
+                    src_logits,
+                    labels,
+                    is_pos,
+                    gamma=self.mal_gamma,
+                    alpha=self.mal_alpha,
+                )
+            else:
+                labels[pos_inds, pos_cls] = q
+                loss = varifocal_loss(
+                    src_logits,
+                    labels,
+                    is_pos,
+                    alpha=self.focal_alpha,
+                    gamma=self.focal_gamma,
+                )
+        return loss / num_boxes
 
     def _loss_boxes(
         self,
@@ -333,6 +390,82 @@ def sigmoid_focal_loss(
     loss = alpha_t * (1 - p_t) ** gamma * ce
     total: Tensor = loss.sum()
     return total
+
+
+def matchability_aware_loss(
+    inputs: Tensor,
+    target_score: Tensor,
+    is_pos: Tensor,
+    gamma: float = 1.5,
+    alpha: float | None = None,
+) -> Tensor:
+    """Matchability-Aware Loss (DEIM, CVPR 2025) — sum over all elements.
+
+        MAL(p, q, y) = -q^g log(p) - (1 - q^g) log(1 - p)    y = 1
+                     = -a p^g log(1 - p)                      y = 0
+
+    ``alpha`` (``a``) is ``None`` in DEIM's default, i.e. 1.0.
+
+    ``target_score`` already carries ``q^gamma`` at the positive slots and 0
+    everywhere else, so the positive branch is plain BCE against it. The
+    negative branch is focal with alpha folded away (DEIM drops VFL's class
+    balance term). The ``p^gamma`` modulator is detached, matching the
+    reference implementation: it is a weight, not a gradient path.
+
+    Versus VFL, raising the target to ``gamma`` pulls the target down hard for
+    low-IoU matches, so a confident prediction on a poorly localized box is
+    penalised steeply instead of being left nearly unchanged.
+    """
+    p = inputs.sigmoid()
+    ce_pos = F.binary_cross_entropy_with_logits(inputs, target_score, reduction="none")
+    ce_neg = F.binary_cross_entropy_with_logits(
+        inputs, torch.zeros_like(inputs), reduction="none"
+    )
+    neg = p.detach().pow(gamma) * ce_neg
+    if alpha is not None:
+        neg = alpha * neg
+    loss = torch.where(is_pos, ce_pos, neg)
+    total: Tensor = loss.sum()
+    return total
+
+
+def varifocal_loss(
+    inputs: Tensor,
+    target_score: Tensor,
+    is_pos: Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+) -> Tensor:
+    """Varifocal loss (VarifocalNet) — sum over all elements.
+
+        VFL(p, q, y) = -q (q log(p) + (1 - q) log(1 - p))   y = 1
+                     = -alpha p^g log(1 - p)                 y = 0
+
+    ``target_score`` carries the raw IoU ``q`` at positive slots. Kept beside
+    :func:`matchability_aware_loss` as the ablation control — MAL is VFL with
+    the target powered and the alpha dropped.
+    """
+    p = inputs.sigmoid()
+    ce_pos = F.binary_cross_entropy_with_logits(inputs, target_score, reduction="none")
+    ce_neg = F.binary_cross_entropy_with_logits(
+        inputs, torch.zeros_like(inputs), reduction="none"
+    )
+    loss = torch.where(
+        is_pos, target_score * ce_pos, alpha * p.detach().pow(gamma) * ce_neg
+    )
+    total: Tensor = loss.sum()
+    return total
+
+
+def _paired_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
+    """Element-wise IoU between paired (N, 4) xyxy boxes. Returns (N,)."""
+    area1 = (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0) * (boxes1[:, 3] - boxes1[:, 1]).clamp(min=0)
+    area2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0) * (boxes2[:, 3] - boxes2[:, 1]).clamp(min=0)
+    lt = torch.max(boxes1[:, :2], boxes2[:, :2])
+    rb = torch.min(boxes1[:, 2:], boxes2[:, 2:])
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[:, 0] * wh[:, 1]
+    return inter / (area1 + area2 - inter).clamp(min=1e-6)
 
 
 # ---------------------------------------------------------------------------

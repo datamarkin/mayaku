@@ -577,10 +577,13 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
         cost_bbox=uq_cfg.cost_bbox,
         cost_giou=uq_cfg.cost_giou,
         cascade_iou_thresholds=uq_cfg.cascade_iou_thresholds or (),
+        cls_loss_type=uq_cfg.cls_loss_type,
+        mal_gamma=uq_cfg.mal_gamma,
+        mal_alpha=uq_cfg.mal_alpha,
     )
 
     weight_dict: dict[str, float] = {
-        "loss_ce": uq_cfg.cost_class,
+        "loss_ce": uq_cfg.cls_loss_weight or uq_cfg.cost_class,
         "loss_bbox": uq_cfg.cost_bbox,
         "loss_giou": uq_cfg.cost_giou,
     }
