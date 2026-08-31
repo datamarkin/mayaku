@@ -50,10 +50,18 @@ Pinned details:
 CLI:
 
 ```bash
-mayaku export openvino configs/faster_rcnn_R50_FPN_3x.yaml \
-    --weights model.pth --output model.xml \
-    --sample-height 800 --sample-width 1333
+mayaku export openvino model_final.pth --output model.xml
 ```
+
+> **Input size is read from the checkpoint — you do not pass one.** The `.pth`'s
+> embedded sidecar carries the deploy canvas training resolved (`input.canvas_hw`),
+> and the export traces the graph at exactly that geometry, rectangle included.
+>
+> `--sample-height` / `--sample-width` exist only for backbone-only R-CNN graphs,
+> which export with dynamic spatial axes — there the traced size is an arbitrary
+> tracing detail. A full-detector graph (the `mayaku-*` family) bakes its input
+> size into the box decode, so for those any size other than the deploy canvas is
+> refused rather than silently shipped.
 
 OpenVINO writes a sibling `.bin` next to the `.xml`; both files are part
 of the artefact.
