@@ -16,6 +16,7 @@ from mayaku.config.schemas import (
     RPNConfig,
     SolverConfig,
 )
+from mayaku.tuning.sizing import CANVAS_ALIGN
 
 # ---------------------------------------------------------------------------
 # Defaults / contract
@@ -217,3 +218,28 @@ def test_solver_adamw_field_defaults() -> None:
 def test_solver_eps_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         SolverConfig(eps=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Canvas alignment — the budget dial must read as the canvas it produces
+# ---------------------------------------------------------------------------
+
+
+def test_size_budget_must_be_canvas_aligned() -> None:
+    """128, not 32: a 32-aligned budget the 128 grid can't reach resolves to a
+    smaller canvas than the dial reads (800 -> a 768x768 canvas, 92% of budget),
+    which is exactly the silent gap this validator exists to close. Asserted
+    against the sizing module's CANVAS_ALIGN so the two can't drift."""
+    assert CANVAS_ALIGN == 128
+    for good in (512, 640, 768, 896, 1024, 1152, 1280):
+        assert good % CANVAS_ALIGN == 0
+        assert InputConfig(size_budget=good).size_budget == good
+    for bad in (672, 800, 1200):
+        with pytest.raises(ValidationError, match=f"multiple of {CANVAS_ALIGN}"):
+            InputConfig(size_budget=bad)
+
+
+def test_canvas_hw_must_be_128_aligned() -> None:
+    assert InputConfig(canvas_hw=(384, 896)).canvas_hw == (384, 896)  # non-square is fine
+    with pytest.raises(ValidationError, match="multiple of 128"):
+        InputConfig(canvas_hw=(384, 800))
