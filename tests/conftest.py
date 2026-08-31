@@ -16,11 +16,16 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
-from collections.abc import Iterable
+import shutil
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
+
+if TYPE_CHECKING:
+    from mayaku.config import MayakuConfig
 
 _VALID_DEVICES = ("cpu", "mps", "cuda")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -195,21 +200,59 @@ def device() -> torch.device:
     return _resolve_device(_selected_device_kind())
 
 
-@pytest.fixture
-def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
-    """1-image COCO + tiny detector config, both committed to disk.
+class _ToyWorkspace(Mapping[str, "Path | object"]):
+    """``toy_workspace``'s mapping, with ``weights`` materialised on demand.
 
-    Used by ``test_cli`` (CLI subcommands) and ``test_api_train`` (the
-    Python-side ``mayaku.train`` orchestrator). The returned dict
-    carries the paths each test reaches for; the pre-built ``weights``
-    file is only needed by the CLI tests' ``--weights`` flag.
+    Only about half the tests taking the fixture ever read ``weights``; the rest
+    just need the dataset + config. Building the detector and serialising it costs
+    ~550ms and 112MB of disk per test (measured), so it is done once per session
+    and copied here (~18ms) the first time a test actually asks — and never for
+    the tests that don't. Behaves as the plain dict it replaced, so call sites
+    keep using ``ws["weights"]``.
     """
-    import json as _json
 
-    import numpy as np
-    from PIL import Image as _Image
+    def __init__(self, eager: dict[str, Path | object], tmp_path: Path, source: Path) -> None:
+        self._eager = eager
+        self._tmp = tmp_path
+        self._source = source
+        self._weights: Path | None = None
 
+    def __getitem__(self, key: str) -> Path | object:
+        if key != "weights":
+            return self._eager[key]
+        if self._weights is None:
+            # Each test gets its own copy: they pass it to train/eval, which may
+            # write alongside it, and tmp_path keeps them isolated.
+            self._weights = Path(shutil.copy(self._source, self._tmp / "model.pth"))
+        return self._weights
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((*self._eager, "weights"))
+
+    def __len__(self) -> int:
+        return len(self._eager) + 1
+
+
+@pytest.fixture(scope="session")
+def _toy_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The toy detector, built and serialised ONCE for the whole session.
+
+    ``toy_workspace`` copies this per test rather than rebuilding it 40 times.
+    """
     from mayaku.cli._factory import build_detector
+    from tests.unit._checkpoint import save_self_describing
+
+    cfg = _toy_cfg()
+    return save_self_describing(
+        tmp_path_factory.mktemp("toy_ckpt") / "model.pth",
+        build_detector(cfg),
+        cfg,
+        class_names=("thing", "other"),
+    )
+
+
+def _toy_cfg() -> MayakuConfig:
+    """The tiny detector config shared by the workspace and its checkpoint."""
     from mayaku.config import (
         BackboneConfig,
         InputConfig,
@@ -219,32 +262,9 @@ def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
         ROIHeadsConfig,
         RPNConfig,
         SolverConfig,
-        dump_yaml,
     )
 
-    images_dir = tmp_path / "images"
-    images_dir.mkdir()
-    rgb = (np.random.default_rng(0).random((64, 64, 3)) * 255).astype(np.uint8)
-    _Image.fromarray(rgb).save(images_dir / "img.png")
-
-    coco = {
-        "images": [{"id": 1, "file_name": "img.png", "height": 64, "width": 64}],
-        "categories": [{"id": 1, "name": "thing", "supercategory": "thing"}],
-        "annotations": [
-            {
-                "id": 100,
-                "image_id": 1,
-                "category_id": 1,
-                "bbox": [10.0, 10.0, 30.0, 30.0],
-                "area": 900.0,
-                "iscrowd": 0,
-            }
-        ],
-    }
-    json_path = tmp_path / "gt.json"
-    json_path.write_text(_json.dumps(coco))
-
-    cfg = MayakuConfig(
+    return MayakuConfig(
         model=ModelConfig(
             meta_architecture="faster_rcnn",
             backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
@@ -282,23 +302,60 @@ def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
             checkpoint_period=2,
         ),
     )
+
+
+@pytest.fixture
+def toy_workspace(tmp_path: Path, _toy_checkpoint: Path) -> Mapping[str, Path | object]:
+    """1-image COCO + tiny detector config, both committed to disk.
+
+    Used by ``test_cli`` (CLI subcommands) and ``test_api_train`` (the
+    Python-side ``mayaku.train`` orchestrator). The returned mapping
+    carries the paths each test reaches for; the pre-built ``weights``
+    file is only needed by the CLI tests' ``--weights`` flag, so it is
+    copied from the session checkpoint on first access (see
+    :class:`_ToyWorkspace`).
+    """
+    import json as _json
+
+    import numpy as np
+    from PIL import Image as _Image
+
+    from mayaku.config import dump_yaml
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    rgb = (np.random.default_rng(0).random((64, 64, 3)) * 255).astype(np.uint8)
+    _Image.fromarray(rgb).save(images_dir / "img.png")
+
+    coco = {
+        "images": [{"id": 1, "file_name": "img.png", "height": 64, "width": 64}],
+        "categories": [{"id": 1, "name": "thing", "supercategory": "thing"}],
+        "annotations": [
+            {
+                "id": 100,
+                "image_id": 1,
+                "category_id": 1,
+                "bbox": [10.0, 10.0, 30.0, 30.0],
+                "area": 900.0,
+                "iscrowd": 0,
+            }
+        ],
+    }
+    json_path = tmp_path / "gt.json"
+    json_path.write_text(_json.dumps(coco))
+
+    cfg = _toy_cfg()
     cfg_path = tmp_path / "cfg.yaml"
     dump_yaml(cfg, cfg_path)
 
-    from tests.unit._checkpoint import save_self_describing
-
-    model = build_detector(cfg)
-    # Self-describing checkpoint: predict/eval/export read the architecture
-    # from this embedded "mayaku" sidecar, not a separate config file.
-    weights = save_self_describing(
-        tmp_path / "model.pth", model, cfg, class_names=("thing", "other")
+    return _ToyWorkspace(
+        {
+            "images": images_dir,
+            "json": json_path,
+            "cfg": cfg_path,
+            "cfg_obj": cfg,
+            "image_file": images_dir / "img.png",
+        },
+        tmp_path,
+        _toy_checkpoint,
     )
-
-    return {
-        "images": images_dir,
-        "json": json_path,
-        "cfg": cfg_path,
-        "cfg_obj": cfg,
-        "weights": weights,
-        "image_file": images_dir / "img.png",
-    }
