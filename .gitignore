@@ -37,3 +37,6 @@ htmlcov/
 
 dense.md
 /models
+
+# harvested image pools (tools/harvest_commons.py)
+images/
