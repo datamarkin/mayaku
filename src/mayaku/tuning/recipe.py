@@ -331,11 +331,36 @@ _BUCKETS: Final[tuple[tuple[float, SizeBucket], ...]] = (
     # sweep before raising these (report-1 Tier 1); stay conservative
     # until then.
     # close_mosaic_frac: whenever mosaic is on, keep the last 20% clean.
-    (500, SizeBucket("xs", mosaic_prob=0.1, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
-    (2_000, SizeBucket("s", mosaic_prob=0.2, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
-    (5_000, SizeBucket("m", mosaic_prob=0.3, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
-    (50_000, SizeBucket("l", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.0, close_mosaic_frac=0.2)),
-    (math.inf, SizeBucket("xl", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1, close_mosaic_frac=0.2)),
+    (
+        500,
+        SizeBucket(
+            "xs", mosaic_prob=0.1, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2
+        ),
+    ),
+    (
+        2_000,
+        SizeBucket(
+            "s", mosaic_prob=0.2, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2
+        ),
+    ),
+    (
+        5_000,
+        SizeBucket(
+            "m", mosaic_prob=0.3, mixup_prob=0.0, copy_paste_prob=0.0, close_mosaic_frac=0.2
+        ),
+    ),
+    (
+        50_000,
+        SizeBucket(
+            "l", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.0, close_mosaic_frac=0.2
+        ),
+    ),
+    (
+        math.inf,
+        SizeBucket(
+            "xl", mosaic_prob=0.5, mixup_prob=0.1, copy_paste_prob=0.1, close_mosaic_frac=0.2
+        ),
+    ),
 )
 
 

@@ -370,9 +370,10 @@ def test_recipe_emits_close_mosaic_frac_while_schema_default_stays_neutral() -> 
     from mayaku.config.schemas import InputConfig
 
     assert InputConfig().close_mosaic_frac == 0.0
-    assert derive_overrides(_stats(num_images=10_000), MayakuConfig())["input"][
-        "close_mosaic_frac"
-    ] == 0.2
+    assert (
+        derive_overrides(_stats(num_images=10_000), MayakuConfig())["input"]["close_mosaic_frac"]
+        == 0.2
+    )
 
 
 def test_derive_overrides_enables_repeat_factor_sampler_when_imbalanced() -> None:
