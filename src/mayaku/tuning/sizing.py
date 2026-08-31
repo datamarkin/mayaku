@@ -12,10 +12,11 @@ compute on every aspect — and the never-exceed ceiling gives a hard compute /
 memory bound (no OOM past the square baseline).
 
 Two alignment grids, on purpose:
-    * **Deploy / eval / export** use ``align=128`` (the default): torch.compile-
-      safe and ANE/TensorRT-friendly, so the single shipped size specialises
-      best on every backend.
-    * **Training** uses ``align=32`` (:func:`multi_scale_canvases`): the FPN
+    * **Deploy / eval / export** use :data:`CANVAS_ALIGN` (128, the default):
+      torch.compile-safe and ANE/TensorRT-friendly, so the single shipped size
+      specialises best on every backend. ``InputConfig`` validates the budget
+      dial against this same grid, so the dial reads as the canvas it produces.
+    * **Training** uses :data:`TRAIN_LADDER_ALIGN` (32, :func:`multi_scale_canvases`): the FPN
       stride floor and what the detector already pads to internally
       (``size_divisibility``). The finer grid gives a dense multi-scale ladder
       (e.g. 480/512/.../640 instead of the coarse 128-grid 384/512/640) — the
@@ -28,18 +29,32 @@ from __future__ import annotations
 import math
 
 __all__ = [
+    "CANVAS_ALIGN",
+    "TRAIN_LADDER_ALIGN",
     "multi_scale_canvases",
     "resolve_canvas",
     "resolve_deploy_canvas",
     "snap_max_content",
 ]
 
+#: Alignment grid for every canvas that ships — deploy, eval, export. Also the
+#: grid ``InputConfig`` validates ``size_budget`` / ``canvas_hw`` against, so the
+#: budget dial reads as the resolution it produces (for square data, dial ==
+#: canvas side). Single source for the 128 in both places.
+CANVAS_ALIGN = 128
+
+#: Alignment grid for the *intermediate* multi-scale training rungs: the FPN
+#: stride floor, i.e. what the detector already pads to internally. Finer than
+#: :data:`CANVAS_ALIGN` on purpose — the coarse grid costs ~2 AP. These rungs are
+#: per-iteration and never land in ``canvas_hw``.
+TRAIN_LADDER_ALIGN = 32
+
 
 def multi_scale_canvases(
     deploy_canvas: tuple[int, int],
     *,
     scale_min: float = 0.5,
-    align: int = 32,
+    align: int = TRAIN_LADDER_ALIGN,
 ) -> list[tuple[int, int]]:
     """Multi-scale letterbox canvases for training, anchored on the deploy canvas.
 
@@ -76,7 +91,7 @@ def resolve_canvas(
     aspect: float,
     uniform: bool,
     *,
-    align: int = 128,
+    align: int = CANVAS_ALIGN,
 ) -> tuple[tuple[int, int], float]:
     """Resolve the train/deploy canvas from the budget dial + data aspect.
 
@@ -97,7 +112,7 @@ def resolve_deploy_canvas(
     canvas_hw: tuple[int, int] | None,
     size_budget: int,
     *,
-    align: int = 128,
+    align: int = CANVAS_ALIGN,
 ) -> tuple[int, int]:
     """The fixed deploy/eval canvas: the pinned ``canvas_hw`` (resolved at train
     time or set manually), else the largest aligned square in the ``size_budget**2``
@@ -113,7 +128,7 @@ def snap_max_content(
     budget: int,
     aspect: float,
     *,
-    align: int = 128,
+    align: int = CANVAS_ALIGN,
     min_side: int = 128,
 ) -> tuple[int, int]:
     """Resolve the ``(H, W)`` canvas that maximizes letterbox content under budget.

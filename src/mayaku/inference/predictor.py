@@ -93,10 +93,11 @@ class Predictor:
             )
         # ``canvas`` is the resolved letterbox canvas: a scalar S (→ S×S) or
         # an (H, W) rectangle. It's passed straight to LetterboxTransform.
-        if resize_mode == "letterbox":
-            dims = (canvas, canvas) if isinstance(canvas, int) else canvas
-            if dims[0] <= 0 or dims[1] <= 0:
-                raise ValueError(f"canvas must be > 0; got {canvas}")
+        # Normalised once here — ``export`` traces the graph at this exact
+        # (H, W), so the deploy geometry has a single (H, W) spelling.
+        canvas_hw: tuple[int, int] = (canvas, canvas) if isinstance(canvas, int) else canvas
+        if resize_mode == "letterbox" and (canvas_hw[0] <= 0 or canvas_hw[1] <= 0):
+            raise ValueError(f"canvas must be > 0; got {canvas}")
         if resize_mode == "shortest_edge" and (min_size_test <= 0 or max_size_test <= 0):
             raise ValueError(
                 f"min_size_test / max_size_test must be > 0; got ({min_size_test}, {max_size_test})"
@@ -109,6 +110,7 @@ class Predictor:
         self.model = model.eval()
         self.resize_mode = resize_mode
         self.canvas = canvas
+        self.canvas_hw = canvas_hw
         self.min_size_test = min_size_test
         self.max_size_test = max_size_test
         self.device = device or _resolve_device(model)
@@ -369,8 +371,8 @@ class Predictor:
         format: str,
         *,
         output: str | Path | None = None,
-        sample_height: int = 640,
-        sample_width: int = 640,
+        sample_height: int | None = None,
+        sample_width: int | None = None,
         coreml_precision: str = "fp32",
         onnx_dynamic_input_shape: bool = True,
     ) -> Path:
@@ -384,7 +386,9 @@ class Predictor:
             format: One of ``"onnx" | "coreml" | "openvino" | "tensorrt"``.
             output: Artifact path. Defaults to ``<model-name>.<ext>`` in the cwd
                 (``.onnx`` / ``.mlpackage`` / ``.xml`` / ``.engine``).
-            sample_height / sample_width: Tracing input size.
+            sample_height / sample_width: Tracing input size. Defaults to this
+                predictor's deploy canvas; a full-detector graph refuses any
+                other size.
             coreml_precision: ``"fp32"`` (default) or ``"fp16"`` — CoreML only.
             onnx_dynamic_input_shape: ONNX only; ``False`` bakes the sample shape
                 (use when targeting TensorRT — see ``docs/export/onnx.md``).
@@ -399,6 +403,7 @@ class Predictor:
             TARGET_SUFFIX,
             build_sample,
             export_detector,
+            resolve_export_sample_hw,
         )
         from mayaku.utils.checkpoint import build_sidecar
 
@@ -416,7 +421,13 @@ class Predictor:
         sidecar = (
             build_sidecar(self._cfg, self._class_names or []) if self._cfg is not None else None
         )
-        sample = build_sample(sample_height, sample_width)
+        # Trace at this predictor's deploy canvas, not a fixed square — a
+        # full-detector graph bakes its input size in, so the traced size is what
+        # the artifact will forever run at. ``canvas_hw`` is already the resolved
+        # geometry for every construction path, config or not.
+        sample = build_sample(
+            *resolve_export_sample_hw(self.canvas_hw, self.model, sample_height, sample_width)
+        )
         result = export_detector(
             self.model,
             format,

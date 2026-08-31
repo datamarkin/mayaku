@@ -52,6 +52,30 @@ class _RuntimeSession(Protocol):
     def run(self, x: npt.NDArray[np.float32]) -> dict[str, npt.NDArray[np.float32]]: ...
 
 
+def _check_canvas_agrees(path: Path, session: _RuntimeSession, cfg: MayakuConfig) -> None:
+    """Refuse an artifact whose graph was traced at a size its sidecar disagrees with.
+
+    A static input shape is the size the artifact runs at forever — the sidecar's
+    canvas can't override it — so a disagreement means the export traced the wrong
+    sample and the file would deploy at the wrong geometry with no symptom beyond
+    lost AP. Both sides resolve the canvas through :func:`resolve_deploy_canvas`,
+    the one rule the exporter and the eager ``Predictor`` also use; a dynamic graph
+    declares no shape and legitimately defers to the config.
+    """
+    from mayaku.tuning.sizing import resolve_deploy_canvas
+
+    canvas = resolve_deploy_canvas(cfg.input.canvas_hw, cfg.input.size_budget)
+    if session.input_hw is None or session.input_hw == canvas:
+        return
+    raise ValueError(
+        f"{path.name} was exported at {session.input_hw[0]}x{session.input_hw[1]} (HxW) "
+        f"but its model deploys at {canvas[0]}x{canvas[1]}. The graph's input size is "
+        "baked in and can't be changed at load time, so running it would silently use "
+        "the wrong geometry. Re-export it — the deploy canvas is now the default:\n"
+        f"  mayaku export {target_from_suffix(path)} <weights> --output {path.name}"
+    )
+
+
 class ArtifactPredictor:
     """Run a self-describing exported artifact on images, returning ``Instances``.
 
@@ -68,16 +92,12 @@ class ArtifactPredictor:
         self._session = session
         self.cfg = cfg
         self.class_names = class_names
-        # Canvas the graph was exported at: the session's static input shape is
-        # authoritative (the graph only accepts that size, and the export sample
-        # may differ from the config's deploy canvas); fall back to the config's
-        # resolved canvas when the graph is dynamic.
-        if session.input_hw is not None:
-            self._canvas: tuple[int, int] = session.input_hw
-        else:
-            from mayaku.tuning.sizing import resolve_deploy_canvas
+        # Deploy canvas. ``from_file`` has already proven a static graph shape
+        # equals this (:func:`_check_canvas_agrees`), and a dynamic graph declares
+        # none — so the config's resolved canvas is the single answer either way.
+        from mayaku.tuning.sizing import resolve_deploy_canvas
 
-            self._canvas = resolve_deploy_canvas(cfg.input.canvas_hw, cfg.input.size_budget)
+        self._canvas = resolve_deploy_canvas(cfg.input.canvas_hw, cfg.input.size_budget)
         self._mean = np.asarray(cfg.model.pixel_mean, dtype=np.float32).reshape(3, 1, 1)
         self._std = np.asarray(cfg.model.pixel_std, dtype=np.float32).reshape(3, 1, 1)
         self._score_thresh = float(cfg.model.roi_heads.score_thresh_test)
@@ -117,6 +137,7 @@ class ArtifactPredictor:
                 "not a full detector, so it can't run end-to-end. Only UniQuery models "
                 "export as runnable artifacts today (ONNX)."
             )
+        _check_canvas_agrees(path, session, cfg)
         return cls(session, cfg, class_names)
 
     # ------------------------------------------------------------------

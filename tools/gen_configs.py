@@ -47,7 +47,7 @@ class Tier:
     backbone: str  # convnext_femto | _nano | _tiny | _base
     hidden_dim: int  # 128 (real-time) | 256 (accuracy)
     num_stages: int  # QGN cascade depth
-    size_budget: int  # fixed square letterbox size for inference + export
+    size_budget: int  # compute-budget dial; must be 128-aligned (see InputConfig)
     realtime: bool  # True -> pooler_sampling_ratio 1; False -> 2
     desc: str  # one-phrase positioning, used in the header comment
     params: str  # detection param estimate, used in the header comment
@@ -59,7 +59,7 @@ TIERS: tuple[Tier, ...] = (
     Tier("m", "convnext_tiny", 128, 2, 640, True, "real-time hero", "33M"),
     Tier("l", "convnext_tiny", 256, 2, 640, False, "best AP/speed", "57M"),
     Tier("xl", "convnext_base", 256, 2, 640, False, "max accuracy", "117M"),
-    Tier("xxl", "convnext_base", 256, 6, 800, False, "accuracy ceiling", "167M"),
+    Tier("xxl", "convnext_base", 256, 6, 768, False, "accuracy ceiling", "167M"),
 )
 
 # Task → filename/weight token. First three letters of the task, so the config

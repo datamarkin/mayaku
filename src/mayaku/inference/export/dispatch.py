@@ -18,13 +18,20 @@ from torch import nn
 
 from mayaku.inference.export.base import ExportResult
 from mayaku.inference.export.coreml import CoreMLExporter
+from mayaku.inference.export.full_detector import is_full_detector
 from mayaku.inference.export.metadata import embed_sidecar
 from mayaku.inference.export.onnx import ONNXExporter
 from mayaku.inference.export.openvino import OpenVINOExporter
 from mayaku.inference.export.tensorrt import TensorRTExporter
 from mayaku.utils.export_mode import exporting
 
-__all__ = ["AVAILABLE_TARGETS", "TARGET_SUFFIX", "build_sample", "export_detector"]
+__all__ = [
+    "AVAILABLE_TARGETS",
+    "TARGET_SUFFIX",
+    "build_sample",
+    "export_detector",
+    "resolve_export_sample_hw",
+]
 
 AVAILABLE_TARGETS: tuple[str, ...] = ("onnx", "coreml", "openvino", "tensorrt")
 
@@ -48,6 +55,39 @@ def build_sample(h: int, w: int) -> torch.Tensor:
     test suite. :func:`export_detector` re-homes it to the model's device.
     """
     return torch.zeros(1, 3, h, w, dtype=torch.float32)
+
+
+def resolve_export_sample_hw(
+    canvas: tuple[int, int],
+    model: nn.Module,
+    sample_height: int | None,
+    sample_width: int | None,
+) -> tuple[int, int]:
+    """The ``(H, W)`` to trace the export at — ``canvas`` unless explicitly overridden.
+
+    The traced size **is** the model's deploy geometry, so it defaults to the
+    model's deploy canvas rather than a fixed square. A full detector bakes
+    ``(H, W)`` into its box decode (``export_forward`` reads ``image.shape`` as
+    Python ints), so its graph is static and
+    :class:`~mayaku.inference.artifact.ArtifactPredictor` runs it at whatever was
+    traced — a wrong size there ships a model that silently runs at the wrong
+    resolution and, on a non-square canvas, the wrong aspect. Refuse it. Backbone
+    graphs export with dynamic spatial axes, so their sample size is a tracing
+    detail; :func:`export_detector` remains the unchecked low-level seam.
+    """
+    hw = (
+        canvas[0] if sample_height is None else sample_height,
+        canvas[1] if sample_width is None else sample_width,
+    )
+    if hw != canvas and is_full_detector(model):
+        raise ValueError(
+            f"the requested tracing size ({hw[0]}x{hw[1]} HxW) disagrees with this "
+            f"model's deploy canvas ({canvas[0]}x{canvas[1]} HxW). A full-detector "
+            "graph bakes its input size into the box decode, so the artifact would "
+            "silently run at the traced size. Omit the sample size to trace at the "
+            "deploy canvas."
+        )
+    return hw
 
 
 def export_detector(

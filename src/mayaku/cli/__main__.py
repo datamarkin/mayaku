@@ -215,8 +215,20 @@ def _export(
         ),
     ),
     output: Path = typer.Option(..., "--output"),
-    sample_height: int = typer.Option(640, "--sample-height"),
-    sample_width: int = typer.Option(640, "--sample-width"),
+    sample_height: int | None = typer.Option(
+        None,
+        "--sample-height",
+        help=(
+            "Tracing input height. Defaults to the checkpoint's deploy canvas "
+            "(the geometry it was trained at) — pass this only to trace at a "
+            "different size."
+        ),
+    ),
+    sample_width: int | None = typer.Option(
+        None,
+        "--sample-width",
+        help="Tracing input width. Defaults to the checkpoint's deploy canvas.",
+    ),
     coreml_precision: str = typer.Option(
         "fp32",
         "--coreml-precision",

@@ -580,7 +580,7 @@ class InputConfig(_BaseModel):
     # 1:1 base on 16:9 data adapts to a 16:9 canvas) and bakes it into the sidecar
     # so deploy reads the exact shape with no dataset. Any inbound value is
     # overwritten at train. ``None`` → deploy falls back to the largest aligned
-    # square in budget. Both dims are FPN-stride (32) multiples. See
+    # square in budget. Both dims are ``CANVAS_ALIGN`` (128) multiples. See
     # ``mayaku.tuning.sizing``.
     canvas_hw: tuple[int, int] | None = None
     # How inference/eval resize an image to the network input:
@@ -651,23 +651,31 @@ class InputConfig(_BaseModel):
             )
         return self
 
-    # The FPN samples down to stride 32 (res5) for every in-scope backbone, so
-    # the fixed deploy size must tile evenly — else letterbox padding wouldn't be
-    # stride-aligned and the static export shape would be off. (32 is hard-coded
-    # because the config can't see the model's stride; it holds for all current
-    # ResNet/ConvNeXt FPN backbones.)
+    # Both dials align to 128, the grid every shipped canvas is resolved on
+    # (``snap_max_content(align=128)`` — torch.compile-safe, ANE/TensorRT
+    # friendly, and a multiple of the stride-32 FPN floor). 32 would validate but
+    # lie: a 32-aligned budget the 128 grid can't reach silently resolves to a
+    # smaller canvas (``size_budget=800`` → a 768x768 canvas, 92% of the budget),
+    # so the dial wouldn't read as the resolution it produces. The training
+    # ladder still steps on 32 (``multi_scale_canvases``) — those rungs are
+    # per-iteration and never land in ``canvas_hw``.
     @model_validator(mode="after")
-    def _check_size_budget_stride(self) -> InputConfig:
-        if self.size_budget % 32 != 0:
+    def _check_canvas_alignment(self) -> InputConfig:
+        # Imported here, not at module scope: mayaku.tuning imports this module
+        # (recipe.py needs MayakuConfig), so a top-level import would cycle.
+        from mayaku.tuning.sizing import CANVAS_ALIGN
+
+        if self.size_budget % CANVAS_ALIGN != 0:
             raise ValueError(
-                f"size_budget must be a multiple of 32 (the FPN max stride); got "
-                f"{self.size_budget}. Use e.g. 640, 672, …, 800."
+                f"size_budget must be a multiple of {CANVAS_ALIGN} (the canvas alignment "
+                f"grid); got {self.size_budget}. Use e.g. 512, 640, 768, 896, 1024, 1152, "
+                "1280 — for square data the budget dial is then exactly the canvas side."
             )
-        if self.canvas_hw is not None and any(d % 32 != 0 for d in self.canvas_hw):
+        if self.canvas_hw is not None and any(d % CANVAS_ALIGN != 0 for d in self.canvas_hw):
             raise ValueError(
-                f"canvas_hw dims must each be a multiple of 32 (the FPN max stride); "
-                f"got {self.canvas_hw}. Resolve it via mayaku.tuning.snap_max_content "
-                "(128-aligned), or use 32-multiples."
+                f"canvas_hw dims must each be a multiple of {CANVAS_ALIGN} (the canvas "
+                f"alignment grid); got {self.canvas_hw}. Resolve it via "
+                "mayaku.tuning.snap_max_content, which aligns to this grid."
             )
         return self
 
