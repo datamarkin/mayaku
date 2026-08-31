@@ -212,6 +212,7 @@ def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
     from mayaku.cli._factory import build_detector
     from mayaku.config import (
         BackboneConfig,
+        InputConfig,
         MayakuConfig,
         ModelConfig,
         ROIBoxHeadConfig,
@@ -256,6 +257,21 @@ def toy_workspace(tmp_path: Path) -> dict[str, Path | object]:
             ),
             roi_heads=ROIHeadsConfig(num_classes=2, batch_size_per_image=8),
             roi_box_head=ROIBoxHeadConfig(num_fc=1, fc_dim=32),
+        ),
+        # Keep the toy image toy. Without this the InputConfig defaults apply and
+        # the 64x64 image is UPSCALED to 800x800 for every train iteration and
+        # eval pass — 1074ms/iter through ResNet-50-FPN vs 97ms at 128px
+        # (measured). The fine-tune tests feel it most: that path replaces the
+        # toy's num_epochs=2 with MIN_FINETUNE_EPOCHS=16 at ims_per_batch=4, so
+        # they were paying the upscale on every one of those images for no extra
+        # coverage — none of these tests assert anything about resolution. 128
+        # stays a multiple of the FPN's stride-32 floor, so the pyramid is still
+        # exercised down to p5/p6.
+        input=InputConfig(
+            min_size_train=(128,),
+            max_size_train=128,
+            min_size_test=128,
+            max_size_test=128,
         ),
         solver=SolverConfig(
             base_lr=1e-4,
