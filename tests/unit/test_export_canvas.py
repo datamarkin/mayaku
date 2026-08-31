@@ -42,9 +42,6 @@ pytest.importorskip("onnxruntime")
 # Small, 128-aligned, and deliberately NOT square: (H=128, W=256). Both dims are
 # multiples of 32 for the ResNet-50 FPN and small enough to keep the toy fast.
 RECT_CANVAS: tuple[int, int] = (128, 256)
-# What an unpinned canvas falls back to at this budget — the same square the
-# exporter traces and the eager Predictor letterboxes to.
-BUDGET_SQUARE: tuple[int, int] = (256, 256)
 
 
 def _uniquery_cfg(canvas_hw: tuple[int, int] | None = RECT_CANVAS) -> MayakuConfig:
@@ -261,18 +258,14 @@ def test_artifact_rejects_graph_that_contradicts_its_sidecar(tmp_path: Path) -> 
         from_pretrained(out, device="cpu")
 
 
-def test_artifact_rejects_mismatch_against_an_unpinned_canvas(tmp_path: Path) -> None:
-    """With no pinned ``canvas_hw`` the deploy canvas is still well defined — the
-    budget-square fallback — so the guard applies there too rather than leaving a
-    case where the old silent-rescale behaviour survives."""
+def test_artifact_with_unpinned_canvas_runs_at_its_graph_size(tmp_path: Path) -> None:
+    """``canvas_hw`` is pinned only by a letterbox training run. With none, the
+    model asserts no geometry — the ``size_budget`` fallback is not a claim data
+    ever validated — so the graph's own size stands and the guard stays quiet.
+    Rejecting here would break exporting at a deliberate size via
+    ``export_detector``, which is how the small-canvas artifact tests work."""
     out = _export_at(tmp_path, None, (128, 128))
-    with pytest.raises(ValueError, match=r"exported at 128x128 .* deploys at 256x256"):
-        from_pretrained(out, device="cpu")
-
-
-def test_artifact_with_unpinned_canvas_loads_at_the_budget_square(tmp_path: Path) -> None:
-    out = _export_at(tmp_path, None, BUDGET_SQUARE)
-    assert from_pretrained(out, device="cpu")._canvas == BUDGET_SQUARE
+    assert from_pretrained(out, device="cpu")._canvas == (128, 128)
 
 
 def test_artifact_feeds_its_graph_the_same_geometry_as_the_eager_model(
