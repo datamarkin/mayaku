@@ -580,6 +580,8 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
         cls_loss_type=uq_cfg.cls_loss_type,
         mal_gamma=uq_cfg.mal_gamma,
         mal_alpha=uq_cfg.mal_alpha,
+        distill_labels=uq_cfg.distill_labels,
+        distill_conf_weight=uq_cfg.distill_conf_weight,
     )
 
     weight_dict: dict[str, float] = {
@@ -590,6 +592,8 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
     if uniquery_generator is not None:
         weight_dict["loss_qgn_obj"] = uq_cfg.qgn_obj_weight
         weight_dict["loss_qgn_giou"] = uq_cfg.qgn_giou_weight
+    if uq_cfg.distill_labels:
+        weight_dict["loss_distill"] = uq_cfg.distill_weight
     if uq_cfg.denoising:
         # DN box losses scaled like the matching box losses, times dn_loss_weight.
         weight_dict["loss_dn_bbox"] = uq_cfg.cost_bbox * uq_cfg.dn_loss_weight

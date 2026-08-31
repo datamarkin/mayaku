@@ -402,6 +402,18 @@ class UniQueryHeadConfig(_BaseModel):
     # perturbing the assignment. Set this to vary the loss weight alone.
     cls_loss_weight: Annotated[float, Field(gt=0.0)] | None = None
 
+    # Stage-wise classification self-distillation: train every earlier stage's
+    # class posterior toward the final stage's (detached). D-FINE's GO-LSD
+    # distils localization backward; the deficit measured here is calibration
+    # and duplicate suppression instead, which live in the class scores, so
+    # that is what gets transferred. Lets a shallow stack inherit a deep
+    # stack's ranking — AP at lower latency. Training-only, zero inference cost.
+    distill_labels: bool = False
+    distill_weight: Annotated[float, Field(gt=0.0)] = 1.0
+    # Scale each query's distillation term by the teacher's peak confidence,
+    # so an unsure teacher does not drag the student.
+    distill_conf_weight: bool = True
+
     # Inference-time knobs: use fewer stages or proposals at test time
     # for speed without retraining. None = use training values.
     inference_num_stages: Annotated[int, Field(gt=0)] | None = None

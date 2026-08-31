@@ -37,6 +37,8 @@ class SetCriterion(nn.Module):
         cls_loss_type: str = "focal",
         mal_gamma: float = 1.5,
         mal_alpha: float | None = None,
+        distill_labels: bool = False,
+        distill_conf_weight: bool = True,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -64,6 +66,71 @@ class SetCriterion(nn.Module):
         # DEIM's default; set 0.25 to hold the classification/box balance at
         # focal's, isolating the IoU-target change from a loss-weight change.
         self.mal_alpha = mal_alpha
+        # Stage-wise classification self-distillation (see _distill_labels).
+        self.distill_labels = distill_labels
+        self.distill_conf_weight = distill_conf_weight
+
+    def _distill_labels(
+        self,
+        outputs_list: list[dict[str, Tensor]],
+    ) -> dict[str, Tensor]:
+        """Distil the last stage's class posterior into every earlier stage.
+
+        D-FINE's GO-LSD distils the final layer's *localization* distribution
+        backward. Here the measured deficit is elsewhere: extra stages buy
+        score calibration and duplicate suppression, while box geometry is
+        already close after one pass. So the quantity worth transferring
+        backward is the class posterior, not the box.
+
+        The teacher is the final stage's own sigmoid output, detached. It
+        already encodes the two things depth buys — the winning query is
+        confident, its near-duplicate neighbours are not — so a stage trained
+        toward it inherits that ordering without running the extra passes.
+        Training-only: nothing is added to the graph at inference, and a
+        shallower ``inference_num_stages`` becomes a better predictor rather
+        than a worse one.
+
+        ``distill_conf_weight`` scales each query's term by the teacher's own
+        peak confidence, so an uncertain teacher does not drag the student.
+        This mirrors GO-LSD's decoupled weighting without needing its matched /
+        unmatched split, which does not apply to a pure classification target.
+
+        Two deliberate choices about scale:
+
+        * The term is a **KL**, i.e. BCE minus the teacher's own entropy, not
+          raw BCE. The two have identical gradients (the entropy is constant in
+          the student), but KL is 0 exactly when the student matches the
+          teacher, so the logged value reads as "distance still to close"
+          rather than an uninterpretable offset.
+        * It is normalised by the **weighted query count**, not ``num_boxes``.
+          The other losses sum over ``B*N*K`` slots and divide by the GT count,
+          which works for focal only because ``(1-p)^gamma`` crushes the easy
+          negatives. Soft-target BCE has no such damping, so that normaliser
+          put this term at ~950 against a ``loss_ce`` of ~2.4 and it would have
+          swamped every other gradient. Dividing by the weight sum makes it a
+          weighted mean over queries of the per-query class-sum — independent
+          of ``num_proposals`` and of the weighting scheme.
+        """
+        teacher_logits = outputs_list[-1]["pred_logits"].detach().float()
+        teacher = teacher_logits.sigmoid()
+        # Teacher entropy, subtracted to turn BCE into KL. clamp keeps
+        # log(0) out of the 0*log(0) corners.
+        t = teacher.clamp(1e-6, 1 - 1e-6)
+        entropy = -(t * t.log() + (1 - t) * (1 - t).log())
+
+        if self.distill_conf_weight:
+            weight = teacher.amax(dim=-1, keepdim=True)
+        else:
+            weight = torch.ones_like(teacher[..., :1])
+        denom = weight.sum().clamp(min=1e-6)
+
+        losses: dict[str, Tensor] = {}
+        for i, outputs in enumerate(outputs_list[:-1]):
+            student = outputs["pred_logits"].float()
+            kl = F.binary_cross_entropy_with_logits(student, teacher, reduction="none") - entropy
+            losses[f"loss_distill_{i}"] = (kl * weight).sum() / denom
+        return losses
+
     def forward(
         self,
         outputs_list: list[dict[str, Tensor]],
@@ -92,6 +159,9 @@ class SetCriterion(nn.Module):
             stage_losses = self._single_stage_loss(outputs, targets, num_boxes, stage_idx)
             for k, v in stage_losses.items():
                 losses[f"{k}_{stage_idx}"] = v
+        # Needs >=2 stages to have a teacher distinct from the student.
+        if self.distill_labels and len(outputs_list) > 1:
+            losses.update(self._distill_labels(outputs_list))
         return losses
 
     @staticmethod
