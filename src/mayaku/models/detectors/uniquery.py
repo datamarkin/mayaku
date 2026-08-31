@@ -567,6 +567,7 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
         qgn_feature_indices=qgn_feature_indices,
         denoising=uq_cfg.denoising,
         dn_groups=uq_cfg.dn_groups,
+        dn_max_gt=uq_cfg.dn_max_gt,
         dn_box_noise_scale=uq_cfg.dn_box_noise_scale,
     )
 

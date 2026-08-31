@@ -23,6 +23,7 @@ def build_dn_groups(
     dn_groups: int,
     box_noise_scale: float,
     device: torch.device,
+    max_gt_per_image: int | None = None,
 ) -> dict[str, Tensor] | None:
     """Noised-GT auxiliary boxes, padded to a fixed width across the batch.
 
@@ -31,11 +32,24 @@ def build_dn_groups(
         boxes:     (B, M, 4) absolute xyxy noised boxes (pad rows = 0)
         tgt_boxes: (B, M, 4) clean GT box per slot (pad rows = 0)
         valid:     (B, M) bool, True for real (non-pad) DN queries
+
+    ``max_gt_per_image`` bounds that width. The padding is batch-wide, so a
+    single dense image sets M for every image in the batch: on COCO-rem the
+    median image has 5 boxes but the p99 *batch* maximum is 229, which at
+    ``dn_groups=5`` adds 1145 queries to all 16 images. Since the dynamic conv
+    materialises ``2 * hidden * dim_dynamic`` floats per query (16,384 for
+    hidden=128) and attention is quadratic in query count, that tail OOMs a
+    24 GB card at batch 16 — stochastically, on whichever step draws a dense
+    image. Capping keeps DN affordable; excess GT boxes are sampled per image
+    per step, so over an epoch they all still get denoised.
+    ``None`` leaves the width unbounded (previous behaviour).
     """
     counts = [int(t["boxes_xyxy"].shape[0]) for t in targets]
     max_gt = max(counts) if counts else 0
     if max_gt == 0:
         return None
+    if max_gt_per_image is not None:
+        max_gt = min(max_gt, max_gt_per_image)
 
     batch_size = len(targets)
     width = max_gt * dn_groups
@@ -45,6 +59,11 @@ def build_dn_groups(
 
     for b, t in enumerate(targets):
         gt = t["boxes_xyxy"].to(device)
+        if gt.shape[0] > max_gt:
+            # Subsample to the cap. Random per step, so across an epoch every
+            # GT box takes its turn as a denoising target.
+            keep = torch.randperm(gt.shape[0], device=device)[:max_gt]
+            gt = gt[keep]
         g = gt.shape[0]
         if g == 0:
             continue

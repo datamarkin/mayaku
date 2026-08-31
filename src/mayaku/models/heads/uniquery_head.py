@@ -47,6 +47,7 @@ class UniQueryHead(nn.Module):
         qgn_feature_indices: Sequence[int] = (),
         denoising: bool = False,
         dn_groups: int = 5,
+        dn_max_gt: int | None = None,
         dn_box_noise_scale: float = 0.4,
     ) -> None:
         super().__init__()
@@ -64,6 +65,7 @@ class UniQueryHead(nn.Module):
         # location carries the signal, so no per-class label embedding.
         self.denoising = denoising
         self.dn_groups = dn_groups
+        self.dn_max_gt = dn_max_gt
         self.dn_box_noise_scale = dn_box_noise_scale
         if denoising:
             self.dn_query_feat = nn.Embedding(1, hidden_dim)
@@ -190,6 +192,7 @@ class UniQueryHead(nn.Module):
                 targets,
                 dn_groups=self.dn_groups,
                 box_noise_scale=self.dn_box_noise_scale,
+                max_gt_per_image=self.dn_max_gt,
                 device=device,
             )
             if dn is not None:

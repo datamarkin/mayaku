@@ -365,6 +365,10 @@ class UniQueryHeadConfig(_BaseModel):
     # zero deployment/export impact.
     denoising: bool = False
     dn_groups: Annotated[int, Field(gt=0)] = 5
+    # Bounds the batch-wide DN padding width (M = min(max_b(G_b), dn_max_gt) *
+    # dn_groups). Unbounded, one dense image sets M for the whole batch and the
+    # tail OOMs a 24GB card at batch 16. None = unbounded (previous behaviour).
+    dn_max_gt: Annotated[int, Field(gt=0)] | None = None
     dn_box_noise_scale: Annotated[float, Field(gt=0.0, le=1.0)] = 0.4
     dn_loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
 
