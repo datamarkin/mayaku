@@ -688,6 +688,10 @@ class SolverConfig(_BaseModel):
     count at train time from the dataset size and effective batch.
     """
 
+    # Seeds the training samplers and the per-worker augmentation RNGs, so a
+    # run is reproducible from this one value. Vary it to measure run-to-run
+    # spread — single-seed AP deltas under ~0.5 are not resolvable.
+    seed: int = 0
     ims_per_batch: Annotated[int, Field(gt=0)] = 16
     # Gradient accumulation: divide effective batch into ``grad_accum_steps``
     # micro-batches of ``ims_per_batch``. Memory scales with the micro-batch

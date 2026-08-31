@@ -471,7 +471,7 @@ def run_train(
         mapped = _MappedList(dataset_dicts, mapper)
     # Single training seed: both the samplers and the per-worker augmentation
     # RNGs derive from it, so a run is reproducible from this one value.
-    seed = 0
+    seed = cfg.solver.seed
     # Samplers are rank-aware: each rank reads a strided slice of the
     # shuffled index stream so no two ranks see the same image in the
     # same effective batch. ``num_replicas`` / ``rank`` default to 1/0
