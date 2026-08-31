@@ -111,3 +111,61 @@ with `INPUT.FORMAT="RGB"`.
 exact shape Detectron2 emits. It is *not* a substitute for trusting
 the source: only run this on `.pkl` files you obtained from
 Detectron2's official MODEL_ZOO URLs.
+
+## `harvest_commons.py`
+
+**Purpose.** Build a raw image pool from Wikimedia Commons that can be
+labelled into an Objects365-style detection set: everyday scenes with
+countable objects, ≥1500px on the shortest side, under licenses whose
+obligations an Apache-2.0 model release can satisfy.
+
+**Why this exists.** Commons has ~120M files but almost all of the bulk
+is maps, scans, heraldry and herbarium sheets, and its most common
+license is CC BY-SA. Taking the corpus as it comes yields neither the
+content nor the license terms this project needs, so the script filters
+on all three axes — license, resolution, subject — and steers the crawl
+with an editable category plan rather than crawling breadth-first.
+
+**License policy.** Accepts CC0, public domain, CC BY and CC BY-SA.
+Rejects any NC/ND, GFDL-only, and anything carrying a `Restrictions`
+flag (trademark, personality rights). Share-alike is included on
+purpose — it is the most common license on Commons and excluding it
+costs well over half the corpus; reverting that is a two-token edit at
+`_SLUG_DENY`/`_TEXT_DENY`. Attribution is still owed on BY and BY-SA:
+`manifest.jsonl` records author, credit, license and source URL per
+image and must travel with the dataset.
+
+**Politeness.** Hard-coded to the [robot policy](https://wikitech.wikimedia.org/wiki/Robot_policy):
+2 concurrent connections to `upload.wikimedia.org`, 20 Mbps ceiling,
+serial metadata requests, `Retry-After` honoured, 15-minute pause on
+5xx. Refuses to start without a contact-bearing User-Agent. Expect
+~8-12 img/s, i.e. ~1M images/day, from one external IP.
+
+**Resumable.** State is a sqlite DB under the output directory; a
+re-run skips every file already downloaded or already judged, and
+dedups on the Commons-supplied sha1.
+
+### Usage
+
+```bash
+UA="mayaku-harvest/1.0 (https://github.com/datamarkin/mayaku; you@example.com)"
+
+# 1. dump the built-in plan and edit it
+python tools/harvest_commons.py --dump-plan plan.json
+
+# 2. sample each entry's yield before committing to a long crawl
+python tools/harvest_commons.py --plan plan.json --estimate --user-agent "$UA"
+
+# 3. crawl — full-resolution originals, 1500px shortest side as a floor
+python tools/harvest_commons.py --plan plan.json --out /data/commons \
+    --min-side 1500 --fetch original --user-agent "$UA"
+```
+
+**Budget.** Originals of qualifying files run ~4.1MB median / ~5.0MB
+mean at a median 12MP. For a 2M-image pool that is ~10TB and, at the
+20 Mbps policy ceiling, ~46 days from one external IP — bandwidth, not
+the API, is what binds. `--fetch thumb` cuts bytes ~4x but caps
+resolution at `--min-side`; `--resize-to PX` downscales on arrival,
+trading resolution for disk while still paying full download cost.
+Neither is on by default. To go genuinely faster, run inside
+Toolforge/WMCS, which is exempt from the rate limits.
