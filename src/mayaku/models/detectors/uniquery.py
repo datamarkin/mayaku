@@ -566,6 +566,7 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
         hidden_dim=uq_cfg.hidden_dim,
         num_heads=uq_cfg.num_heads,
         num_stages=uq_cfg.num_stages,
+        num_thin_stages=uq_cfg.num_thin_stages,
         dim_feedforward=uq_cfg.dim_feedforward,
         dim_dynamic=uq_cfg.dim_dynamic,
         dropout=uq_cfg.dropout,
@@ -576,6 +577,7 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
         uniquery_generator=uniquery_generator,
         qgn_feature_indices=qgn_feature_indices,
         denoising=uq_cfg.denoising,
+        look_forward_twice=uq_cfg.look_forward_twice,
         dn_groups=uq_cfg.dn_groups,
         dn_max_gt=uq_cfg.dn_max_gt,
         dn_box_noise_scale=uq_cfg.dn_box_noise_scale,
@@ -595,15 +597,17 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
     )
 
     weight_dict: dict[str, float] = {
+        # Defaults to cost_class (Sparse R-CNN reuses one number for the
+        # matcher cost and the loss weight); cls_loss_weight unties them.
         "loss_ce": uq_cfg.cls_loss_weight or uq_cfg.cost_class,
         "loss_bbox": uq_cfg.cost_bbox,
         "loss_giou": uq_cfg.cost_giou,
     }
+    if uq_cfg.distill_labels:
+        weight_dict["loss_distill"] = uq_cfg.distill_weight
     if uniquery_generator is not None:
         weight_dict["loss_qgn_obj"] = uq_cfg.qgn_obj_weight
         weight_dict["loss_qgn_giou"] = uq_cfg.qgn_giou_weight
-    if uq_cfg.distill_labels:
-        weight_dict["loss_distill"] = uq_cfg.distill_weight
     if uq_cfg.denoising:
         # DN box losses scaled like the matching box losses, times dn_loss_weight.
         weight_dict["loss_dn_bbox"] = uq_cfg.cost_bbox * uq_cfg.dn_loss_weight

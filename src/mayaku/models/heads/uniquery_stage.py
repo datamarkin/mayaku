@@ -96,11 +96,20 @@ class UniQueryStage(nn.Module):
         num_cls_layers: int = 1,
         num_reg_layers: int = 3,
         bbox_weights: tuple[float, float, float, float] = (2.0, 2.0, 1.0, 1.0),
+        thin: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.scale_clamp = _DEFAULT_SCALE_CLAMP
         self.bbox_weights = bbox_weights
+        # A *thin* stage drops ROI pooling and the dynamic conv, keeping only
+        # query self-attention, the FFN, and the prediction heads. Measurement
+        # (tools/test_stage_recall.py) shows extra stages buy score calibration
+        # and duplicate suppression rather than box refinement — and those live
+        # in self_attn and the cls head, not in the 88%-of-params dynamic conv.
+        # It sees no new image evidence, so it can only re-reason over the
+        # queries it was handed. ~0.66M params at hidden=128 vs ~3.5M full.
+        self.thin = thin
 
         # Self-attention
         self.self_attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout)
@@ -108,11 +117,12 @@ class UniQueryStage(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
 
         # Dynamic instance interaction
-        self.inst_interact = DynamicConv(
-            hidden_dim, dim_dynamic, pooler_resolution=pooler_resolution
-        )
-        self.dropout2 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(hidden_dim)
+        if not thin:
+            self.inst_interact = DynamicConv(
+                hidden_dim, dim_dynamic, pooler_resolution=pooler_resolution
+            )
+            self.dropout2 = nn.Dropout(dropout)
+            self.norm2 = nn.LayerNorm(hidden_dim)
 
         # FFN
         self.linear1 = nn.Linear(hidden_dim, dim_feedforward)
@@ -172,12 +182,19 @@ class UniQueryStage(nn.Module):
 
         B, N = bboxes.shape[:2]
 
-        # ROI pooling
-        proposal_boxes = [Boxes(bboxes[b]) for b in range(B)]
-        roi_features = pooler(features, proposal_boxes)  # (B*N, C, P, P)
-        roi_features = roi_features.view(B * N, self.hidden_dim, -1).permute(
-            2, 0, 1
-        )  # (P*P, B*N, d)
+        # ROI pooling — skipped entirely on a thin stage, which draws no new
+        # image evidence and re-reasons over the queries alone.
+        if not self.thin:
+            # Always detach for pooling. ROI-align treats box coordinates as
+            # sampling locations, not as a differentiable input, so a
+            # grad-carrying box here would be silently dropped anyway. Under
+            # look_forward_twice the gradient path that matters is the delta
+            # decode below, which *is* differentiable in ``bboxes``.
+            proposal_boxes = [Boxes(bboxes[b].detach()) for b in range(B)]
+            roi_features = pooler(features, proposal_boxes)  # (B*N, C, P, P)
+            roi_features = roi_features.view(B * N, self.hidden_dim, -1).permute(
+                2, 0, 1
+            )  # (P*P, B*N, d)
 
         # Self-attention
         pro_features = pro_features.view(B, N, self.hidden_dim).permute(1, 0, 2)  # (N, B, d)
@@ -193,9 +210,12 @@ class UniQueryStage(nn.Module):
             .permute(1, 0, 2)
             .reshape(1, B * N, self.hidden_dim)
         )
-        pro_features2 = self.inst_interact(pro_features, roi_features)
-        pro_features = pro_features + self.dropout2(pro_features2)
-        obj_features = self.norm2(pro_features)
+        if self.thin:
+            obj_features = pro_features
+        else:
+            pro_features2 = self.inst_interact(pro_features, roi_features)
+            pro_features = pro_features + self.dropout2(pro_features2)
+            obj_features = self.norm2(pro_features)
 
         # FFN
         obj_features2 = self.linear2(self.dropout(F.relu(self.linear1(obj_features))))

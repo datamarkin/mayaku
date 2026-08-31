@@ -330,6 +330,12 @@ class UniQueryHeadConfig(_BaseModel):
     hidden_dim: Annotated[int, Field(gt=0)] = 256
     num_heads: Annotated[int, Field(gt=0)] = 8
     num_stages: Annotated[int, Field(gt=0)] = 6
+    # Extra *thin* refinement stages appended after the full ones: query
+    # self-attention + FFN + prediction heads, no ROI pooling and no dynamic
+    # conv. Measurement shows depth buys score calibration and duplicate
+    # suppression rather than box refinement, and those live in the cheap
+    # components — a thin stage is ~0.66M params at hidden=128 vs ~3.5M full.
+    num_thin_stages: Annotated[int, Field(ge=0)] = 0
     dim_feedforward: Annotated[int, Field(gt=0)] = 2048
     dim_dynamic: Annotated[int, Field(gt=0)] = 64
     pooler_resolution: Annotated[int, Field(gt=0)] = 7
@@ -379,6 +385,12 @@ class UniQueryHeadConfig(_BaseModel):
     # stages. Training-only: DN queries are not generated at inference, so
     # zero deployment/export impact.
     denoising: bool = False
+    # DINO "look forward twice": stop detaching the box between stages, so a
+    # later stage's box error can correct the earlier prediction that produced
+    # it. Sparse R-CNN detaches, which trains each stage only to repair what it
+    # was handed. Identical inference graph and parameter count — costs only
+    # retained activations during training.
+    look_forward_twice: bool = False
     dn_groups: Annotated[int, Field(gt=0)] = 5
     # Bounds the batch-wide DN padding width (M = min(max_b(G_b), dn_max_gt) *
     # dn_groups). Unbounded, one dense image sets M for the whole batch and the
@@ -410,6 +422,11 @@ class UniQueryHeadConfig(_BaseModel):
     # which raises loss_ce ~4x against focal's alpha=0.25 and so shifts the
     # classification/box balance. Set 0.25 to hold that balance fixed and
     # isolate the IoU-target change from a loss-weight change.
+    # Not capped at 1.0: measured on the 25k subset, alpha=0.25 gives the best
+    # AP75/AP50 ratio but the lowest AP, and alpha=1.0 (``None``, DEIM's
+    # default) nets far ahead — so alpha trades calibration against how much
+    # negative gradient the classifier gets, and the optimum is a dial rather
+    # than a constant. Values >1 push further along that trade.
     mal_alpha: Annotated[float, Field(gt=0.0, le=8.0)] | None = None
     # Weight on loss_ce. ``None`` keeps the Sparse R-CNN convention of reusing
     # ``cost_class``, which ties the matcher's class cost to the loss weight —
@@ -434,23 +451,28 @@ class UniQueryHeadConfig(_BaseModel):
     inference_num_stages: Annotated[int, Field(gt=0)] | None = None
     inference_num_proposals: Annotated[int, Field(gt=0)] | None = None
 
+    @property
+    def total_stages(self) -> int:
+        """Full refinement stages plus appended thin ones."""
+        return self.num_stages + self.num_thin_stages
+
     @model_validator(mode="after")
     def _check_cascade_iou(self) -> UniQueryHeadConfig:
         t = self.cascade_iou_thresholds
         if t is None:
             # Enabled by default: tighten the last two stages, sized to num_stages
             # (single-stage models get no cascade — the concept needs ≥2 stages).
-            n = self.num_stages
+            n = self.total_stages
             t = (0.0,) * (n - 2) + (0.5, 0.6) if n >= 2 else ()
             object.__setattr__(self, "cascade_iou_thresholds", t)
-        if t and len(t) != self.num_stages:
+        if t and len(t) != self.total_stages:
             raise ValueError(
                 f"cascade_iou_thresholds length ({len(t)}) must equal "
-                f"num_stages ({self.num_stages}) or be empty"
+                f"total stages ({self.total_stages}) or be empty"
             )
         if any(v < 0.0 or v > 1.0 for v in t):
             raise ValueError("cascade_iou_thresholds values must be in [0.0, 1.0]")
-        if self.inference_num_stages is not None and self.inference_num_stages > self.num_stages:
+        if self.inference_num_stages is not None and self.inference_num_stages > self.total_stages:
             raise ValueError(
                 f"inference_num_stages ({self.inference_num_stages}) cannot exceed "
                 f"num_stages ({self.num_stages})"

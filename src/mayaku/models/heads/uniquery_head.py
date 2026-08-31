@@ -36,6 +36,7 @@ class UniQueryHead(nn.Module):
         hidden_dim: int = 256,
         num_heads: int = 8,
         num_stages: int = 6,
+        num_thin_stages: int = 0,
         dim_feedforward: int = 2048,
         dim_dynamic: int = 64,
         dropout: float = 0.0,
@@ -46,6 +47,7 @@ class UniQueryHead(nn.Module):
         uniquery_generator: UniQueryGenerator | None = None,
         qgn_feature_indices: Sequence[int] = (),
         denoising: bool = False,
+        look_forward_twice: bool = False,
         dn_groups: int = 5,
         dn_max_gt: int | None = None,
         dn_box_noise_scale: float = 0.4,
@@ -53,7 +55,8 @@ class UniQueryHead(nn.Module):
         super().__init__()
         self.num_proposals = num_proposals
         self.hidden_dim = hidden_dim
-        self.num_stages = num_stages
+        self.num_stages = num_stages + num_thin_stages
+        self.look_forward_twice = look_forward_twice
 
         # Optional QGN (Featurized Query R-CNN): image-conditioned queries
         # replace the blind learned embeddings below.
@@ -97,6 +100,22 @@ class UniQueryHead(nn.Module):
                     pooler_resolution=pooler_resolution,
                 )
                 for _ in range(num_stages)
+            ]
+            + [
+                # Thin stages: no ROI pooling, no dynamic conv. They re-reason
+                # over the queries (dedup + recalibration) without drawing new
+                # image evidence.
+                UniQueryStage(
+                    hidden_dim=hidden_dim,
+                    num_heads=num_heads,
+                    dim_feedforward=dim_feedforward,
+                    dim_dynamic=dim_dynamic,
+                    dropout=dropout,
+                    num_classes=num_classes,
+                    pooler_resolution=pooler_resolution,
+                    thin=True,
+                )
+                for _ in range(num_thin_stages)
             ]
         )
 
@@ -191,8 +210,8 @@ class UniQueryHead(nn.Module):
             dn = build_dn_groups(
                 targets,
                 dn_groups=self.dn_groups,
-                box_noise_scale=self.dn_box_noise_scale,
                 max_gt_per_image=self.dn_max_gt,
+                box_noise_scale=self.dn_box_noise_scale,
                 device=device,
             )
             if dn is not None:
@@ -225,8 +244,15 @@ class UniQueryHead(nn.Module):
                 outputs_coord_list.append(pred_bboxes[:, :num_match])
                 if dn is not None:
                     dn_coord_list.append(pred_bboxes[:, num_match:])
-                bboxes = pred_bboxes.detach().clamp(min=0)
-                bboxes = torch.min(bboxes, clamp_bounds)
+                # Sparse R-CNN detaches between stages, so stage k never sees
+                # gradient from stage k+1's box loss and each stage is trained
+                # only to fix whatever it was handed. DINO's "look forward
+                # twice" keeps the path open, letting a later stage's error
+                # correct the earlier prediction that caused it. Free at
+                # inference (identical forward graph); costs a little training
+                # memory for the retained activations.
+                bboxes = pred_bboxes if self.look_forward_twice else pred_bboxes.detach()
+                bboxes = torch.min(bboxes.clamp(min=0), clamp_bounds)
 
         # Strip DN from the final obj_features so downstream (mask/keypoint)
         # heads and the criterion only ever see the matching queries.
