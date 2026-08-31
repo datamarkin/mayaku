@@ -48,7 +48,7 @@ it in shorter training time.
   and train-with-N / deploy-with-fewer refinement stages — a built-in speed/accuracy dial
   with no retraining. Detection and instance segmentation share one query representation;
   keypoints ride the same detector.
-- **Four sizes, three tasks.** `mayaku-n` through `mayaku-l`, each in detection,
+- **Six sizes, three tasks.** `mayaku-n` through `mayaku-xxl`, each in detection,
   instance-segmentation, and keypoint variants.
 - **Runs everywhere.** Pure Python: no wheel chase, no ABI mismatches, no custom ops.
   CUDA / Apple Silicon (MPS) / ROCm / CPU from a single install.
@@ -131,20 +131,22 @@ end-to-end number is the one that predicts your application's frame rate.
 | `mayaku-s-det` | 23.1 | 175.7 | **150.0** | 340 |
 | `mayaku-m-det` | 36.0 | 137.6 | **121.0** | 370 |
 | `mayaku-l-det` | 57.8 | 98.9 | **93.5** | 464 |
+| `mayaku-xl-det` | 117.7 | 61.5 | **60.8** | 602 |
+| `mayaku-xxl-det` | 170.9 | 51.2 | **48.3** | 664 |
 
 ## Model zoo
 
 Base models are hosted and fetched on first use — pass a name instead of a path. Every size
 ships in three task variants, `mayaku-<size>-{det,seg,key}` (e.g. `mayaku-m-seg`).
 
-| Name | Backbone | Tasks | Profile |
-|---|---|---|---|
-| `mayaku-n` | ConvNeXt-femto | det · seg · key | edge / real-time |
-| `mayaku-s` | ConvNeXt-nano | det · seg · key | balanced |
-| `mayaku-m` | ConvNeXt-tiny | det · seg · key | high accuracy |
-| `mayaku-l` | ConvNeXt-tiny (wide) | det · seg · key | max accuracy |
-| `mayaku-xl` | ConvNeXt-base | det · seg · key | *in training* |
-| `mayaku-xxl` | ConvNeXt-base (6-stage decoder) | det · seg · key | *in training* |
+| Name | Backbone | Params (M) | Tasks | Profile |
+|---|---|---:|---|---|
+| `mayaku-n` | ConvNeXt-femto | 12.9 | det · seg · key | edge / real-time |
+| `mayaku-s` | ConvNeXt-nano | 23.1 | det · seg · key | balanced |
+| `mayaku-m` | ConvNeXt-tiny | 36.0 | det · seg · key | high accuracy |
+| `mayaku-l` | ConvNeXt-tiny (wide) | 57.8 | det · seg · key | best accuracy/speed |
+| `mayaku-xl` | ConvNeXt-base | 117.7 | det · seg · key | max accuracy |
+| `mayaku-xxl` | ConvNeXt-base (6-stage decoder) | 170.9 | det · seg · key | accuracy ceiling |
 
 List available names:
 
@@ -196,8 +198,6 @@ recipe, and the fine-tuning defaults that make them converge quickly on small da
 
 ## Roadmap
 
-- **`mayaku-xl` / `mayaku-xxl`** — ConvNeXt-base models (2- and 6-stage decoders) for the
-  high-accuracy end of the range.
 - **Full RF100-VL results** — all 100 datasets across every size tier.
 - **Curated custom-class models** — ready-to-use weights on a hand-picked set of common
   real-world classes (people, vehicles, and more), for projects that don't want to start from
