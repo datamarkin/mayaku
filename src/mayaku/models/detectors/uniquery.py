@@ -123,6 +123,7 @@ class UniQuery(nn.Module):
                         targets,
                         qgn_out["centers"],
                         quality_alpha=self.head.uniquery_generator.quality_alpha,
+                        center_fallback=self.head.uniquery_generator.center_fallback,
                         num_boxes=num_boxes,
                     )
                 )
@@ -542,13 +543,22 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
     qgn_feature_indices: tuple[int, ...] = ()
     if uq_cfg.uniquery_generator:
         strides = [in_shapes[k].stride for k in feature_keys]
-        qgn_feature_indices = tuple(i for i, s in enumerate(strides) if s >= 8)
+        # Featurized Query R-CNN skips stride 4 (p2): it is the most expensive
+        # level and the paper reports it adds no recall. Measured here, excluding
+        # it leaves 87.3% of sub-16px GT boxes with no candidate location and
+        # tiny-object proposal recall at 53.2% against 92.5% for large. Set
+        # qgn_min_stride=4 to buy that back, at the cost of a dense head over 4x
+        # the locations (160x160 vs 80x80 at a 640 canvas).
+        qgn_feature_indices = tuple(
+            i for i, s in enumerate(strides) if s >= uq_cfg.qgn_min_stride
+        )
         uniquery_generator = UniQueryGenerator(
             in_channels=cfg.model.fpn.out_channels,
             hidden_dim=uq_cfg.hidden_dim,
             num_proposals=uq_cfg.num_proposals,
             strides=tuple(strides[i] for i in qgn_feature_indices),
             quality_alpha=uq_cfg.qgn_quality_alpha,
+            center_fallback=uq_cfg.qgn_center_fallback,
         )
 
     head = UniQueryHead(

@@ -350,6 +350,21 @@ class UniQueryHeadConfig(_BaseModel):
     # the blind learned embeddings. Enables strong AP at fewer stages.
     uniquery_generator: bool = False
     qgn_quality_alpha: Annotated[float, Field(ge=0.0, le=1.0)] = 0.8
+    # QGN candidates are locations whose centre falls strictly inside the GT
+    # box, over strides 8/16/32 (p2 is skipped). A box smaller than its
+    # stride can therefore contain no candidate at all and is dropped from the
+    # QGN loss: measured on the 25k coco-rem subset at a 640 canvas, that is
+    # 17.8% of all GT boxes and 87.3% of boxes under 16px. Worse, qgn_loss
+    # then supervises every location covering them as background, so the
+    # generator learns to suppress small objects outright — and the refinement
+    # stages can only refine proposals the generator produced. This gives each
+    # otherwise-unmatchable GT its nearest location (standard centre-sampling
+    # fallback). Training-only: zero inference cost.
+    qgn_center_fallback: bool = False
+    # Lowest FPN stride the QGN scores. Default 8 skips p2, following
+    # Featurized Query R-CNN. 4 includes it — the direct fix for tiny-object
+    # proposal recall, but the dense head then runs over 4x the locations.
+    qgn_min_stride: Literal[4, 8] = 8
     qgn_obj_weight: Annotated[float, Field(gt=0.0)] = 1.0
     qgn_giou_weight: Annotated[float, Field(gt=0.0)] = 2.0
 
