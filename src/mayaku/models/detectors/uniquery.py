@@ -549,9 +549,7 @@ def build_uniquery(cfg: MayakuConfig) -> UniQuery:
         # tiny-object proposal recall at 53.2% against 92.5% for large. Set
         # qgn_min_stride=4 to buy that back, at the cost of a dense head over 4x
         # the locations (160x160 vs 80x80 at a 640 canvas).
-        qgn_feature_indices = tuple(
-            i for i, s in enumerate(strides) if s >= uq_cfg.qgn_min_stride
-        )
+        qgn_feature_indices = tuple(i for i, s in enumerate(strides) if s >= uq_cfg.qgn_min_stride)
         uniquery_generator = UniQueryGenerator(
             in_channels=cfg.model.fpn.out_channels,
             hidden_dim=uq_cfg.hidden_dim,

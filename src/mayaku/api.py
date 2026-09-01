@@ -79,8 +79,7 @@ from mayaku.config import (
     load_yaml,
     merge_overrides,
 )
-from mayaku.config.schemas import UniQueryHeadConfig
-from mayaku.config.schemas import DeviceSetting
+from mayaku.config.schemas import DeviceSetting, UniQueryHeadConfig
 from mayaku.engine import launch, resolve_ddp_device
 from mayaku.inference import from_pretrained
 from mayaku.tuning import FINETUNE_GRAD_ACCUM_STEPS, FINETUNE_IMS_PER_BATCH, collect_set_paths
@@ -511,8 +510,7 @@ def _strip_operational_for_finetune(cfg: MayakuConfig) -> MayakuConfig:
             update={
                 "uniquery_head": head.model_copy(
                     update={
-                        name: getattr(head_defaults, name)
-                        for name in TRAINING_ONLY_HEAD_FIELDS
+                        name: getattr(head_defaults, name) for name in TRAINING_ONLY_HEAD_FIELDS
                     }
                 )
             }

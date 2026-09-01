@@ -49,9 +49,7 @@ class SetCriterion(nn.Module):
         self.focal_gamma = focal_gamma
         self.cascade_iou_thresholds = cascade_iou_thresholds
         if cls_loss_type not in ("focal", "vfl", "mal"):
-            raise ValueError(
-                f"cls_loss_type must be one of focal/vfl/mal, got {cls_loss_type!r}"
-            )
+            raise ValueError(f"cls_loss_type must be one of focal/vfl/mal, got {cls_loss_type!r}")
         # ``focal`` trains every matched query toward a hard 1.0 regardless of
         # how well its box fits, so a well-localized box and a barely-matched
         # one get the same target and AP — a *ranking* metric — cannot tell them
@@ -488,9 +486,7 @@ def matchability_aware_loss(
     """
     p = inputs.sigmoid()
     ce_pos = F.binary_cross_entropy_with_logits(inputs, target_score, reduction="none")
-    ce_neg = F.binary_cross_entropy_with_logits(
-        inputs, torch.zeros_like(inputs), reduction="none"
-    )
+    ce_neg = F.binary_cross_entropy_with_logits(inputs, torch.zeros_like(inputs), reduction="none")
     neg = p.detach().pow(gamma) * ce_neg
     if alpha is not None:
         neg = alpha * neg
@@ -517,12 +513,8 @@ def varifocal_loss(
     """
     p = inputs.sigmoid()
     ce_pos = F.binary_cross_entropy_with_logits(inputs, target_score, reduction="none")
-    ce_neg = F.binary_cross_entropy_with_logits(
-        inputs, torch.zeros_like(inputs), reduction="none"
-    )
-    loss = torch.where(
-        is_pos, target_score * ce_pos, alpha * p.detach().pow(gamma) * ce_neg
-    )
+    ce_neg = F.binary_cross_entropy_with_logits(inputs, torch.zeros_like(inputs), reduction="none")
+    loss = torch.where(is_pos, target_score * ce_pos, alpha * p.detach().pow(gamma) * ce_neg)
     total: Tensor = loss.sum()
     return total
 

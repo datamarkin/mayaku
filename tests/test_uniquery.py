@@ -158,7 +158,7 @@ class TestUniQuery:
         batch = _make_batch(batch_size=2)
         losses = model(batch)
         assert isinstance(losses, dict)
-        assert len(losses) == 6  # 2 stages × 3 loss types
+        assert len(losses) == 10  # 2 stages × (3 detection + 2 denoising) loss types
         assert all(v.isfinite() for v in losses.values())
         assert all(v.requires_grad for v in losses.values())
 
@@ -252,7 +252,7 @@ class TestUniQuery:
         model.train()
         batch = _make_batch(batch_size=1, num_gt=3)
         losses = model(batch)
-        assert len(losses) == 9  # 3 stages × 3 loss types
+        assert len(losses) == 15  # 3 stages × (3 detection + 2 denoising) loss types
         assert all(v.isfinite() for v in losses.values())
 
     def test_mask_forward_train(self) -> None:
@@ -264,8 +264,8 @@ class TestUniQuery:
         assert "loss_mask" in losses
         assert losses["loss_mask"].isfinite()
         assert losses["loss_mask"].requires_grad
-        # Detection losses still present: 2 stages × 3 types + 1 mask
-        assert len(losses) == 7
+        # Detection losses still present: 2 stages × (3 + 2 denoising) types + 1 mask
+        assert len(losses) == 11
 
     def test_mask_forward_inference(self) -> None:
         cfg = _make_mask_cfg(num_proposals=10, num_stages=2, num_classes=5)
