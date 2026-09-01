@@ -384,18 +384,37 @@ class UniQueryHeadConfig(_BaseModel):
     # early Hungarian matching -> faster convergence, most useful at few
     # stages. Training-only: DN queries are not generated at inference, so
     # zero deployment/export impact.
-    denoising: bool = False
+    #
+    # Worth +0.48 AP on coco-rem 25k and +0.33 on a 4k subset, and it only
+    # pays off on top of an IoU-aware ``cls_loss_type`` (+0.12 on focal).
+    # Its gain is CONDITIONAL ON ANNOTATION QUALITY: on the same 4000 images
+    # labelled with original COCO 2017 annotations instead of coco-rem it
+    # measured -0.30, a 0.63 AP swing. DN trains the decoder to reconstruct
+    # GT boxes, so imprecise or incomplete labels make the denoising target
+    # and the detection target disagree once the detector outgrows the labels
+    # (crossover at ~37% of the schedule; small objects invert first). Default
+    # on because modern tool-assisted labelling resembles coco-rem far more
+    # than it resembles 2017 crowd-sourced COCO — but turn it off for a
+    # dataset known to have loose or missing boxes.
+    denoising: bool = True
     # DINO "look forward twice": stop detaching the box between stages, so a
     # later stage's box error can correct the earlier prediction that produced
     # it. Sparse R-CNN detaches, which trains each stage only to repair what it
     # was handed. Identical inference graph and parameter count — costs only
     # retained activations during training.
     look_forward_twice: bool = False
-    dn_groups: Annotated[int, Field(gt=0)] = 5
+    # Independently-noised copies per GT. Measured a null: 1 / 2 / 5 groups
+    # land within 0.33 AP over 16 epochs and the ordering is non-monotonic in
+    # dose (paired mean vs 5 groups: g1 +0.01, g2 -0.10), so DN's benefit is
+    # switch-like rather than dose-dependent. 1 because groups multiply the
+    # padding width below and so are most of DN's memory cost.
+    dn_groups: Annotated[int, Field(gt=0)] = 1
     # Bounds the batch-wide DN padding width (M = min(max_b(G_b), dn_max_gt) *
     # dn_groups). Unbounded, one dense image sets M for the whole batch and the
-    # tail OOMs a 24GB card at batch 16. None = unbounded (previous behaviour).
-    dn_max_gt: Annotated[int, Field(gt=0)] | None = None
+    # tail OOMs a 24GB card at batch 16 — one coco-rem image carries 473 boxes.
+    # ``None`` restores that unbounded behaviour; don't, unless you know the
+    # densest image in the set.
+    dn_max_gt: Annotated[int, Field(gt=0)] | None = 100
     dn_box_noise_scale: Annotated[float, Field(gt=0.0, le=1.0)] = 0.4
     dn_loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
 
@@ -414,7 +433,7 @@ class UniQueryHeadConfig(_BaseModel):
     # the matched prediction's own IoU as the target, so the emitted score
     # estimates localization quality — which is what AP, a ranking metric,
     # actually sorts on. Training-only: zero inference impact.
-    cls_loss_type: Literal["focal", "vfl", "mal"] = "focal"
+    cls_loss_type: Literal["focal", "vfl", "mal"] = "mal"
     # Exponent on MAL's IoU target (and its negative-branch modulator).
     # DEIM ships 1.5; 2.0 matches the focal_gamma used elsewhere here.
     mal_gamma: Annotated[float, Field(gt=0.0)] = 1.5

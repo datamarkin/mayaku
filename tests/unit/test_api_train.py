@@ -236,6 +236,80 @@ def test_strip_operational_for_finetune_resets_only_operational_fields() -> None
     assert stripped.solver.effective_batch() == ckpt.solver.effective_batch() == 16
 
 
+def test_strip_operational_for_finetune_resets_training_only_head_fields() -> None:
+    """The loss selection is recipe, not architecture: a fresh fine-tune gets the
+    current schema default even when the pretrain sidecar pinned another value.
+
+    The bundled detection checkpoints were pretrained before the MAL/denoising
+    program and embed ``cls_loss_type`` absent, ``denoising=False,
+    dn_groups=5``. Without this reset those pin the pretrain's recipe for every
+    user fine-tuning from them, and changing a schema default would silently do
+    nothing on the path users actually take (``weights=`` + sidecar).
+    """
+    from mayaku.api import TRAINING_ONLY_HEAD_FIELDS, _strip_operational_for_finetune
+    from mayaku.config import MayakuConfig, ModelConfig
+    from mayaku.config.schemas import UniQueryHeadConfig
+
+    defaults = UniQueryHeadConfig()
+    ckpt = MayakuConfig(
+        model=ModelConfig(
+            meta_architecture="uniquery",
+            uniquery_head=UniQueryHeadConfig(
+                # pretrain-era recipe, to be reset:
+                cls_loss_type="focal",
+                denoising=False,
+                dn_groups=5,
+                dn_max_gt=None,
+                # tuning of an objective — checkpoint-owned, must survive:
+                mal_gamma=2.5,
+                dn_loss_weight=3.0,
+                # real architecture — must survive, or the weights would not fit:
+                num_stages=6,
+                num_proposals=500,
+                fpn_p6p7=True,
+            ),
+        ),
+    )
+
+    head = _strip_operational_for_finetune(ckpt).model.uniquery_head
+    assert head is not None
+
+    for name in TRAINING_ONLY_HEAD_FIELDS:
+        assert getattr(head, name) == getattr(defaults, name), name
+
+    assert head.mal_gamma == 2.5
+    assert head.dn_loss_weight == 3.0
+    assert head.num_stages == 6
+    assert head.num_proposals == 500
+    assert head.fpn_p6p7 is True
+
+
+def test_training_only_head_fields_contract() -> None:
+    """Guard the set: every name must be a real field, and none may describe the
+    architecture — resetting one of those would not match the loaded weights."""
+    from mayaku.api import TRAINING_ONLY_HEAD_FIELDS
+    from mayaku.config.schemas import UniQueryHeadConfig
+
+    fields = set(UniQueryHeadConfig.model_fields)
+    assert TRAINING_ONLY_HEAD_FIELDS <= fields, TRAINING_ONLY_HEAD_FIELDS - fields
+
+    architectural = {
+        "num_stages",
+        "num_proposals",
+        "hidden_dim",
+        "num_heads",
+        "dim_feedforward",
+        "dim_dynamic",
+        "pooler_resolution",
+        "pooler_sampling_ratio",
+        "fpn_p6p7",
+        "qgn_min_stride",
+        "uniquery_generator",
+    }
+    assert architectural <= fields, architectural - fields
+    assert not (TRAINING_ONLY_HEAD_FIELDS & architectural)
+
+
 def test_train_weights_without_embedded_config_raises(
     toy_workspace: dict[str, Any], tmp_path: Path
 ) -> None:

@@ -64,7 +64,7 @@ import json
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import torch
 
@@ -79,6 +79,7 @@ from mayaku.config import (
     load_yaml,
     merge_overrides,
 )
+from mayaku.config.schemas import UniQueryHeadConfig
 from mayaku.config.schemas import DeviceSetting
 from mayaku.engine import launch, resolve_ddp_device
 from mayaku.inference import from_pretrained
@@ -444,6 +445,27 @@ def _resolve_model_source(
     )
 
 
+# Head knobs that select the LOSS rather than describe the model. None of them
+# appears in the inference graph: the only parameter any of them adds is
+# ``head.dn_query_feat`` (one hidden_dim embedding, 128 floats at the nano tier)
+# and DN queries are not generated at inference, so export and deployment are
+# unaffected. A *new* training run should therefore get the current recommended
+# recipe rather than inheriting whatever the pretrain happened to use — the
+# bundled detection checkpoints were pretrained before this program and pin
+# ``denoising=False, dn_groups=5``, which would otherwise silently override the
+# schema defaults for every user fine-tuning from them.
+#
+# Deliberately NOT included, and the distinction is the point:
+#   * ``mal_gamma``/``mal_alpha``/``cls_loss_weight``/``dn_box_noise_scale``/
+#     ``dn_loss_weight`` — tuning *of* an objective, which the checkpoint owns
+#     (see the loss-weight rule in ``mayaku.tuning.recipe``);
+#   * ``fpn_p6p7``/``qgn_min_stride``/``num_stages``/``num_proposals`` — real
+#     architecture; resetting those would not match the loaded weights.
+TRAINING_ONLY_HEAD_FIELDS: Final = frozenset(
+    {"cls_loss_type", "denoising", "dn_groups", "dn_max_gt"}
+)
+
+
 def _strip_operational_for_finetune(cfg: MayakuConfig) -> MayakuConfig:
     """Reset host/run-cadence fields on a checkpoint-derived fine-tune config.
 
@@ -457,11 +479,13 @@ def _strip_operational_for_finetune(cfg: MayakuConfig) -> MayakuConfig:
     batch layout leak in.
 
     ``test`` and ``dataloader`` are wholly operational, so reset wholesale to
-    schema defaults; only the operational subset of ``solver`` is reset. Batch
+    schema defaults; only the operational subset of ``solver`` is reset, and
+    only :data:`TRAINING_ONLY_HEAD_FIELDS` of ``model.uniquery_head`` (the loss
+    selection, which the checkpoint should not dictate for a fresh run). Batch
     layout and AMP take fine-tune defaults rather than the schema's
     D2-replication values (``FINETUNE_*`` micro-batch, and ``amp_enabled/bf16``
     which ``Device.resolve_amp_dtype`` clamps to the live hardware). ``model``
-    and ``input`` are kept verbatim. Read-side and train-only; deployment reads
+    is kept verbatim apart from those head fields, and ``input`` entirely so. Read-side and train-only; deployment reads
     the full checkpoint config via ``load_detector``.
     """
     defaults = SolverConfig()  # schema defaults for the reset-to-default fields
@@ -475,9 +499,25 @@ def _strip_operational_for_finetune(cfg: MayakuConfig) -> MayakuConfig:
             "amp_dtype": "bf16",
         }
     )
-    return cfg.model_copy(
-        update={"test": TestConfig(), "dataloader": DataLoaderConfig(), "solver": solver}
-    )
+    update: dict[str, object] = {
+        "test": TestConfig(),
+        "dataloader": DataLoaderConfig(),
+        "solver": solver,
+    }
+    head = cfg.model.uniquery_head
+    if head is not None:
+        head_defaults = UniQueryHeadConfig()
+        update["model"] = cfg.model.model_copy(
+            update={
+                "uniquery_head": head.model_copy(
+                    update={
+                        name: getattr(head_defaults, name)
+                        for name in TRAINING_ONLY_HEAD_FIELDS
+                    }
+                )
+            }
+        )
+    return cfg.model_copy(update=update)
 
 
 def _load_config(config: str | Path | MayakuConfig) -> tuple[MayakuConfig, str]:
