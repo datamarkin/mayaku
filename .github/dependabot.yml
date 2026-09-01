@@ -1,0 +1,33 @@
+# Keeps the pinned lint/type toolchain fresh without letting it drift.
+#
+# `[project.optional-dependencies].dev` pins ruff, mypy and the typeshed stubs
+# exactly, because their *diagnostics* change between releases: an unpinned
+# floor means CI resolves the newest on every run while a developer machine
+# stays wherever it was installed, and the two then disagree about code neither
+# of them touched. Pinning fixes that but goes stale.
+#
+# Dependabot is what un-stales it. A bump arrives as its own PR, so the new
+# release's diagnostics show up in isolation — reviewable, and fixable in the
+# same PR — instead of landing on whoever happens to push a feature that day.
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One PR for the whole toolchain: these are upgraded together or not at all,
+    # and a single "bump lint tooling" PR is easier to review than four.
+    groups:
+      lint-and-types:
+        patterns:
+          - "ruff"
+          - "mypy"
+          - "types-*"
+    open-pull-requests-limit: 5
+
+  # Action versions drift the same way and break the same jobs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

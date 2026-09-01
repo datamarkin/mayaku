@@ -57,13 +57,18 @@ tensorrt = [
   "onnx>=1.16",
   "tensorrt>=10.0; sys_platform != 'darwin'",
 ]
+# The lint/type toolchain is PINNED, not floored. ruff and mypy change their
+# diagnostics between releases, and typeshed stubs change whether a third-party
+# call counts as typed — so an unpinned floor means CI resolves the newest on
+# every run while a developer machine stays wherever it was installed, and the
+# two disagree about code neither of them changed. Bump these deliberately.
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
-  "ruff>=0.5",
-  "mypy>=1.10",
-  "types-PyYAML",
-  "types-Pillow",
+  "ruff==0.16.5",
+  "mypy==2.3.1",
+  "types-PyYAML==6.0.12.20260815",
+  "types-Pillow==10.2.0.20240822",
 ]
 
 [project.scripts]
