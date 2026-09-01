@@ -90,7 +90,7 @@ for _tag in (
     "tag:yaml.org,2002:python/name:",
     "tag:yaml.org,2002:python/tuple",
 ):
-    _CfgNodeLoader.add_multi_constructor(_tag, _inert)  # type: ignore[no-untyped-call]
+    _CfgNodeLoader.add_multi_constructor(_tag, _inert)
 
 
 def load_d2_config(path: str | Path) -> dict[str, Any]:
