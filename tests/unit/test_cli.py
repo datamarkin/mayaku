@@ -20,9 +20,11 @@ from typer.testing import CliRunner
 from mayaku.cli import app
 from mayaku.cli._factory import build_detector
 from mayaku.cli.export import run_export
-from mayaku.cli.predict import run_predict
+from mayaku.cli.predict import _instances_to_payload, run_predict
 from mayaku.cli.train import run_train
 from mayaku.config import MayakuConfig, dump_yaml
+from mayaku.structures.boxes import Boxes
+from mayaku.structures.instances import Instances
 
 # `toy_workspace` is a shared fixture defined in tests/conftest.py.
 
@@ -63,6 +65,60 @@ def test_run_predict_writes_json_file(toy_workspace: dict[str, Path], tmp_path: 
     )
     parsed = json.loads(out.read_text())
     assert parsed["image"] == str(toy_workspace["image_file"])
+
+
+def _one_instance(**fields: torch.Tensor) -> Instances:
+    """A single detection carrying whatever prediction fields a test needs."""
+    inst = Instances(image_size=(64, 64))
+    inst.pred_boxes = Boxes(torch.tensor([[1.0, 2.0, 11.0, 22.0]]))
+    inst.scores = torch.tensor([0.9])
+    inst.pred_classes = torch.tensor([0])
+    for name, value in fields.items():
+        inst.set(name, value)
+    return inst
+
+
+def test_predict_payload_includes_keypoints() -> None:
+    """Keypoints are the prediction for a keypoint model, not an optional extra.
+
+    Omitting them returned valid-looking JSON with the actual result missing.
+    """
+    keypoints = torch.tensor([[[3.0, 4.0, 0.8], [5.0, 6.0, 0.7]]])  # (1, K, 3)
+    payload = _instances_to_payload(_one_instance(pred_keypoints=keypoints))
+
+    landmarks = payload[0]["keypoints"]
+    assert len(landmarks) == 2
+    for actual, expected in zip(landmarks, [[3.0, 4.0, 0.8], [5.0, 6.0, 0.7]], strict=True):
+        assert actual == pytest.approx(expected, rel=1e-6)
+
+
+def test_predict_payload_includes_segmentation_as_rle() -> None:
+    masks = torch.zeros((1, 64, 64), dtype=torch.bool)
+    masks[0, 10:20, 10:20] = True
+    payload = _instances_to_payload(_one_instance(pred_masks=masks))
+
+    segmentation = payload[0]["segmentation"]
+    assert segmentation["size"] == [64, 64]
+    assert isinstance(segmentation["counts"], str)  # JSON-friendly, not bytes
+
+
+def test_predict_payload_omits_absent_fields() -> None:
+    """A detection-only model gains no keypoint or segmentation keys."""
+    payload = _instances_to_payload(_one_instance())
+
+    assert set(payload[0]) == {"category_id", "score", "bbox_xywh"}
+
+
+def test_predict_payload_excludes_intermediate_heatmaps() -> None:
+    """Raw (K, 56, 56) heatmaps are an intermediate tensor, not a result."""
+    payload = _instances_to_payload(
+        _one_instance(
+            pred_keypoints=torch.zeros((1, 2, 3)),
+            pred_keypoint_heatmaps=torch.zeros((1, 2, 56, 56)),
+        )
+    )
+    assert "pred_keypoint_heatmaps" not in payload[0]
+    assert "keypoints" in payload[0]
 
 
 def test_run_train_runs_the_loop_and_writes_checkpoints(
