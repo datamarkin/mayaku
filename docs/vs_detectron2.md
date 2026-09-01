@@ -40,8 +40,10 @@ keypoint AP). Example:
 | `keypoint_rcnn_R_50_FPN_3x` (box / kpt) | 55.4 / 65.5 | 55.45 / 65.49 | +0.05 / -0.01 |
 
 Full per-checkpoint table: [`docs/d2_parity_report.md`](d2_parity_report.md).
-Reproduction recipe: `bash tools/convert_all_d2.sh` (downloads each
-`.pkl`, converts, evaluates, regenerates the parity report).
+Reproduction recipe: `mayaku eval faster_rcnn_R_50_FPN_3x --annotations
+instances_val2017.json --images val2017/` — the converted checkpoints are in
+the hosted manifest, so the name auto-fetches on first use. To start from a
+Detectron2 `.pkl` instead, convert it first with `mayaku convert-d2`.
 
 You can take an existing Detectron2 deployment and switch the runtime
 to Mayaku — same architecture families (Faster / Mask / Keypoint

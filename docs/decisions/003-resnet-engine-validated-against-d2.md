@@ -699,8 +699,10 @@ record any future regression at commit time.
 
 ## References
 
-- `tools/convert_d2_checkpoint.py` — the throwaway converter.
-- `tools/README.md` — usage and deletion plan.
+- `tools/convert_d2_checkpoint.py` — the throwaway converter. Removed once
+  the validation closed; its job is now done by `mayaku convert-d2`
+  (`src/mayaku/d2.py`), which additionally reads `cfg.yaml` rather than
+  assuming model-zoo defaults. See `docs/detectron2.md`.
 - `docs/decisions/002-rgb-native-image-ingestion.md` — the BGR→RGB
   channel reverse in the converter is a consequence of ADR 002.
 - `DINOV2_IMPLEMENTATION.md` — the proposed swap that retires this
