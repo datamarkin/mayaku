@@ -38,6 +38,7 @@ from PIL import Image
 
 from mayaku.data.mapper import DatasetMapper
 from mayaku.structures.boxes import BoxMode
+from mayaku.structures.masks import mask_to_rle
 from mayaku.utils.image import read_image
 
 __all__ = [
@@ -534,14 +535,9 @@ class CopyPaste(MultiSampleAugmentation):
             if (x1 - x0) * (y1 - y0) < self.min_box_area:
                 continue
 
-            # Encode the placed mask as RLE so the mapper's bitmask path
-            # can decode it through the same `_segmentation_to_bitmask`
-            # helper. ``counts`` comes back as bytes from pycocotools;
-            # decode to ASCII for JSON-friendly storage and to match the
-            # COCO-format string-RLE convention.
-            rle = coco_mask.encode(np.asfortranarray(mask_target.astype(np.uint8)))
-            if isinstance(rle.get("counts"), bytes):
-                rle["counts"] = rle["counts"].decode("ascii")
+            # Encode the placed mask as RLE so the mapper's bitmask path can
+            # decode it through the same `_segmentation_to_bitmask` helper.
+            rle = mask_to_rle(mask_target)
             pasted_anns.append(
                 {
                     "bbox": [x0, y0, x1, y1],
