@@ -8,22 +8,67 @@ custom CUDA kernels.
 
 ## Convert a checkpoint
 
-```bash
-# D2 .pkl  ->  Mayaku .pth   (one-shot, no network)
-python tools/convert_d2_checkpoint.py your_model_final.pkl -o your_model.pth
+You need two files: the weights, and the `cfg.yaml` they were trained with.
 
-# Use it like any Mayaku checkpoint
-mayaku predict --weights your_model.pth image.jpg --device mps
+```bash
+mayaku convert-d2 your_model_final.pth \
+    --d2-config cfg.yaml \
+    --output your_model.pth \
+    --class-names cat,dog          # optional; defaults to class_0, class_1, …
 ```
 
-Covers Faster / Mask / Keypoint R-CNN with R-50 / R-101 / X-101_32x8d FPN. Head-specific
-rename rules are inert when the source `.pkl` doesn't contain them, so a Faster R-CNN
-checkpoint converts cleanly without flags. Full rename table and edge cases:
-[`tools/README.md`](../tools/README.md).
+Same thing without the CLI, e.g. from your own pipeline:
 
-If your D2 setup uses anything Mayaku doesn't ship (DCN, Cascade, Panoptic, DETR,
-ViTDet, PointRend, DensePose), the converter can't help — those architectures aren't
-implemented.
+```python
+from mayaku.d2 import convert_d2
+
+convert_d2("your_model_final.pth", d2_config="cfg.yaml",
+           output="your_model.pth", class_names=["cat", "dog"])
+```
+
+The output is a **deploy-ready** checkpoint carrying the embedded sidecar, so it needs
+no config file afterwards:
+
+```python
+from mayaku import from_pretrained
+
+predictor = from_pretrained("your_model.pth", device="auto")
+instances = predictor("image.jpg")
+```
+
+Covers Faster / Mask / Keypoint R-CNN with R-50 / R-101 / X-101_32x8d FPN, from a `.pkl`
+(model zoo) or a `.pth` (your own training run). No `detectron2` install needed.
+
+**`--d2-config` is required, and that is deliberate.** Two settings change predictions
+without changing any tensor shape, so a strict weight load cannot catch them and they
+have to be read from the config rather than typed by hand:
+
+| setting | why it bites |
+|---|---|
+| `MODEL.PIXEL_STD` | caffe2-pretrained checkpoints use `[1, 1, 1]`; Mayaku defaults to `[58.395, 57.12, 57.375]`. Wrong by ~58x, no error. |
+| `MODEL.RESNETS.STRIDE_IN_1X1` | caffe2 puts the stride on the 1x1 conv. Both layouts have identical parameter shapes. |
+
+`INPUT.FORMAT` is read too, so the BGR→RGB channel swap happens automatically — there
+is no flag to get backwards.
+
+Conversion prints every value it carried over that differs from Mayaku's defaults, so
+what the config contributed is visible rather than implicit.
+
+### What it refuses
+
+Anything Mayaku cannot reproduce **exactly** raises rather than converting to a
+near-equivalent that predicts differently: non-`GeneralizedRCNN` architectures,
+deformable conv, Cascade ROI heads, `ROIAlign` (v1) pooling, GN-normalised box/mask
+heads, sigmoid/federated classification loss, ResNet depths other than 50/101, and
+`MASK_ON` + `KEYPOINT_ON` together.
+
+### Class names
+
+Detectron2 keeps class and keypoint *names* in `MetadataCatalog`, registered at training
+time — they are in neither the checkpoint nor `cfg.yaml`. Pass `--class-names` to record
+them; without it the model still runs correctly, just with placeholder names. Keypoint
+`flip_indices` are likewise unavailable; inference never uses them, a later fine-tune
+with horizontal flip does.
 
 ## Parity
 
@@ -45,16 +90,21 @@ published COCO val2017 numbers within ±0.1 AP. Maximum observed gap: **+0.08 AP
 Full per-checkpoint table (incl. 1x configs): [`docs/d2_parity_report.md`](d2_parity_report.md).
 These numbers come from evaluating D2's converged weights — not training from scratch.
 
-## Two things that will silently bite you
+**Near-parity, not bit-parity.** `ROIPooler` resolves `POOLER_SAMPLING_RATIO=0` to a fixed
+2 samples per bin rather than D2's per-box adaptive `ceil(roi_size / output_size)`, because
+the export path samples a fixed grid and the two must agree. Per-box coordinates therefore
+differ slightly from D2's — on a 112-landmark keypoint model, ~1 px median on a ~800 px
+object. It is a difference, not an error: measured against hand-placed ground truth the
+converted model scored marginally *better* than the Detectron2 original.
 
-Both produce **wrong detections with no error raised**, so they're worth stating plainly:
+## One thing that will silently bite you
 
-1. **Channel order is RGB, not BGR.** D2 inherits Caffe2's BGR convention; Mayaku is
-   RGB-native ([ADR 002](decisions/002-rgb-native-image-ingestion.md)). Feed a `cv2.imread`
-   BGR array and it runs but detects wrong. Load with `mayaku.utils.image.read_image`
-   (PIL, RGB) or swap channels at the boundary.
+Feeding **BGR pixels at inference**. D2 inherits Caffe2's BGR convention; Mayaku is
+RGB-native ([ADR 002](decisions/002-rgb-native-image-ingestion.md)). Pass a `cv2.imread`
+array and it runs and detects wrong, with no error. Load with
+`mayaku.utils.image.read_image` (PIL, RGB) or swap channels at the boundary.
 
-2. **Pixel mean/std are RGB-ordered** — `[123.675, 116.280, 103.530]` / `[58.395, 57.120, 57.375]`.
-   If you copy a D2 yacs config that pins `PIXEL_MEAN` in BGR, the model normalises with
-   channels swapped. Don't override the defaults unless your dataset needs it — and write
-   them RGB.
+The *checkpoint's* channel order is handled for you — `convert-d2` reads `INPUT.FORMAT`
+and folds the swap into the stem conv's weights, so there is no runtime flag to set. Same
+for `PIXEL_MEAN` / `PIXEL_STD`: they are read from `cfg.yaml` and reordered to RGB. Don't
+hand-write them.

@@ -29,7 +29,7 @@ no wheel chase.
 
 All 12 D2 model-zoo checkpoints reproduce
 Detectron2's published COCO val2017 numbers within ±0.1 AP after
-conversion through `tools/convert_d2_checkpoint.py`. Maximum observed
+conversion through `mayaku convert-d2`. Maximum observed
 gap across the 12: **+0.08 AP** (`keypoint_rcnn_X_101_32x8d_FPN_3x`,
 keypoint AP). Example:
 
