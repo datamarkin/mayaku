@@ -44,6 +44,7 @@ from mayaku.engine.distributed import all_gather_object, is_main_process, synchr
 from mayaku.inference.postprocess import detector_postprocess, unletterbox_instances
 from mayaku.structures.boxes import BoxMode
 from mayaku.structures.instances import Instances
+from mayaku.structures.masks import mask_to_rle
 
 __all__ = [
     "COCOEvaluator",
@@ -415,10 +416,6 @@ def instances_to_coco_json(
     masks: Tensor | None = instances.pred_masks.detach().cpu() if has_mask else None
     keypoints: Tensor | None = instances.pred_keypoints.detach().cpu() if has_kp else None
 
-    if has_mask:
-        # Lazy import — pycocotools.mask is only needed when masks fire,
-        # and we already pay for pycocotools at the COCO-GT load.
-        from pycocotools import mask as coco_mask
     for k in range(len(instances)):
         cls = int(classes[k])
         if class_id_map is not None:
@@ -441,11 +438,7 @@ def instances_to_coco_json(
         }
         if has_mask:
             assert masks is not None
-            mask_np = masks[k].numpy().astype(np.uint8)
-            rle = coco_mask.encode(np.asfortranarray(mask_np))
-            # encode() returns bytes for `counts`; JSON-friendly str.
-            rle["counts"] = rle["counts"].decode("utf-8")
-            record["segmentation"] = rle
+            record["segmentation"] = mask_to_rle(masks[k])
         if has_kp:
             assert keypoints is not None
             kp = keypoints[k].numpy().copy()  # (K, 3)

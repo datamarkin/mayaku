@@ -30,6 +30,7 @@ not a hot-path GPU op), which matches `BACKEND_PORTABILITY_REPORT.md`
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -44,8 +45,22 @@ __all__ = [
     "BitMasks",
     "PolygonMasks",
     "ROIMasks",
+    "mask_to_rle",
     "paste_masks_in_image",
 ]
+
+
+def mask_to_rle(mask: Tensor | npt.NDArray[Any]) -> dict[str, Any]:
+    """COCO run-length encoding for one ``(H, W)`` binary mask.
+
+    ``pycocotools`` hands back ``counts`` as bytes, which is not JSON
+    serialisable — every caller wants the ``str``, so decode it here rather
+    than at each site.
+    """
+    array = mask.numpy() if isinstance(mask, Tensor) else mask
+    rle: dict[str, Any] = coco_mask.encode(np.asfortranarray(array.astype(np.uint8)))
+    rle["counts"] = rle["counts"].decode("ascii")
+    return rle
 
 
 # ---------------------------------------------------------------------------

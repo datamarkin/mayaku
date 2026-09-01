@@ -5,7 +5,9 @@ The console-script entry in ``pyproject.toml`` (`mayaku =
 Each subcommand is a thin wrapper around the corresponding
 ``cli/<name>.py`` ``run_*`` function so the implementation stays
 testable in-process via direct calls (and the Typer layer is just
-argument plumbing).
+argument plumbing). ``convert-d2`` wraps :func:`mayaku.d2.convert_d2`
+instead: importing a Detectron2 model is a standalone library entry
+point rather than a CLI workflow, so it lives outside ``cli/``.
 
 Subcommands:
 
@@ -14,6 +16,7 @@ Subcommands:
 * ``mayaku predict CONFIG IMAGE [--weights] [--output] [--device]``
 * ``mayaku export TARGET CONFIG --weights --output``
   (TARGET ∈ ``onnx`` | ``coreml`` | ``openvino`` | ``tensorrt``)
+* ``mayaku convert-d2 WEIGHTS --d2-config cfg.yaml --output [--class-names]``
 """
 
 from __future__ import annotations
@@ -280,6 +283,57 @@ def _export(
             indent=2,
         )
     )
+
+
+@app.command("convert-d2")
+def _convert_d2(
+    weights: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        help="Detectron2 checkpoint: .pkl (model zoo) or .pth (training run).",
+    ),
+    d2_config: Path = typer.Option(
+        ...,
+        "--d2-config",
+        exists=True,
+        dir_okay=False,
+        help=(
+            "The cfg.yaml the checkpoint was trained with. Required: it carries "
+            "PIXEL_STD and STRIDE_IN_1X1, which change predictions without changing "
+            "tensor shapes, so they cannot be inferred from the weights."
+        ),
+    ),
+    output: Path = typer.Option(..., "--output", "-o", help="Destination .pth."),
+    class_names: str | None = typer.Option(
+        None,
+        "--class-names",
+        help=(
+            "Comma-separated class names in training order (e.g. 'wing'). Detectron2 "
+            "keeps names in MetadataCatalog rather than the config, so they cannot be "
+            "recovered from cfg.yaml; defaults to class_0, class_1, …"
+        ),
+    ),
+) -> None:
+    """Import a Detectron2 model as a deploy-ready Mayaku checkpoint.
+
+    Faster / Mask / Keypoint R-CNN on R-50, R-101 and X-101_32x8d FPN. The output
+    carries the embedded sidecar, so ``from_pretrained`` runs it with no config
+    file. Anything Mayaku cannot build exactly is refused rather than converted
+    to a near-equivalent.
+    """
+    from mayaku.d2 import D2ConversionError, convert_d2
+
+    try:
+        convert_d2(
+            weights,
+            d2_config=d2_config,
+            output=output,
+            class_names=[n.strip() for n in class_names.split(",")] if class_names else None,
+            verbose=True,
+        )
+    except D2ConversionError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @app.command("download")

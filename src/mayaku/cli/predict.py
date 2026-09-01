@@ -14,6 +14,7 @@ from typing import Any
 from mayaku.inference import from_pretrained
 from mayaku.structures.boxes import BoxMode
 from mayaku.structures.instances import Instances
+from mayaku.structures.masks import mask_to_rle
 
 __all__ = ["run_predict"]
 
@@ -45,20 +46,36 @@ def run_predict(
 
 
 def _instances_to_payload(inst: Instances) -> list[dict[str, Any]]:
-    """Compact dict-per-detection rendering. Skips heavy mask/heatmap fields."""
+    """Compact dict-per-detection rendering.
+
+    Keypoints are included — they are the *prediction* for a keypoint model, so
+    omitting them would return valid-looking JSON with the result missing. The
+    raw ``(K, 56, 56)`` heatmaps and ``(28, 28)`` mask logits stay out: those are
+    intermediate tensors, not results, and would dwarf the payload. Masks are
+    summarised by their run-length encoding instead.
+    """
     if len(inst) == 0:
         return []
     boxes = inst.pred_boxes.tensor.detach().cpu()
     boxes_xywh = BoxMode.convert(boxes, BoxMode.XYXY_ABS, BoxMode.XYWH_ABS).tolist()
     scores = inst.scores.detach().cpu().tolist()
     classes = inst.pred_classes.detach().cpu().tolist()
+    keypoints = inst.pred_keypoints.detach().cpu().tolist() if inst.has("pred_keypoints") else None
+    masks = inst.pred_masks.detach().cpu() if inst.has("pred_masks") else None
+
     out: list[dict[str, Any]] = []
     for i in range(len(inst)):
-        out.append(
-            {
-                "category_id": int(classes[i]),
-                "score": float(scores[i]),
-                "bbox_xywh": [float(v) for v in boxes_xywh[i]],
-            }
-        )
+        det: dict[str, Any] = {
+            "category_id": int(classes[i]),
+            "score": float(scores[i]),
+            "bbox_xywh": [float(v) for v in boxes_xywh[i]],
+        }
+        if keypoints is not None:
+            # (K, 3) of (x, y, score) in original-image pixels, exactly as the
+            # model predicted them. The evaluator's -0.5 shift is a COCO
+            # annotation-convention detail and does not belong in a prediction.
+            det["keypoints"] = keypoints[i]
+        if masks is not None:
+            det["segmentation"] = mask_to_rle(masks[i])
+        out.append(det)
     return out
