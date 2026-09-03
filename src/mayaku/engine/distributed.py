@@ -35,7 +35,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import socket
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, TypeVar
 
@@ -445,7 +445,7 @@ def _pick_free_port() -> int:
 
 
 @contextmanager
-def contextmanager_socket():  # type: ignore[no-untyped-def]
+def contextmanager_socket() -> Iterator[socket.socket]:
     """Yield a transient TCP socket; close on exit."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
