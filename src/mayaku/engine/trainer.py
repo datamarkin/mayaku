@@ -264,7 +264,7 @@ class SimpleTrainer(TrainerBase):
         loss_dict: Mapping[str, Tensor] = (
             self.model(batch, num_boxes=normalizer) if normalizer is not None else self.model(batch)
         )
-        (_sum_loss(loss_dict) * scale).backward()  # type: ignore[no-untyped-call]
+        (_sum_loss(loss_dict) * scale).backward()
         return loss_dict
 
     def _accumulate(self) -> dict[str, float]:
@@ -409,7 +409,7 @@ class AMPTrainer(SimpleTrainer):
                 else self.model(batch)
             )
             micro_total = _sum_loss(loss_dict) * scale
-        self.scaler.scale(micro_total).backward()  # type: ignore[no-untyped-call]
+        self.scaler.scale(micro_total).backward()
         return loss_dict
 
     def run_step(self) -> None:

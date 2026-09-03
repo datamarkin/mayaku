@@ -151,9 +151,7 @@ class CoreMLExporter:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         with torch.no_grad():
-            traced = torch.jit.trace(  # type: ignore[no-untyped-call]
-                adapter, (sample,), check_trace=False
-            )
+            traced = torch.jit.trace(adapter, (sample,), check_trace=False)
 
         compute = _compute_units(ct, self.compute_units)
         precision = _compute_precision(ct, self.compute_precision)

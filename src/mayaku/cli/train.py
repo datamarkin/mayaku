@@ -463,7 +463,7 @@ def run_train(
     mapped: Any
     if multi_sample_augs:
         if cfg.input.close_mosaic_frac > 0.0:
-            close_flag = torch.zeros((), dtype=torch.bool).share_memory_()  # type: ignore[no-untyped-call]
+            close_flag = torch.zeros((), dtype=torch.bool).share_memory_()
         mapped = MultiSampleMappedDataset(
             dataset_dicts, mapper, multi_sample_augs, close_flag=close_flag
         )

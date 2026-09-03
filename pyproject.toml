@@ -120,7 +120,14 @@ warn_unreachable = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_reexport = true
+# Two relaxations of `strict`, both for the same reason: torch is only partly
+# annotated. `no-untyped-call` fires solely at call sites into torch's bare
+# internals — our own code is annotated, so the code says nothing about mayaku
+# and only yields ignore comments that expire the day torch annotates the
+# function under them. Global is the only scope that works: per-module settings
+# match where the error is *reported*, which for this code is always `mayaku.*`.
 disallow_untyped_decorators = false  # torch decorators are untyped
+disable_error_code = ["no-untyped-call"]
 files = ["src/mayaku"]
 
 [[tool.mypy.overrides]]

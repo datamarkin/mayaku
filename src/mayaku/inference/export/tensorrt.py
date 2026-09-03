@@ -285,7 +285,7 @@ class TensorRTExporter:
         for name, buf in outputs_t.items():
             context.set_tensor_address(name, int(buf.data_ptr()))
 
-        stream = torch.cuda.Stream(device=device)  # type: ignore[no-untyped-call]
+        stream = torch.cuda.Stream(device=device)
         with torch.cuda.stream(stream):
             ok = context.execute_async_v3(stream_handle=stream.cuda_stream)
         if not ok:

@@ -141,7 +141,7 @@ def get_local_process_group() -> Any:
         else:
             # Ranks are node-contiguous under torchrun, so consecutive groups of
             # `local_size` are exactly the per-node sets. Collective on all ranks.
-            _LOCAL_GROUP, _ = dist.new_subgroups(group_size=local_size)  # type: ignore[no-untyped-call]
+            _LOCAL_GROUP, _ = dist.new_subgroups(group_size=local_size)
         _LOCAL_GROUP_RESOLVED = True
     return _LOCAL_GROUP
 
@@ -387,7 +387,7 @@ def launch(
     if dist_url == "auto":
         dist_url = f"tcp://127.0.0.1:{_pick_free_port()}"
 
-    mp.spawn(  # type: ignore[no-untyped-call]
+    mp.spawn(
         _worker_entry,
         args=(world_size, dist_url, device.kind, main_func, tuple(args), timeout),
         nprocs=world_size,

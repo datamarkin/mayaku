@@ -46,8 +46,4 @@ def is_exporting() -> bool:
     "how am I being captured", which varies per exporter, rather than "is this
     graph destined for an artifact".
     """
-    return (
-        _EXPORTING.get()
-        or bool(torch.jit.is_tracing())  # type: ignore[no-untyped-call]
-        or torch.onnx.is_in_onnx_export()
-    )
+    return _EXPORTING.get() or bool(torch.jit.is_tracing()) or torch.onnx.is_in_onnx_export()
