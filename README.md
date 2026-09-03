@@ -13,25 +13,33 @@ transfer to *your* classes quickly. Pure Python, zero custom CUDA kernels: one `
 Apple Silicon, ROCm, or CPU, and exports to ONNX, CoreML, OpenVINO, and TensorRT.
 Apache 2.0.
 
-![RF100-VL, nano class: mean AP vs training time, normalized to Mayaku's time per dataset](https://raw.githubusercontent.com/datamarkin/mayaku/main/curve_nano.png)
+![RF100-VL nano: mean COCO AP against mean training wall-clock, averaged over 100 datasets](https://raw.githubusercontent.com/datamarkin/mayaku/main/curve_nano.png)
 
-On [RF100-VL](https://rf100-vl.org/) — a 100-dataset benchmark of real, custom
-datasets — Mayaku's nano model reaches a higher mean AP than either comparison, and reaches
-it in shorter training time.
+On [RF100-VL](https://rf100-vl.org/) — 100 real, custom datasets, not another COCO split —
+Mayaku's nano model reaches the highest mean AP of the three, and gets to the others'
+accuracy in a fraction of their training time.
 
-| Library | Params (M) | Mean AP @[.50:.95] | Training time |
-|---|---:|---:|---:|
-| **mayaku-n** | **12.9** | **0.535** | **1.0× (≈14 min)** |
-| rfdetr-n | 30.5 | 0.513 | 7.7× (≈112 min) |
-| yolo26n | 2.4 | 0.496 | 1.05× |
+Every AP below is COCO **AP@[.50:.95]**, scored by pycocotools and averaged across datasets.
 
-> **Benchmark scope:** nano class only, the **alphabetically first 20 of the 100** RF100-VL
-> datasets, single RTX 3060. Each library runs its own default recipe to completion. Times
-> are normalized to Mayaku's per-dataset time; the wall-clock shown is the median dataset.
-> Parameter counts differ substantially across these models — they are listed so the
-> comparison is read with that in mind.
-> **The benchmark is still running** — the remaining datasets and the s/m/l tiers will be
-> published as they finish, whatever they show.
+| Library | Params (M) | AP final | AP best | AP<sub>S</sub> | AP<sub>M</sub> | AP<sub>L</sub> | Training time |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **mayaku-n** | **12.9** | **0.572** | **0.575** | **0.339** | **0.511** | 0.635 | 24.4 min |
+| rfdetr-n | 30.5 | 0.562 | 0.574 | 0.296 | 0.495 | **0.656** | 114.6 min |
+| yolo26n | 2.4 | 0.537 | 0.548 | 0.283 | 0.477 | 0.608 | **19.1 min** |
+
+**On speed, read the chart at equal accuracy.** YOLO26n is quickest to *finish* — and
+finishes lowest. Mayaku passes yolo26n's final AP after **9.0 minutes** of its own training,
+where yolo26n takes 19.1; it passes rfdetr-n's after **14.3 minutes**, where rfdetr-n takes
+almost 2 hours.
+
+![RF100-VL nano: mean COCO AP split by object size class](https://raw.githubusercontent.com/datamarkin/mayaku/main/apsize_nano_common.png)
+
+> **Benchmark scope:** nano tier, all **100** RF100-VL datasets, single RTX 3060. Each
+> library runs its own default recipe to completion. No tuned hyperparameters and every
+> checkpoint is scored by the same pycocotools evaluator on the same
+> val split, so the AP numbers are identical in definition across libraries.
+> **The s/m/l tiers are still training** and will be published as they finish, whatever they
+> show.
 
 > Built for developers with a few hundred images of *their own thing* — retail shelves,
 > defects on a line, insect wings — not another COCO leaderboard entry.
@@ -40,8 +48,9 @@ it in shorter training time.
 
 ## Highlights
 
-- **Fine-tunes fast.** Strong accuracy on small custom datasets in minutes of wall-clock. See the RF100-VL result above. `auto_config` adapts the recipe (schedule, LR,
-  augmentation) to your dataset size automatically.
+- **Fine-tunes fast.** Highest mean AP on RF100-VL's 100 custom datasets, reaching the
+  other libraries' accuracy in a fraction of their training time — see above. `auto_config`
+  adapts the recipe (schedule, LR, augmentation) to your dataset size automatically.
 - **Objects365-pretrained.** Base models are pretrained on a large, detection-native dataset
   (365 classes), a broad starting point for transfer.
 - **UniQuery head.** Anchor-free, NMS-free, with image-conditioned query generation (QGN)
@@ -198,7 +207,7 @@ recipe, and the fine-tuning defaults that make them converge quickly on small da
 
 ## Roadmap
 
-- **Full RF100-VL results** — all 100 datasets across every size tier.
+- **Full RF100-VL results** — the nano tier is complete above; s/m/l are training.
 - **Curated custom-class models** — ready-to-use weights on a hand-picked set of common
   real-world classes (people, vehicles, and more), for projects that don't want to start from
   the Objects365 base.
