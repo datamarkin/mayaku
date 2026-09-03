@@ -38,9 +38,13 @@ htmlcov/
 dense.md
 /models
 
-/benchmarks
+
 /experiments
 /datasets
+
+# Benchmark scripts are tracked, but their results are not: run outputs hold
+# unpurged checkpoints (~82 GB across ~12k files) that must never reach git.
+benchmarks/*/results/
 
 /scratch
 /det_dinov3_tiny_h256_768_coco
