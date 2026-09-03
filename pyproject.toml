@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mayaku"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Backend-portable detection / segmentation / keypoint library inspired by Detectron2."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -86,6 +86,9 @@ mayaku = "mayaku.cli.__main__:app"
 
 [project.urls]
 Homepage = "https://github.com/datamarkin/mayaku"
+
+[tool.hatch.version]
+path = "src/mayaku/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mayaku"]
