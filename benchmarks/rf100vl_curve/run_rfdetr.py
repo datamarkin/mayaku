@@ -108,7 +108,7 @@ def train_one(model_cls, variant: str, name: str, dataset_dir: Path, out_root: P
     model_cls().train(
         dataset_dir=str(dataset_dir),
         checkpoint_interval=1,
-        output_dir=str(run),
+        output_dir=str(run.resolve()),  # absolute: keep checkpoints exactly where score()/purge look
     )
     common.write_meta(run, lib="rfdetr", variant=variant, dataset=name, t0=t0)
 

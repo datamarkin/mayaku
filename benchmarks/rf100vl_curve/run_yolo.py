@@ -57,7 +57,11 @@ def train_one(model_id: str, variant: str, name: str, dataset_dir: Path, out_roo
     YOLO(model_id).train(
         data=data_yaml,
         save_period=1,
-        project=str(out_dir),
+        # Absolute: a *relative* project is resolved under `runs/detect/` by
+        # Ultralytics 8.4+, so checkpoints would land in runs/detect/<project>/<name>/
+        # while score() looks in <project>/<name>/weights — every curve would come up
+        # empty and the checkpoints would escape the purge. Absolute pins save_dir=<project>/<name>.
+        project=str(out_dir.resolve()),
         name=name,
         exist_ok=True,
         **kw,
