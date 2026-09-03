@@ -1,7 +1,6 @@
 """Aggregate per-dataset RF100-VL curves into one mean curve per library.
 
-    python plot.py [--results results] [--intersection] [--first N]
-                   [--points 100] [--band] [--budgets 60,300,900,1800]
+    python plot.py [--results results] [--intersection] [--points 100] [--band]
 
 INPUT
     <results>/<lib>/<variant>/<dataset>/curve.csv, with columns ``checkpoint``,
@@ -35,13 +34,13 @@ METHOD
     entry when libraries cover different numbers; per-library checkpoint counts
     are in summary.csv.
 
-OUTPUT  (suffixed ``_common`` with --intersection, ``_firstN`` with --first)
+OUTPUT  (suffixed ``_common`` with --intersection)
     <results>/curve_<variant>.png    mean AP vs mean wall-clock in minutes, one line
                                      per library (the CSVs stay in seconds)
     <results>/curve_points.csv       every index: mean wall-clock, mean AP, n
     <results>/summary.csv            per (variant, library): dataset and checkpoint
-                                     counts, mean/median total time, mean/median
-                                     final AP, and mean AP at each --budgets time
+                                     counts, mean/median total time, and mean/median
+                                     AP at the final and at the best checkpoint
 """
 
 from __future__ import annotations
@@ -179,18 +178,11 @@ def main() -> None:
     p.add_argument("--intersection", action="store_true",
                    help="per variant, keep only datasets present in every library, so "
                         "each library's mean covers the same datasets; writes *_common")
-    p.add_argument("--first", type=int, default=None, metavar="N",
-                   help="restrict to the first N datasets in sorted-name order — the "
-                        "order the driver runs them; writes *_firstN")
     p.add_argument("--no-best", action="store_true",
                    help="omit the best-checkpoint marker (a star at the mean wall-clock "
                         "and mean AP of each dataset's own best checkpoint)")
     p.add_argument("--band", action="store_true",
                    help="shade +/- 1 standard error of the mean AP across datasets")
-    p.add_argument("--budgets", default="60,300,900,1800",
-                   help="comma-separated wall-clock seconds; each becomes a summary.csv "
-                        "column holding the mean curve's AP at that time, blank when the "
-                        "budget is past the library's mean total time")
     args = p.parse_args()
 
     results = Path(args.results)
@@ -206,22 +198,14 @@ def main() -> None:
     if not present:
         raise SystemExit(f"no <lib>/<variant>/<dataset>/curve.csv found under {results}")
 
-    # Per variant, the dataset names to keep: the first N in canonical order and/or
-    # the ones every library has. None means "every dataset this library has".
-    keep: dict[str, set | None] = {}
-    for variant, per_lib in present.items():
-        names: set | None = None
-        if args.intersection:
-            names = set.intersection(*per_lib.values())
-        if args.first is not None:
-            universe = sorted(set().union(*per_lib.values()))[: args.first]
-            names = set(universe) if names is None else names & set(universe)
-        keep[variant] = names
+    # Per variant, the dataset names to keep. None means "every dataset this
+    # library has"; --intersection narrows it to the ones every library has.
+    keep: dict[str, set | None] = {
+        variant: (set.intersection(*per_lib.values()) if args.intersection else None)
+        for variant, per_lib in present.items()
+    }
 
-    budgets = [float(b) for b in args.budgets.split(",") if b.strip()]
     suffix = "_common" if args.intersection else ""
-    if args.first is not None:
-        suffix += f"_first{args.first}"
 
     try:
         import matplotlib
@@ -254,14 +238,11 @@ def main() -> None:
             bestap = np.array([ap.max() for _, ap in values])
             bestt = np.array([t[ap.argmax()] for t, ap in values])
             bests[lib] = (float(bestt.mean()), float(bestap.mean()))
-            # A budget past the library's mean total time has no point on its curve.
-            at_budget = ["" if b > x[-1] else f"{np.interp(b, x, y):.4f}" for b in budgets]
             summary_rows.append([
                 variant, lib, len(values), span,
                 f"{totals.mean():.1f}", f"{np.median(totals):.1f}",
                 f"{finals.mean():.4f}", f"{np.median(finals):.4f}",
                 f"{bestap.mean():.4f}", f"{np.median(bestap):.4f}", f"{bestt.mean():.1f}",
-                *at_budget,
             ])
             for j, (xj, yj) in enumerate(zip(x, y)):
                 point_rows.append([variant, lib, j, f"{xj:.1f}", f"{yj:.4f}", len(values)])
@@ -299,8 +280,7 @@ def main() -> None:
         w = csv.writer(fh)
         w.writerow(["variant", "library", "n_datasets", "checkpoints_per_dataset",
                     "mean_total_s", "median_total_s", "mean_final_ap", "median_final_ap",
-                    "mean_best_ap", "median_best_ap", "mean_best_s",
-                    *[f"mean_ap@{int(b)}s" for b in budgets]])
+                    "mean_best_ap", "median_best_ap", "mean_best_s"])
         w.writerows(summary_rows)
     print(f"wrote {summary_path}")
 

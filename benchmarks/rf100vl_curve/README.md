@@ -124,7 +124,8 @@ results/
   curve_<variant>.png   # mean AP vs mean wall-clock, one line per library
   curve_points.csv      # every progress index: mean wall-clock, mean AP, n_datasets
   summary.csv           # per (variant, library): dataset/checkpoint counts, mean and
-                        # median total time, mean and median final AP, AP at each budget
+                        # median total time, and mean/median AP at the final and best
+                        # checkpoint (with the mean time of that best checkpoint)
 ```
 
 `curve.csv` is one row per checkpoint: `checkpoint, wall_clock_s`, then all **12
@@ -141,6 +142,25 @@ index *j*. Every point therefore averages the same datasets, and the last point 
 (Mayaku's cadence is dataset-dependent, 20–30) is linearly interpolated onto the
 same index axis. One figure per size class, since nano and large live on very
 different time scales.
+
+Each line ends at a filled dot — the **final** checkpoint, `(mean total training
+time, mean final-checkpoint AP)`. The hollow star is the **best** checkpoint:
+`(mean wall-clock of each dataset's own best checkpoint, mean of those best APs)`.
+It is built exactly like every point on the line — mean x, mean y across datasets —
+but indexed by each dataset's own argmax rather than a fixed progress fraction, so
+it sits off the line. It is always at or above the line's own maximum, because
+datasets peak at different times and the mean of the maxima exceeds the maximum of
+the mean.
+
+Both are worth reading, because the gap between them is not the same for every
+library: a fixed-epoch recipe overfits its last epochs more than a short
+auto-configured one, so scoring only the final checkpoint flatters whichever
+library stops earliest. Ultralytics ships `best.pt` and RF-DETR ships
+`checkpoint_best_total`, so the star is closer to what those libraries actually
+deploy. Note the caveat in both directions: `common.val_split` serves as both the
+val and the test split here, so picking each dataset's best checkpoint is oracle
+selection on the eval set — optimistic for every library, and applied identically
+to all of them.
 
 Libraries finish different numbers of datasets while a benchmark is still running.
 `--intersection` restricts every library to the datasets all of them have, so the
