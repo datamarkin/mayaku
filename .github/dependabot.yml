@@ -24,6 +24,15 @@ updates:
           - "ruff"
           - "mypy"
           - "types-*"
+      # Its own group, not folded into the one above: torch is pinned for the
+      # same reason (its inline annotations are mypy input, see the `typecheck`
+      # extra) but ships on its own cadence, and a torch bump is a far bigger
+      # review surface than a ruff patch. Fusing the two would recreate exactly
+      # the non-isolation this file exists to prevent.
+      typecheck-torch:
+        patterns:
+          - "torch"
+          - "torchvision"
     open-pull-requests-limit: 5
 
   # Action versions drift the same way and break the same jobs.
