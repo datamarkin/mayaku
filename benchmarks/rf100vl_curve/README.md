@@ -28,17 +28,31 @@ things that differ between the three scripts are the model names and each librar
 own `predict` call.
 
 ```bash
-python run_yolo.py   --datasets <coco_root>                  # server A
-python run_mayaku.py --datasets <coco_root>                  # server A
-python run_rfdetr.py --datasets <coco_root> --device cuda    # server B (RF-DETR is the slow leg)
+python prefetch_weights.py all                              # fetch every pretrained weight first
+python run_all.py --datasets <coco_root> --legs mayaku,yolo,rfdetr
 
-python plot.py --results results --budgets 60,300,900,1800   # aggregate → figures + table
+python plot.py --intersection --band                        # aggregate → figures + tables
 ```
 
-RF-DETR is far slower than YOLO or Mayaku, so run it on its own machine while
-YOLO+Mayaku share the other — no two legs ever share a GPU, so wall-clock stays
-honest. `--variants nano,small` runs a subset (default: all four), handy for
-splitting variants across more machines.
+`run_all.py` is the driver. It walks every (leg, variant, dataset) **one unit at a
+time on a single machine**, each unit an isolated subprocess running the stock
+`run_<leg>.py` unpatched. Sequential is the point: no two legs ever share the GPU, so
+the wall-clock axis stays honest. A crashed unit sinks only itself, and any unit with
+a `curve.csv` is skipped on re-run, so Ctrl-C and resume freely. `--legs` (default
+`yolo,rfdetr`) and `--variants` (default all four) run subsets; per-unit output goes
+to `results/logs/<leg>/<variant>/<dataset>.log`. Pin the GPU with
+`CUDA_VISIBLE_DEVICES` in the environment — every child inherits it.
+
+To leave it running for days, `train_large.sh` is the unattended wrapper: prefetch in
+the foreground, then detach the driver under `nohup`.
+
+Each leg also runs on its own if you prefer to drive it directly:
+
+```bash
+python run_yolo.py   --datasets <coco_root>
+python run_mayaku.py --datasets <coco_root>
+python run_rfdetr.py --datasets <coco_root> --device cuda
+```
 
 ## Variants
 
@@ -107,17 +121,30 @@ results/
   yolo/<variant>/<dataset>/{weights/epoch*.pt (until purged), meta.json, curve.csv}
   rfdetr/<variant>/<dataset>/{checkpoint_*.ckpt (until purged), meta.json, curve.csv}
   mayaku/<variant>/<dataset>/{train/ (until purged), meta.json, curve.csv}
-  curve_<variant>.png   # aggregate mean AP vs wall-clock, one line per library
-  summary.csv           # AP at each time budget, per (variant, library)
+  curve_<variant>.png   # mean AP vs mean wall-clock, one line per library
+  curve_points.csv      # every progress index: mean wall-clock, mean AP, n_datasets
+  summary.csv           # per (variant, library): dataset/checkpoint counts, mean and
+                        # median total time, mean and median final AP, AP at each budget
 ```
 
 `curve.csv` is one row per checkpoint: `checkpoint, wall_clock_s`, then all **12
 COCO stats** (`ap, ap50, ap75, ap_small, ap_medium, ap_large, ar1, ar10, ar100,
 ar_small, ar_medium, ar_large` — pycocotools order), then `n_dets`. `plot.py`
-interpolates each dataset's curve onto a shared per-variant time grid and averages
-across datasets, producing **one figure per size class** (nano and large live on
-very different time scales, so they don't share a grid). Curves are aligned across
-libraries *after the fact*, so checkpoints never need to land at matching times.
+aligns datasets by **training progress** rather than by wall-clock: each dataset's
+checkpoint list is prepended with the origin (wall-clock 0, AP 0) and sampled at
+evenly spaced fractions of its checkpoint index, so index 0 is the origin and the
+last index is that dataset's final checkpoint. Point *j* of a library's curve is
+then the mean across its datasets of the wall-clock at index *j* and of the AP at
+index *j*. Every point therefore averages the same datasets, and the last point is
+(mean total training time, mean final-checkpoint AP). A library writing exactly
+`--points` checkpoints per run is used without interpolation; one writing fewer
+(Mayaku's cadence is dataset-dependent, 20–30) is linearly interpolated onto the
+same index axis. One figure per size class, since nano and large live on very
+different time scales.
+
+Libraries finish different numbers of datasets while a benchmark is still running.
+`--intersection` restricts every library to the datasets all of them have, so the
+means cover identical data; without it each library is averaged over its own set.
 
 ## Resumability
 
@@ -131,10 +158,12 @@ Ctrl-C, or add datasets freely. Because checkpoints are purged per dataset once 
 
 | file | role |
 |---|---|
+| `run_all.py` | **the driver** — every (leg, variant, dataset) sequentially, one isolated subprocess per unit, resumable |
 | `run_{yolo,rfdetr,mayaku}.py` | **the whole leg** — variants × datasets, default train → shared scorer → purge |
 | `common.py` | dataset discovery, COCO→YOLO prep, val lookup, pycocotools scorer, curve/meta I/O |
-| `plot.py` | interpolate → aggregate across datasets → per-variant `curve_*.png` + `summary.csv` |
-| `plot_one.py`, `plot_series.py` | ad-hoc single-curve / hand-picked-series plots (take explicit `curve.csv` paths) |
+| `prefetch_weights.py` | pre-download every pretrained weight so no training unit stalls on a fetch |
+| `train_large.sh` | unattended wrapper: prefetch, then detach the driver for the large variant |
+| `plot.py` | align by training progress → mean curve per library → `curve_*.png`, `curve_points.csv`, `summary.csv` |
 
 ## Notes / to validate on the first real run
 
@@ -152,3 +181,19 @@ Ctrl-C, or add datasets freely. Because checkpoints are purged per dataset once 
 - **RTX 3060 (12 GB):** the large variants at default batch may be tight. That is the
   library's own auto-batch / default-batch behaviour — part of the honest benchmark,
   not something the scripts override.
+
+## Known-bad units
+
+These `<lib>/<variant>/<dataset>` combinations failed to produce a `curve.csv` and
+were skipped on the resume pass. `plot.py --intersection` drops them automatically,
+since it keeps only datasets every library has:
+
+```
+yolo/large/aerial-sheep
+yolo/large/gwhd2021
+yolo/large/orgharvest
+rfdetr/large/exploratorium-daphnia
+rfdetr/large/gwhd2021
+rfdetr/large/penguin-finder-seg
+```
+
