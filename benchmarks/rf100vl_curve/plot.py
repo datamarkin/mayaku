@@ -108,17 +108,19 @@ def _mean_curve(curves, points: int) -> tuple[np.ndarray, np.ndarray, np.ndarray
     return np.mean(ts, axis=0), aps.mean(axis=0), sem
 
 
-def _human(sec: float) -> str:
-    if sec < 120:
-        return f"{sec:.0f}s"
-    if sec < 7200:
-        return f"{sec / 60:.0f}m"
-    return f"{sec / 3600:.1f}h"
+def _plot(plt, curves: dict, labels: dict, band: dict | None, subtitle: str,
+          best: dict | None):
+    """Mean AP against mean wall-clock, one line per library.
 
-
-def _plot(plt, curves: dict, labels: dict, band: dict | None, subtitle: str):
-    """Mean AP against mean wall-clock, one line per library."""
+    ``best`` maps a library to (mean wall-clock of each dataset's own best
+    checkpoint, mean of those best APs). That point is built the same way as
+    every point on the line — mean x, mean y across datasets — but indexed by
+    each dataset's own argmax instead of a fixed progress fraction, so it sits
+    off the line: the mean of per-dataset maxima always exceeds the maximum of
+    the mean curve, because datasets peak at different times.
+    """
     fig, ax = plt.subplots(figsize=(9, 5.5))
+    ends = []
     for i, lib in enumerate(sorted(curves)):
         seconds, y = curves[lib]
         x = seconds / 60.0  # curves are computed in seconds; the axis reads in minutes
@@ -127,13 +129,36 @@ def _plot(plt, curves: dict, labels: dict, band: dict | None, subtitle: str):
         if band is not None:
             ax.fill_between(x, y - band[lib], y + band[lib], color=color, alpha=0.15, lw=0)
         ax.plot(x[-1], y[-1], "o", color=color, ms=6)
-        ax.annotate(f"{y[-1]:.3f} @ {_human(seconds[-1])}", (x[-1], y[-1]),
-                    textcoords="offset points", xytext=(7, 0), va="center",
-                    color=color, fontweight="bold", fontsize=9)
-    ax.set_xlim(left=0)
+        note = f"final: {y[-1]:.3f}"  # the endpoint dot already marks when
+        if best is not None:
+            bt, bap = best[lib]
+            ax.plot(bt / 60.0, bap, "*", color=color, ms=11,
+                    markerfacecolor="none", markeredgewidth=1.4)
+            note += f"\nbest: {bap:.3f}"  # the star already marks where
+        ends.append((x[-1], y[-1], note, color))
+
+    xmax = max(e[0] for e in ends)
+    ax.set_xlim(0, xmax * 1.20)   # room for the endpoint labels, which sit to the right
     ax.set_ylim(bottom=0)
     ax.set_xlabel("mean training wall-clock across datasets (min)")
     ax.set_ylabel("mean COCO AP @[.50:.95] across datasets")
+
+    # Endpoint labels overlap whenever two libraries finish at a similar AP, which is
+    # the normal case. Walk them from the highest down and push any that would collide
+    # far enough apart to stay legible, with a leader line back to the real point.
+    lo, hi = ax.get_ylim()
+    gap = (hi - lo) * (0.075 if best is not None else 0.045)
+    dx = ax.get_xlim()[1] * 0.015
+    placed = None
+    for x_end, y_end, note, color in sorted(ends, key=lambda e: -e[1]):
+        y_lab = y_end if placed is None else min(y_end, placed - gap)
+        placed = y_lab
+        ax.annotate(note, xy=(x_end, y_end), xytext=(x_end + dx, y_lab),
+                    textcoords="data", va="center", color=color,
+                    fontweight="bold", fontsize=9,
+                    arrowprops=dict(arrowstyle="-", lw=0.8, color=color, alpha=0.5,
+                                    shrinkA=0, shrinkB=3))
+
     # Line 1 states what is plotted; line 2 carries scope and method in smaller type.
     ax.set_title("RF100-VL: mean AP vs mean wall-clock", fontsize=12, pad=18)
     ax.text(0.5, 1.02, subtitle, transform=ax.transAxes, ha="center", va="bottom",
@@ -157,6 +182,9 @@ def main() -> None:
     p.add_argument("--first", type=int, default=None, metavar="N",
                    help="restrict to the first N datasets in sorted-name order — the "
                         "order the driver runs them; writes *_firstN")
+    p.add_argument("--no-best", action="store_true",
+                   help="omit the best-checkpoint marker (a star at the mean wall-clock "
+                        "and mean AP of each dataset's own best checkpoint)")
     p.add_argument("--band", action="store_true",
                    help="shade +/- 1 standard error of the mean AP across datasets")
     p.add_argument("--budgets", default="60,300,900,1800",
@@ -206,7 +234,7 @@ def main() -> None:
 
     point_rows, summary_rows = [], []
     for variant in sorted(present, key=_variant_key):
-        curves, bands, counts = {}, {}, {}
+        curves, bands, counts, bests = {}, {}, {}, {}
         names = keep[variant]
         for lib, by_dataset in sorted(loaded[variant].items()):
             values = [c for n, c in by_dataset.items() if names is None or n in names]
@@ -221,12 +249,19 @@ def main() -> None:
 
             totals = np.array([t[-1] for t, _ in values])
             finals = np.array([ap[-1] for _, ap in values])
+            # Each dataset's own best checkpoint — what a library that ships its
+            # best weights (Ultralytics best.pt, RF-DETR checkpoint_best) delivers.
+            bestap = np.array([ap.max() for _, ap in values])
+            bestt = np.array([t[ap.argmax()] for t, ap in values])
+            bests[lib] = (float(bestt.mean()), float(bestap.mean()))
             # A budget past the library's mean total time has no point on its curve.
             at_budget = ["" if b > x[-1] else f"{np.interp(b, x, y):.4f}" for b in budgets]
             summary_rows.append([
                 variant, lib, len(values), span,
                 f"{totals.mean():.1f}", f"{np.median(totals):.1f}",
-                f"{finals.mean():.4f}", f"{np.median(finals):.4f}", *at_budget,
+                f"{finals.mean():.4f}", f"{np.median(finals):.4f}",
+                f"{bestap.mean():.4f}", f"{np.median(bestap):.4f}", f"{bestt.mean():.1f}",
+                *at_budget,
             ])
             for j, (xj, yj) in enumerate(zip(x, y)):
                 point_rows.append([variant, lib, j, f"{xj:.1f}", f"{yj:.4f}", len(values)])
@@ -244,7 +279,8 @@ def main() -> None:
             labels = {lib: f"{lib}_{variant}  ({counts[lib]} {scope})" for lib in counts}
 
         if curves and plt is not None:
-            fig = _plot(plt, curves, labels, bands if args.band else None, subtitle)
+            fig = _plot(plt, curves, labels, bands if args.band else None, subtitle,
+                        None if args.no_best else bests)
             out = results / f"curve_{variant}{suffix}.png"
             fig.savefig(out, dpi=150)
             plt.close(fig)
@@ -263,6 +299,7 @@ def main() -> None:
         w = csv.writer(fh)
         w.writerow(["variant", "library", "n_datasets", "checkpoints_per_dataset",
                     "mean_total_s", "median_total_s", "mean_final_ap", "median_final_ap",
+                    "mean_best_ap", "median_best_ap", "mean_best_s",
                     *[f"mean_ap@{int(b)}s" for b in budgets]])
         w.writerows(summary_rows)
     print(f"wrote {summary_path}")
