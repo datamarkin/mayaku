@@ -42,7 +42,9 @@ jobs:
       # coreml + tensorrt are intentionally excluded — coremltools is
       # macOS-only and tensorrt requires CUDA. Both are listed in
       # `[[tool.mypy.overrides]]` with `ignore_missing_imports = true`.
-      - run: pip install -e '.[dev,onnx,openvino]'
+      # `typecheck` additionally pins torch/torchvision — mypy input, see the
+      # extra in pyproject.toml. The test matrix below deliberately omits it.
+      - run: pip install -e '.[dev,typecheck,onnx,openvino]'
       - run: mypy
 
   test:

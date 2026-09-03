@@ -71,6 +71,16 @@ dev = [
   "types-Pillow==10.2.0.20240822",
 ]
 
+# Same pin-don't-floor reason as `dev` above, extended to what mypy actually
+# reads: torch ships `py.typed`, so its inline annotations are mypy input
+# exactly like typeshed is, and pinning the checker but not torch pins half the
+# input. Separate from `dev` on purpose — the test matrix must keep resolving
+# current torch, which is what the `>=` floor is for.
+typecheck = [
+  "torch==2.14.0",
+  "torchvision==0.29.0",
+]
+
 [project.scripts]
 mayaku = "mayaku.cli.__main__:app"
 
