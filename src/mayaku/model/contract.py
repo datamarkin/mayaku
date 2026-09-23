@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
 
+from mayaku.model.blocks import as_canvas
 from mayaku.model.quant import fake_quant_disabled
 
 DEPLOY_OPS = {"Conv", "Relu", "Add", "Resize", "MaxPool"}
@@ -48,25 +49,27 @@ def assert_contract(path):
     return collections.Counter({k: v for k, v in inv.items() if k not in FOLDABLE_OPS})
 
 
-def export_onnx(model, path, imgsz, batch=1):
-    """Trace the (fused) detector to ONNX and assert the contract on the file.
+def export_onnx(model, path, canvas, batch=1):
+    """Trace the (fused) detector at a fixed (H, W) canvas to ONNX and assert
+    the contract on the file.
 
     Fake-quant is a train/eval simulation; the deploy graph is structural fp32
     (int8 is applied at runtime from the observed ranges).
     """
+    h, w = as_canvas(canvas)
     with fake_quant_disabled(model):
-        torch.onnx.export(model, torch.zeros(batch, 3, imgsz, imgsz), path,
+        torch.onnx.export(model, torch.zeros(batch, 3, h, w), path,
                           input_names=["images"], output_names=model.out_names,
                           opset_version=17, dynamo=False)
     return assert_contract(path)
 
 
-def count(model, imgsz=640):
-    """Parameters and FLOPs of the model as it stands (fuse it first for the
-    deploy graph)."""
+def count(model, canvas=640):
+    """Parameters and FLOPs of the model as it stands on an (H, W) canvas
+    (fuse it first for the deploy graph)."""
     counter = FlopCounterMode(display=False)
     with counter, torch.no_grad():
-        model(torch.zeros(1, 3, imgsz, imgsz))
+        model(torch.zeros(1, 3, *as_canvas(canvas)))
     return sum(p.numel() for p in model.parameters()), counter.get_total_flops()
 
 
@@ -81,12 +84,13 @@ def randomize_bn(model):
             m.bias.data.normal_(0, 0.1)
 
 
-def check_parity(model, imgsz):
-    """Assert the deploy graph computes the train graph, then that it is in
-    contract. Fuses `model` in place; returns (max error, logit scale,
-    compute-op inventory)."""
+def check_parity(model, canvas):
+    """Assert the deploy graph computes the train graph on an (H, W) canvas,
+    then that it is in contract. Fuses `model` in place; returns (max error,
+    logit scale, compute-op inventory)."""
+    canvas = as_canvas(canvas)
     randomize_bn(model)
-    x = torch.randn(1, 3, imgsz, imgsz)
+    x = torch.randn(1, 3, *canvas)
     model.eval()
     with torch.no_grad():
         ref = model(x)
@@ -97,5 +101,5 @@ def check_parity(model, imgsz):
     scale = max(r.abs().max().item() for r in ref)
     assert err < 1e-4 * max(scale, 1.0), "fusion is not exact: %.3e" % err
     with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
-        inv = export_onnx(model, f.name, imgsz)
+        inv = export_onnx(model, f.name, canvas)
     return err, scale, inv

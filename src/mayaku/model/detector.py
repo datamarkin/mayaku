@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from mayaku.model.aux import AuxBranch
 from mayaku.model.backbone import Backbone
-from mayaku.model.blocks import STRIDES, fuse_tree, per_level
+from mayaku.model.blocks import STRIDES, as_canvas, fuse_tree, per_level
 from mayaku.model.head import Head
 from mayaku.model.neck import FPG
 from mayaku.model.tiers import TIERS
@@ -13,14 +13,17 @@ from mayaku.model.tiers import TIERS
 class Detector(nn.Module):
     """`forward` returns a flat list of raw maps in `output_names` order: the
     head's six tensors first, then the auxiliary branch's. Flat because
-    exporters name outputs positionally; `split` gives the named view."""
+    exporters name outputs positionally; `split` gives the named view.
 
-    def __init__(self, cfg, nc=80):
+    The graph runs on any canvas whose sides are multiples of 32; `canvas`
+    only sets the classifier's initial object prior (`Head.bias_init`)."""
+
+    def __init__(self, cfg, nc=80, canvas=640):
         super().__init__()
         self.cfg, self.nc = cfg, nc
         self.backbone = Backbone(cfg)
         self.neck = FPG(cfg.width, cfg.neck, cfg.paths)
-        self.head = Head(cfg.neck, nc, reg_max=cfg.reg_max,
+        self.head = Head(cfg.neck, nc, as_canvas(canvas), reg_max=cfg.reg_max,
                          n_conv=cfg.head_conv, width=cfg.head_width)
         self.aux = None
         if cfg.seg or cfg.kpt:

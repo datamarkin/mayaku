@@ -27,7 +27,7 @@ class Head(Fusible):
     run on the host after the graph.
     """
 
-    def __init__(self, ch, nc, reg_max=16, n_conv=2, width=0):
+    def __init__(self, ch, nc, canvas, reg_max=16, n_conv=2, width=0):
         super().__init__()
         nl = len(STRIDES)
         chs = per_level(ch, nl)
@@ -48,20 +48,22 @@ class Head(Fusible):
         self.box_tower = tower()
         self.cls = nn.ModuleList(nn.Conv2d(ws[lv], nc, 1) for lv in range(nl))
         self.box = nn.ModuleList(nn.Conv2d(ws[lv], 4 * reg_max, 1) for lv in range(nl))
-        self.bias_init(nc)
+        self.bias_init(nc, canvas)
 
-    def bias_init(self, nc, imgsz=640, objects=5):
+    def bias_init(self, nc, canvas, objects=5):
         """Start the classifier at the prior probability of an object.
 
         Without this the first steps are spent pushing several hundred
         thousand negative logits down from 0.5, which makes the
         classification term orders of magnitude larger than the box term. A
-        level with (imgsz/stride)^2 cells expects `objects / nc` of them to be
-        positive, so that ratio is the bias. RetinaNet's fixed 0.01 prior is
-        the same idea without the per-level density term.
+        level with (H/stride)(W/stride) cells on the (H, W) canvas expects
+        `objects / nc` of them to be positive, so that ratio is the bias.
+        RetinaNet's fixed 0.01 prior is the same idea without the per-level
+        density term.
         """
+        h, w = canvas
         for cls, box, s in zip(self.cls, self.box, STRIDES):
-            nn.init.constant_(cls.bias, math.log(objects / nc / (imgsz / s) ** 2))
+            nn.init.constant_(cls.bias, math.log(objects / nc / ((h / s) * (w / s))))
             nn.init.constant_(box.bias, 1.0)
 
     def towers(self, xs):

@@ -9,9 +9,10 @@ import pytest
 import torch
 
 from mayaku.model import STRIDES, TIERS, TINY, Detector, check_parity, enable_qat, load_weights
+from mayaku.model.blocks import as_canvas
 from mayaku.model.contract import DEPLOY_OPS, count, export_onnx
 
-pytest.importorskip("onnx")
+onnx = pytest.importorskip("onnx")
 
 SEG_KPT = dataclasses.replace(TINY, seg=True, kpt=3)
 
@@ -57,12 +58,35 @@ def test_output_layout() -> None:
         assert g["head"][2 * i].shape == (1, 4, 128 // s, 96 // s)
 
 
-def test_fused_export_in_contract(tmp_path) -> None:
+@pytest.mark.parametrize("canvas", [128, (96, 160), (160, 96)])
+def test_fused_export_in_contract(tmp_path, canvas) -> None:
     m = Detector(TINY, 4).fuse()
-    params, flops = count(m, 128)
+    params, flops = count(m, canvas)
     assert params > 0 and flops > 0
-    inv = export_onnx(m, str(tmp_path / "tiny.onnx"), 128)
+    inv = export_onnx(m, str(tmp_path / "tiny.onnx"), canvas)
     assert set(inv) <= DEPLOY_OPS
+    dims = onnx.load(str(tmp_path / "tiny.onnx")).graph.input[0].type.tensor_type.shape.dim
+    assert [d.dim_value for d in dims] == [1, 3, *as_canvas(canvas)]
+
+
+def test_fuse_parity_on_a_rectangular_canvas() -> None:
+    err, scale, inv = check_parity(Detector(SEG_KPT, 4), (96, 160))
+    assert err < 1e-4 * max(scale, 1.0) and set(inv) <= DEPLOY_OPS
+
+
+def test_canvas_must_divide_by_the_coarsest_stride() -> None:
+    for bad in (100, (96, 100), (0, 32)):
+        with pytest.raises(AssertionError, match="multiples of 32"):
+            as_canvas(bad)
+    assert as_canvas(64) == (64, 64) and as_canvas((96, 160)) == (96, 160)
+
+
+def test_object_prior_follows_the_canvas() -> None:
+    """A canvas with the same cell count gives the same prior, whatever its shape."""
+    square = Detector(TINY, 4, 640).head.cls[0].bias
+    rect = Detector(TINY, 4, (320, 1280)).head.cls[0].bias
+    assert torch.equal(square, rect)
+    assert (Detector(TINY, 4, 320).head.cls[0].bias > square).all()
 
 
 def test_qat_export_stays_in_contract(tmp_path) -> None:
