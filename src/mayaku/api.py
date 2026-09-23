@@ -23,6 +23,7 @@ the final evaluation goes to ``eval/metrics.json``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from collections.abc import Callable, Mapping
@@ -31,10 +32,19 @@ from typing import Any
 
 import torch
 
-from mayaku.backends.device import Device
+from mayaku.backends.device import DeviceKind
 from mayaku.config import MayakuConfig, dump_yaml, merge_overrides, read_yaml
 from mayaku.data import CocoDetection
-from mayaku.data.coco import load_coco
+from mayaku.data.coco import CocoLabels, load_coco
+from mayaku.engine.distributed import (
+    broadcast_from_main,
+    get_world_size,
+    init_from_env_if_needed,
+    is_main_process,
+    launch,
+    local_device,
+    resolve_ddp_device,
+)
 from mayaku.engine.evaluation import evaluate_runner
 from mayaku.engine.trainer import load_state
 from mayaku.engine.trainer import train as run
@@ -94,6 +104,13 @@ def train(
     checkpoint through the deploy path (`evaluate`) at the end. Without
     them it trains blind and ``last.pt`` is the result.
 
+    ``num_gpus`` > 1 trains on that many GPUs of this machine, one process
+    each (``device="cpu"`` runs the ranks on the CPU, for testing). Under
+    ``torchrun`` (multi-node) every process calls this, ``num_gpus`` stays 1,
+    and every process returns rank 0's result. The
+    recipe's ``batch`` is the global batch, so the GPU count never changes
+    what is trained: each GPU takes ``batch / GPUs`` images a step.
+
     ``resume`` continues an interrupted run from its ``state.pt`` (or the
     run's ``train/`` directory). The config comes from the state, so
     ``config``, ``weights``, ``size_budget``, ``num_epochs`` and
@@ -114,9 +131,15 @@ def train(
         _check_split(*val)
     elif (val_annotations, val_images) != (None, None):
         raise ValueError("val_annotations and val_images go together")
-    if num_gpus != 1:
-        raise NotImplementedError("multi-GPU training is not available yet; use num_gpus=1")
-    device = Device.resolve(device)
+    # Under torchrun every process runs this call and joins the group here;
+    # spawned ranks (num_gpus) start below, once the config and data are resolved.
+    dev = resolve_ddp_device(device, num_gpus)
+    init_from_env_if_needed(dev)
+    if get_world_size() > 1 and num_gpus != 1:
+        raise ValueError("under torchrun the process count is torchrun's; leave num_gpus=1")
+    world = max(num_gpus, get_world_size())
+    if not is_main_process():
+        log = _quiet
 
     state = None
     if resume is not None:
@@ -152,37 +175,39 @@ def train(
     elif resumed["class_names"] != coco.class_names:
         raise ValueError(f"{train_annotations} is not the dataset this run was training on")
 
+    if cfg.train.batch % world:          # the trainer checks too; this fails before spawning
+        raise ValueError(f"train.batch {cfg.train.batch} does not split over {world} GPUs; "
+                         f"use a multiple of {world}")
     canvas = cfg.input.canvas
-    train_ds = CocoDetection(str(train_images), str(train_annotations), canvas,
-                             aug=cfg.train.aug, seed=cfg.train.seed, coco=coco, **labels)
-    val_ds = None
-    if val:
-        val_ann, val_img = val
-        val_ds = CocoDetection(str(val_img), str(val_ann), canvas, **labels)
-    model = cfg.model.build(canvas)
-    if pretrained is not None:
-        info = load_pretrained(model, pretrained)
-        if info["reinitialised"]:
-            log(f"[mayaku.train] classifier re-initialised for {model.nc} classes")
-
     train_dir = run_dir / "train"
-    train_dir.mkdir(parents=True, exist_ok=True)
-    dump_yaml(cfg, train_dir / "config.yaml")
-    sidecar = build_sidecar(cfg, coco.class_names, model)
-    log(f"[mayaku.train] tier {cfg.model.tier}, {model.nc} classes, canvas {canvas[0]}x"
-        f"{canvas[1]}, {cfg.train.epochs} epochs on {device} -> {train_dir}")
+    job = _Job(cfg, coco, train_images, train_annotations, val, pretrained, state,
+               train_dir, dev.kind)
+    device = local_device(dev.kind)
+    if is_main_process():
+        train_dir.mkdir(parents=True, exist_ok=True)
+        dump_yaml(cfg, train_dir / "config.yaml")
+    per_gpu = f", {world} GPUs x {cfg.train.batch // world}" if world > 1 else ""
+    log(f"[mayaku.train] tier {cfg.model.tier}, {len(coco.cat_ids)} classes, canvas "
+        f"{canvas[0]}x{canvas[1]}, {cfg.train.epochs} epochs, batch {cfg.train.batch}"
+        f"{per_gpu} on {dev.kind} -> {train_dir}")
 
     t0 = time.time()
-    best, _, _ = run(model, train_ds, val_ds, cfg.train, device=device, out=str(train_dir),
-                     workers=cfg.dataloader.num_workers, log=log, sidecar=sidecar, resume=state)
+    if num_gpus > 1:
+        launch(_run_job, num_gpus, device=dev, args=(job,))
+    else:
+        _run_job(job, log)
     train_seconds = time.time() - t0
+    if not is_main_process():
+        return broadcast_from_main({})            # rank 0's result, once it has one
+    best_path = train_dir / "best.json"
+    best = json.loads(best_path.read_text()) if best_path.exists() else None
     final_weights = select_final_weights(train_dir)
     log(f"[mayaku.train] done in {train_seconds / 3600:.2f}h; final weights {final_weights}")
 
     metrics, eval_seconds = None, None
     if val:
         t0 = time.time()
-        metrics = evaluate(final_weights, annotations=val_ann, images=val_img,
+        metrics = evaluate(final_weights, annotations=val[0], images=val[1],
                            output_dir=run_dir / "eval", device=device)
         eval_seconds = time.time() - t0
         log(f"[mayaku.train] box AP {metrics['AP']:.4f}")
@@ -196,6 +221,7 @@ def train(
         "qat": cfg.model.qat_enabled,
         "epochs": cfg.train.epochs,
         "batch": cfg.train.batch,
+        "world_size": world,
         "lr": cfg.train.lr,
         "final_weights": str(final_weights),
         "best": best,
@@ -208,7 +234,7 @@ def train(
         "device_name": torch.cuda.get_device_name(device) if cuda else None,
     }
     (train_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
-    return {
+    return broadcast_from_main({
         "final_weights": final_weights,
         "output_dir": run_dir,
         "metrics": metrics,
@@ -216,7 +242,7 @@ def train(
         "train_seconds": train_seconds,
         "eval_seconds": eval_seconds,
         "metadata": metadata,
-    }
+    })
 
 
 def evaluate(
@@ -264,6 +290,53 @@ def _resolve_model(
         return MayakuConfig(), stem, set(), None
     # The checkpoint defines the network; the data and this run define the rest.
     return MayakuConfig(model=ckpt_cfg.model.architecture()), stem, set(), pretrained
+
+
+@dataclasses.dataclass
+class _Job:
+    """What each training rank needs: the resolved config and the parsed
+    training labels (sent to spawned ranks, not re-parsed), the splits, the
+    warm-start or resume state, and where to write."""
+
+    cfg: MayakuConfig
+    coco: CocoLabels
+    train_images: Path
+    train_annotations: Path
+    val: tuple[Path, Path] | None
+    pretrained: dict[str, Any] | None
+    state: dict[str, Any] | None
+    train_dir: Path
+    device_kind: DeviceKind
+
+
+def _run_job(job: _Job, log: Callable[[str], None] = print) -> None:
+    """Build the datasets and the model and train: the part every rank runs.
+    Only rank 0 evaluates and writes, so only it reads the validation split
+    and describes the checkpoints."""
+    cfg, main = job.cfg, is_main_process()
+    if not main:
+        log = _quiet
+    kp = cfg.model.keypoints
+    labels: dict[str, Any] = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0)
+    canvas = cfg.input.canvas
+    train_ds = CocoDetection(str(job.train_images), str(job.train_annotations), canvas,
+                             aug=cfg.train.aug, seed=cfg.train.seed, coco=job.coco, **labels)
+    val_ds = None
+    if job.val and main:
+        val_ds = CocoDetection(str(job.val[1]), str(job.val[0]), canvas, **labels)
+    model = cfg.model.build(canvas)
+    if job.pretrained is not None:
+        info = load_pretrained(model, job.pretrained)
+        if info["reinitialised"]:
+            log(f"[mayaku.train] classifier re-initialised for {model.nc} classes")
+    run(model, train_ds, val_ds, cfg.train, device=local_device(job.device_kind),
+        out=str(job.train_dir), workers=cfg.dataloader.num_workers, log=log,
+        sidecar=build_sidecar(cfg, job.coco.class_names, model) if main else None,
+        resume=job.state)
+
+
+def _quiet(*_: Any) -> None:
+    """The log of a rank other than 0."""
 
 
 def _check_split(annotations: Path, images: Path) -> None:
