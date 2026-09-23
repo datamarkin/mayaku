@@ -1,4 +1,4 @@
-"""Unit tests for :func:`mayaku.cli._weights.resolve_weights`.
+"""Unit tests for :func:`mayaku.utils.download.resolve_weights`.
 
 Local-first, then model name: an existing file wins (cwd-relative); otherwise the
 argument is a model name (a trailing ``.pth`` is cosmetic) resolved via the hub.
@@ -12,9 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from mayaku.cli import _weights
-from mayaku.cli._weights import resolve_weights
-from mayaku.utils.download import DownloadError
+from mayaku.utils import download as _weights
+from mayaku.utils.download import DownloadError, resolve_weights
 
 
 @pytest.fixture
@@ -29,10 +28,6 @@ def capture_fetch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     monkeypatch.setattr(_weights, "download_model", fake_download)
     monkeypatch.chdir(tmp_path)
     return calls
-
-
-def test_none_returns_none() -> None:
-    assert resolve_weights(None) is None
 
 
 # --- local file wins --------------------------------------------------------

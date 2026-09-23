@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+from mayaku.backends.device import Device
 from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import SUFFIX_TO_TARGET
 from mayaku.inference.runner import Runner
@@ -23,11 +24,7 @@ class Predictor(Runner):
 
     def __init__(self, model: torch.nn.Module, sidecar: Mapping[str, Any], device: str = "auto"):
         super().__init__(sidecar, "Predictor")
-        if device == "auto":
-            from mayaku.backends.device import Device
-
-            device = Device.auto().kind
-        self.device = torch.device(device)
+        self.device = torch.device(Device.resolve(device))
         self.model = model.for_deploy().to(self.device)
 
     @classmethod

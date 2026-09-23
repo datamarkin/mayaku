@@ -217,17 +217,13 @@ def download_model(
     return local
 
 
-def resolve_weights(weights: str | Path | None) -> Path | None:
+def resolve_weights(weights: str | Path) -> Path:
     """Return a real ``Path`` for ``weights``.
 
-    * ``None`` → ``None`` (caller decides whether weights are required).
     * An existing local file → that path (cwd-relative).
     * Otherwise a model name → downloaded to ``./<name>.pth`` via
       :func:`download_model` (which treats a trailing ``.pth`` as cosmetic).
     """
-    if weights is None:
-        return None
-
     p = Path(weights)
     if p.exists():  # a local file wins — a path, or an already-downloaded model
         return p

@@ -126,6 +126,12 @@ class Device:
             torch.mps.synchronize()
 
     @classmethod
+    def resolve(cls, setting: str) -> str:
+        """A device setting as torch spells it: "auto" becomes the best
+        available backend (`auto`), anything else passes through."""
+        return cls.auto().kind if setting == "auto" else setting
+
+    @classmethod
     def auto(cls) -> Device:
         """Pick the best available accelerator: CUDA → MPS → CPU."""
         if torch.cuda.is_available():
