@@ -1,54 +1,30 @@
-"""Typed configuration layer (pydantic v2) for Mayaku.
+"""Typed configuration (pydantic v2): `MayakuConfig` and YAML round-trip.
 
-Replaces Detectron2's ``CfgNode`` / ``LazyConfig`` machinery with
-explicit dataclass-style schemas. See :mod:`mayaku.config.schemas` for
-the model definitions and :mod:`mayaku.config.io` for YAML round-trip and
-override merging.
+See :mod:`mayaku.config.schemas` for the models and :mod:`mayaku.config.io`
+for YAML load / dump and override merging.
 """
 
 from __future__ import annotations
 
 from mayaku.config.io import dump_yaml, load_yaml, merge_overrides, to_yaml_string
 from mayaku.config.schemas import (
-    AnchorGeneratorConfig,
     AutoConfig,
-    BackboneConfig,
-    BackboneName,
     DataLoaderConfig,
-    DeviceSetting,
-    FPNConfig,
     InputConfig,
+    KeypointConfig,
     MayakuConfig,
-    MetaArchitecture,
     ModelConfig,
-    ROIBoxHeadConfig,
-    ROIHeadsConfig,
-    ROIKeypointHeadConfig,
-    ROIMaskHeadConfig,
-    RPNConfig,
-    SolverConfig,
-    TestConfig,
+    TierName,
 )
 
 __all__ = [
-    "AnchorGeneratorConfig",
     "AutoConfig",
-    "BackboneConfig",
-    "BackboneName",
     "DataLoaderConfig",
-    "DeviceSetting",
-    "FPNConfig",
     "InputConfig",
+    "KeypointConfig",
     "MayakuConfig",
-    "MetaArchitecture",
     "ModelConfig",
-    "ROIBoxHeadConfig",
-    "ROIHeadsConfig",
-    "ROIKeypointHeadConfig",
-    "ROIMaskHeadConfig",
-    "RPNConfig",
-    "SolverConfig",
-    "TestConfig",
+    "TierName",
     "dump_yaml",
     "load_yaml",
     "merge_overrides",

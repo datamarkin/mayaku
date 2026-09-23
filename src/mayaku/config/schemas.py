@@ -1,990 +1,144 @@
-"""Typed configuration schemas for Mayaku.
+"""Typed configuration for mayaku v3.
 
-Pydantic v2 models replace Detectron2's `CfgNode` (`config/defaults.py`)
-and `LazyConfig` machinery. The design follows the recommendation from
-`DETECTRON2_TECHNICAL_SPEC.md` §9.1: defaults live with the type, no
-600-line monolithic ``defaults.py``, no string-based registry indirection
-in the schema (architecture choice is a typed ``Literal``, not the
-``"build_resnet_fpn_backbone"`` factory-name string the legacy YAML used).
+One `MayakuConfig` describes a model and how it is trained: which tier with
+which heads (`model`), the input canvas (`input`), the training recipe
+(`train`), data loading (`dataloader`) and dataset-aware auto-tuning
+(`auto_config`). It is what a run writes next to its weights and what every
+checkpoint and exported artifact embeds, so a model can always be rebuilt
+from its own files.
 
-What this file pins down explicitly relative to the spec / portability
-report:
+`train` is the engine's own `mayaku.engine.trainer.Recipe` dataclass,
+validated in place rather than restated as a second schema, so the recipe's
+defaults live in exactly one place.
 
-* **RGB pixel mean and std** (per ADR 002,
-  ``docs/decisions/002-rgb-native-image-ingestion.md``). Detectron2's
-  defaults are BGR; we are not inheriting them. There is no
-  ``INPUT.FORMAT`` knob — channel order is a contract, not a setting.
-* **No rotated boxes**, **no deformable convolution**. Both are out of
-  scope for v1 (`BACKEND_PORTABILITY_REPORT.md` §3, ADR 001).
-* **Device default is ``"auto"``**, not ``"cuda"``. The legacy
-  ``MODEL.DEVICE = "cuda"`` (see ``BACKEND_PORTABILITY_REPORT.md`` §4)
-  would break anyone running on MPS; ``"auto"`` resolves through
-  :meth:`mayaku.backends.device.Device.auto` at construction time.
-* **Training length is in epochs.** ``SolverConfig.num_epochs`` sets the
-  number of passes over the dataset; the engine resolves it to an iteration
-  count at train time, and the LR follows a single warmup→cosine decay.
-
-All models are frozen and reject unknown fields. Use
-``model.model_copy(update={...})`` to derive a variant.
+All models are frozen and reject unknown fields; derive a variant with
+`model_copy(update={...})` or `mayaku.config.merge_overrides`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from mayaku.backends.device import DeviceKind
+from mayaku.engine.trainer import Recipe
+from mayaku.model import Detector, enable_qat
+from mayaku.model.blocks import as_canvas
+from mayaku.model.tiers import QAT_TIERS, TIERS, Tier
 
 __all__ = [
-    "AnchorGeneratorConfig",
     "AutoConfig",
-    "BackboneConfig",
-    "BackboneName",
     "DataLoaderConfig",
-    "DeviceSetting",
-    "FPNConfig",
     "InputConfig",
+    "KeypointConfig",
     "MayakuConfig",
-    "MetaArchitecture",
     "ModelConfig",
-    "ROIBoxHeadConfig",
-    "ROIHeadsConfig",
-    "ROIKeypointHeadConfig",
-    "ROIMaskHeadConfig",
-    "RPNConfig",
-    "SolverConfig",
-    "TestConfig",
-    "UniQueryHeadConfig",
-    "UniQueryKeypointConfig",
-    "UniQueryMaskConfig",
+    "TierName",
 ]
 
-BackboneName = Literal[
-    "resnet50",
-    "resnet101",
-    "resnext101_32x8d",
-    # ConvNeXt variants. Atto/Femto/Pico/Nano use V2 size configs with
-    # V1-style blocks (no GRN). Tiny/Small/Base/Large are torchvision's
-    # reference.
-    "convnext_atto",
-    "convnext_femto",
-    "convnext_pico",
-    "convnext_nano",
-    "convnext_tiny",
-    "convnext_small",
-    "convnext_base",
-    "convnext_large",
-]
-MetaArchitecture = Literal["faster_rcnn", "mask_rcnn", "keypoint_rcnn", "uniquery"]
-DeviceSetting = Literal["cpu", "mps", "cuda", "auto"]
+TierName = Literal["n", "s", "m", "l"]
 
 
 class _BaseModel(BaseModel):
     """Shared pydantic config: immutable, strict, validate defaults."""
 
-    model_config = ConfigDict(
-        frozen=True,
-        extra="forbid",
-        validate_default=True,
-    )
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_default=True)
 
 
-# ---------------------------------------------------------------------------
-# Backbone + neck
-# ---------------------------------------------------------------------------
+class KeypointConfig(_BaseModel):
+    """Keypoints per instance, and their names and left/right flip pairs as
+    the training annotations define them (the dataset derives the pairs from
+    the names). The OKS falloff constants are the model's own
+    (`mayaku.model.kpt.sigmas`), not configuration."""
 
-
-class BackboneConfig(_BaseModel):
-    """Backbone selection + stem/freezing knobs.
-
-    Architecture-specific shape (e.g. ResNeXt's ``num_groups=32`` /
-    ``width_per_group=8`` / ``stride_in_1x1=False`` from the FAIR C2
-    pre-trained checkpoint, see
-    `DETECTRON2_TECHNICAL_SPEC.md` §2.1) is keyed off ``name`` rather
-    than carried as separate fields — Step 7 will translate this into
-    the actual module construction.
-
-    The same config covers ResNet/ResNeXt and ConvNeXt variants;
-    a model-validator rejects field combinations that don't apply to
-    the chosen architecture (e.g. ``stride_in_1x1`` only makes sense
-    for ResNets).
-    """
-
-    name: BackboneName = "resnet50"
-    norm: Literal["FrozenBN", "BN", "GN", "SyncBN"] = "FrozenBN"
-    freeze_at: Annotated[int, Field(ge=0, le=5)] = 2
-    stem_out_channels: Annotated[int, Field(gt=0)] = 64
-    res5_dilation: Literal[1, 2] = 1
-    # Where the stride-2 sits inside the first bottleneck of res3/res4/res5.
-    # torchvision (and Mayaku's default) puts it on the 3x3 conv. Detectron2's
-    # MSRA-pretrained model zoo (e.g. faster_rcnn_R_50_FPN_3x) puts it on the
-    # 1x1 conv — loading those weights with the default placement silently
-    # produces wrong activations (same shapes, identical kernels, different
-    # downsampling step). Flip this to True when loading D2 model-zoo weights.
-    stride_in_1x1: bool = False
+    num: Annotated[int, Field(gt=0)]
+    names: tuple[str, ...] = ()
+    flip_pairs: tuple[tuple[int, int], ...] = ()
 
     @model_validator(mode="after")
-    def _check_arch_specific_fields(self) -> BackboneConfig:
-        # Naming convention: ConvNeXt variants are exactly those whose
-        # name starts with ``convnext_`` (BackboneName Literal enforces
-        # the closed set). Same predicate as ``is_convnext_variant`` —
-        # they're kept in sync by the convention, not a shared table.
-        is_convnext = self.name.startswith("convnext_")
-        if is_convnext:
-            # ConvNeXt uses LayerNorm exclusively — the BN-family knobs are
-            # nonsense for it. We don't silently ignore them because that
-            # masks user error; we reject any non-default value.
-            if self.norm != "FrozenBN":
-                raise ValueError(
-                    f"backbone.norm={self.norm!r} only applies to ResNet variants; "
-                    f"ConvNeXt uses LayerNorm intrinsically. Remove the field or "
-                    f"leave it at the default 'FrozenBN'."
-                )
-            if self.stride_in_1x1:
-                raise ValueError(
-                    "backbone.stride_in_1x1=True only applies to ResNet variants "
-                    "loading Detectron2 MSRA-pretrained weights; ConvNeXt has no "
-                    "bottleneck to relocate the stride within."
-                )
-            if self.res5_dilation != 1:
-                raise ValueError("backbone.res5_dilation only applies to ResNet variants.")
+    def _lengths_match(self) -> KeypointConfig:
+        if self.names and len(self.names) != self.num:
+            raise ValueError(f"keypoints.names has {len(self.names)} entries for {self.num} keypoints")
+        if any(not (0 <= a < self.num and 0 <= b < self.num) for a, b in self.flip_pairs):
+            raise ValueError(f"keypoints.flip_pairs index out of range for {self.num} keypoints")
         return self
-
-
-class FPNConfig(_BaseModel):
-    in_features: tuple[str, ...] = ("res2", "res3", "res4", "res5")
-    out_channels: Annotated[int, Field(gt=0)] = 256
-    norm: str = ""  # empty string == no norm, matching upstream defaults
-    fuse_type: Literal["sum", "avg"] = "sum"
-
-
-# ---------------------------------------------------------------------------
-# Anchors / RPN
-# ---------------------------------------------------------------------------
-
-
-class AnchorGeneratorConfig(_BaseModel):
-    """Per-FPN-level anchor sizes and shared aspect ratios.
-
-    The default ``sizes`` ladder ``((32,), (64,), (128,), (256,), (512,))``
-    is the FPN convention from `DETECTRON2_TECHNICAL_SPEC.md` §2.3 — one
-    anchor scale per level so each level handles a single object size
-    band. Aspect ratios are shared across levels.
-    """
-
-    sizes: tuple[tuple[int, ...], ...] = ((32,), (64,), (128,), (256,), (512,))
-    aspect_ratios: tuple[tuple[float, ...], ...] = ((0.5, 1.0, 2.0),)
-    offset: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
-
-
-class RPNConfig(_BaseModel):
-    """Region proposal network knobs (`DETECTRON2_TECHNICAL_SPEC.md` §2.3)."""
-
-    in_features: tuple[str, ...] = ("p2", "p3", "p4", "p5", "p6")
-    pre_nms_topk_train: Annotated[int, Field(gt=0)] = 2000
-    pre_nms_topk_test: Annotated[int, Field(gt=0)] = 1000
-    # 1000 matches detectron2's `Base-RCNN-FPN.yaml` (POST_NMS_TOPK_TRAIN: 1000).
-    # The 2000 in detectron2's `defaults.py` is the legacy non-FPN value;
-    # the FPN base config overrides it. Feeding 2× as many proposals to
-    # the ROI heads doubles the low-IoU clutter in the negative-sample
-    # pool and biases the ROI cls head toward learning "background" from
-    # noisy proposals.
-    post_nms_topk_train: Annotated[int, Field(gt=0)] = 1000
-    post_nms_topk_test: Annotated[int, Field(gt=0)] = 1000
-    nms_thresh: Annotated[float, Field(gt=0.0, le=1.0)] = 0.7
-    min_box_size: Annotated[float, Field(ge=0.0)] = 1e-5
-    iou_thresholds: tuple[float, float] = (0.3, 0.7)
-    iou_labels: tuple[int, int, int] = (0, -1, 1)
-    batch_size_per_image: Annotated[int, Field(gt=0)] = 256
-    positive_fraction: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
-    bbox_reg_weights: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
-    smooth_l1_beta: Annotated[float, Field(ge=0.0)] = 0.0
-    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
-    box_reg_loss_type: Literal["smooth_l1", "giou"] = "smooth_l1"
-
-    @model_validator(mode="after")
-    def _check_iou_thresholds(self) -> RPNConfig:
-        lo, hi = self.iou_thresholds
-        if not 0.0 <= lo < hi <= 1.0:
-            raise ValueError(f"RPN.iou_thresholds must satisfy 0 <= lo < hi <= 1; got ({lo}, {hi})")
-        return self
-
-
-# ---------------------------------------------------------------------------
-# ROI heads
-# ---------------------------------------------------------------------------
-
-
-class ROIBoxHeadConfig(_BaseModel):
-    """FastRCNNConvFCHead + box predictor (`DETECTRON2_TECHNICAL_SPEC.md` §3.4)."""
-
-    pooler_resolution: Annotated[int, Field(gt=0)] = 7
-    pooler_sampling_ratio: Annotated[int, Field(ge=0)] = 0
-    num_conv: Annotated[int, Field(ge=0)] = 0
-    conv_dim: Annotated[int, Field(gt=0)] = 256
-    num_fc: Annotated[int, Field(ge=0)] = 2
-    fc_dim: Annotated[int, Field(gt=0)] = 1024
-    bbox_reg_weights: tuple[float, float, float, float] = (10.0, 10.0, 5.0, 5.0)
-    smooth_l1_beta: Annotated[float, Field(ge=0.0)] = 0.0
-    box_reg_loss_type: Literal["smooth_l1", "giou"] = "smooth_l1"
-    cls_agnostic_bbox_reg: bool = False
-
-
-class ROIMaskHeadConfig(_BaseModel):
-    """MaskRCNNConvUpsampleHead (`DETECTRON2_TECHNICAL_SPEC.md` §3.5)."""
-
-    pooler_resolution: Annotated[int, Field(gt=0)] = 14
-    pooler_sampling_ratio: Annotated[int, Field(ge=0)] = 0
-    num_conv: Annotated[int, Field(gt=0)] = 4
-    conv_dim: Annotated[int, Field(gt=0)] = 256
-    cls_agnostic_mask: bool = False
-    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
-
-
-class ROIKeypointHeadConfig(_BaseModel):
-    """KRCNNConvDeconvUpsampleHead (`DETECTRON2_TECHNICAL_SPEC.md` §3.6).
-
-    ``flip_indices`` is the permutation used by horizontal-flip
-    augmentation (Step 4 / Step 6) so left/right keypoints swap
-    semantics correctly. It is dataset-specific; the COCO 17-keypoint
-    convention is the upstream default and is set by
-    :meth:`with_coco_person_keypoints`.
-    """
-
-    pooler_resolution: Annotated[int, Field(gt=0)] = 14
-    pooler_sampling_ratio: Annotated[int, Field(ge=0)] = 0
-    conv_dims: tuple[int, ...] = (512,) * 8
-    num_keypoints: Annotated[int, Field(gt=0)] = 17
-    min_keypoints_per_image: Annotated[int, Field(ge=0)] = 1
-    normalize_loss_by_visible_keypoints: bool = True
-    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
-    flip_indices: tuple[int, ...] | None = None
-
-    @model_validator(mode="after")
-    def _check_flip_indices(self) -> ROIKeypointHeadConfig:
-        if self.flip_indices is not None:
-            k = self.num_keypoints
-            if len(self.flip_indices) != k:
-                raise ValueError(
-                    f"flip_indices must have length num_keypoints={k}; "
-                    f"got length {len(self.flip_indices)}"
-                )
-            if sorted(self.flip_indices) != list(range(k)):
-                raise ValueError("flip_indices must be a permutation of range(num_keypoints)")
-        return self
-
-    @classmethod
-    def with_coco_person_keypoints(cls) -> ROIKeypointHeadConfig:
-        """COCO Person Keypoints flip-pair convention (17 keypoints).
-
-        Order: nose, eye_l, eye_r, ear_l, ear_r, shoulder_l, shoulder_r,
-        elbow_l, elbow_r, wrist_l, wrist_r, hip_l, hip_r, knee_l, knee_r,
-        ankle_l, ankle_r. Pairs are swapped on horizontal flip.
-        """
-        return cls(
-            num_keypoints=17,
-            flip_indices=(0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15),
-        )
-
-
-class ROIHeadsConfig(_BaseModel):
-    """StandardROIHeads dispatcher knobs (`DETECTRON2_TECHNICAL_SPEC.md` §3.3)."""
-
-    in_features: tuple[str, ...] = ("p2", "p3", "p4", "p5")
-    num_classes: Annotated[int, Field(gt=0)] = 80
-    batch_size_per_image: Annotated[int, Field(gt=0)] = 512
-    positive_fraction: Annotated[float, Field(gt=0.0, le=1.0)] = 0.25
-    iou_thresholds: tuple[float, ...] = (0.5,)
-    iou_labels: tuple[int, ...] = (0, 1)
-    score_thresh_test: Annotated[float, Field(ge=0.0, le=1.0)] = 0.05
-    nms_thresh_test: Annotated[float, Field(gt=0.0, le=1.0)] = 0.5
-    proposal_append_gt: bool = True
-
-    @model_validator(mode="after")
-    def _check_iou_label_arity(self) -> ROIHeadsConfig:
-        # Detectron2 invariant (matcher.py): len(iou_labels) == len(iou_thresholds) + 1.
-        if len(self.iou_labels) != len(self.iou_thresholds) + 1:
-            raise ValueError(
-                "ROIHeads.iou_labels must have one more element than "
-                f"iou_thresholds; got {len(self.iou_labels)} labels for "
-                f"{len(self.iou_thresholds)} thresholds"
-            )
-        return self
-
-
-# ---------------------------------------------------------------------------
-# UniQuery head
-# ---------------------------------------------------------------------------
-
-
-class UniQueryHeadConfig(_BaseModel):
-    """UniQuery iterative dynamic head configuration.
-
-    Implements a set-prediction detector with learned proposals that
-    iteratively refine via self-attention and dynamic convolution. No RPN,
-    no NMS — fixed output of ``num_proposals`` predictions.
-    """
-
-    num_proposals: Annotated[int, Field(gt=0)] = 300
-    hidden_dim: Annotated[int, Field(gt=0)] = 256
-    num_heads: Annotated[int, Field(gt=0)] = 8
-    num_stages: Annotated[int, Field(gt=0)] = 6
-    # Extra *thin* refinement stages appended after the full ones: query
-    # self-attention + FFN + prediction heads, no ROI pooling and no dynamic
-    # conv. Measurement shows depth buys score calibration and duplicate
-    # suppression rather than box refinement, and those live in the cheap
-    # components — a thin stage is ~0.66M params at hidden=128 vs ~3.5M full.
-    num_thin_stages: Annotated[int, Field(ge=0)] = 0
-    dim_feedforward: Annotated[int, Field(gt=0)] = 2048
-    dim_dynamic: Annotated[int, Field(gt=0)] = 64
-    pooler_resolution: Annotated[int, Field(gt=0)] = 7
-    # Samples per ROI bin (fixed; same value in train and deploy — the export
-    # one-pass can't do per-box adaptive). 1 = one sample/bin (faster, no
-    # averaging op → TensorRT-fp16 safe); <=0 resolves to 2. Real-time tiers
-    # (n/s/m) use 1, accuracy tiers (l/xl/xxl) use 2.
-    pooler_sampling_ratio: Annotated[int, Field(ge=0)] = 0
-    dropout: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
-
-    # Hungarian matching cost weights
-    cost_class: Annotated[float, Field(gt=0.0)] = 2.0
-    cost_bbox: Annotated[float, Field(gt=0.0)] = 5.0
-    cost_giou: Annotated[float, Field(gt=0.0)] = 2.0
-
-    # QGN (Featurized Query R-CNN, arXiv 2206.06258): image-conditioned
-    # query initialization from a light dense scorer on FPN, replacing
-    # the blind learned embeddings. Enables strong AP at fewer stages.
-    uniquery_generator: bool = False
-    qgn_quality_alpha: Annotated[float, Field(ge=0.0, le=1.0)] = 0.8
-    # QGN candidates are locations whose centre falls strictly inside the GT
-    # box, over strides 8/16/32 (p2 is skipped). A box smaller than its
-    # stride can therefore contain no candidate at all and is dropped from the
-    # QGN loss: measured on the 25k coco-rem subset at a 640 canvas, that is
-    # 17.8% of all GT boxes and 87.3% of boxes under 16px. Worse, qgn_loss
-    # then supervises every location covering them as background, so the
-    # generator learns to suppress small objects outright — and the refinement
-    # stages can only refine proposals the generator produced. This gives each
-    # otherwise-unmatchable GT its nearest location (standard centre-sampling
-    # fallback). Training-only: zero inference cost.
-    qgn_center_fallback: bool = False
-    # Lowest FPN stride the QGN scores. Default 8 skips p2, following
-    # Featurized Query R-CNN. 4 includes it — the direct fix for tiny-object
-    # proposal recall, but the dense head then runs over 4x the locations.
-    qgn_min_stride: Literal[4, 8] = 8
-    qgn_obj_weight: Annotated[float, Field(gt=0.0)] = 1.0
-    qgn_giou_weight: Annotated[float, Field(gt=0.0)] = 2.0
-
-    # Add conv-based P6/P7 (strides 64/128) to the FPN so the QGN proposes
-    # and the head pools large objects at a coarse pyramid (the paper's QGN
-    # runs P3-P7). Targets the large-object (APl) deficit of a P3-P5 head.
-    fpn_p6p7: bool = False
-
-    # DN-DETR-style query denoising (box-only): feed noised GT boxes as
-    # auxiliary queries trained to reconstruct the clean GT. Stabilizes the
-    # early Hungarian matching -> faster convergence, most useful at few
-    # stages. Training-only: DN queries are not generated at inference, so
-    # zero deployment/export impact.
-    #
-    # Worth +0.48 AP on coco-rem 25k and +0.33 on a 4k subset, and it only
-    # pays off on top of an IoU-aware ``cls_loss_type`` (+0.12 on focal).
-    # Its gain is CONDITIONAL ON ANNOTATION QUALITY: on the same 4000 images
-    # labelled with original COCO 2017 annotations instead of coco-rem it
-    # measured -0.30, a 0.63 AP swing. DN trains the decoder to reconstruct
-    # GT boxes, so imprecise or incomplete labels make the denoising target
-    # and the detection target disagree once the detector outgrows the labels
-    # (crossover at ~37% of the schedule; small objects invert first). Default
-    # on because modern tool-assisted labelling resembles coco-rem far more
-    # than it resembles 2017 crowd-sourced COCO — but turn it off for a
-    # dataset known to have loose or missing boxes.
-    denoising: bool = True
-    # DINO "look forward twice": stop detaching the box between stages, so a
-    # later stage's box error can correct the earlier prediction that produced
-    # it. Sparse R-CNN detaches, which trains each stage only to repair what it
-    # was handed. Identical inference graph and parameter count — costs only
-    # retained activations during training.
-    look_forward_twice: bool = False
-    # Independently-noised copies per GT. Measured a null: 1 / 2 / 5 groups
-    # land within 0.33 AP over 16 epochs and the ordering is non-monotonic in
-    # dose (paired mean vs 5 groups: g1 +0.01, g2 -0.10), so DN's benefit is
-    # switch-like rather than dose-dependent. 1 because groups multiply the
-    # padding width below and so are most of DN's memory cost.
-    dn_groups: Annotated[int, Field(gt=0)] = 1
-    # Bounds the batch-wide DN padding width (M = min(max_b(G_b), dn_max_gt) *
-    # dn_groups). Unbounded, one dense image sets M for the whole batch and the
-    # tail OOMs a 24GB card at batch 16 — one coco-rem image carries 473 boxes.
-    # ``None`` restores that unbounded behaviour; don't, unless you know the
-    # densest image in the set.
-    dn_max_gt: Annotated[int, Field(gt=0)] | None = 100
-    dn_box_noise_scale: Annotated[float, Field(gt=0.0, le=1.0)] = 0.4
-    dn_loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
-
-    # Cascade-IoU: per-stage minimum IoU floor for Hungarian matching.
-    # ``None`` (default) auto-enables it — tighten the last two refinement
-    # stages to (0.5, 0.6), earlier stages 0.0, sized to num_stages
-    # (2 stages -> (0.5, 0.6); 6 -> (0.0, 0.0, 0.0, 0.0, 0.5, 0.6)). ``()``
-    # explicitly disables it (vanilla flat matching); an explicit tuple
-    # (length == num_stages) overrides. Predictions below a stage's floor
-    # cannot match a GT in that stage. Training-only — zero inference impact.
-    cascade_iou_thresholds: tuple[float, ...] | None = None
-
-    # Classification loss. ``focal`` is the Sparse R-CNN original: every
-    # matched query is trained toward a hard 1.0 no matter how well its box
-    # fits. ``vfl`` (VarifocalNet) and ``mal`` (DEIM, CVPR 2025) instead use
-    # the matched prediction's own IoU as the target, so the emitted score
-    # estimates localization quality — which is what AP, a ranking metric,
-    # actually sorts on. Training-only: zero inference impact.
-    cls_loss_type: Literal["focal", "vfl", "mal"] = "mal"
-    # Exponent on MAL's IoU target (and its negative-branch modulator).
-    # DEIM ships 1.5; 2.0 matches the focal_gamma used elsewhere here.
-    mal_gamma: Annotated[float, Field(gt=0.0)] = 1.5
-    # Damping on MAL's negative branch. ``None`` (DEIM's default) means 1.0,
-    # which raises loss_ce ~4x against focal's alpha=0.25 and so shifts the
-    # classification/box balance. Set 0.25 to hold that balance fixed and
-    # isolate the IoU-target change from a loss-weight change.
-    # Not capped at 1.0: measured on the 25k subset, alpha=0.25 gives the best
-    # AP75/AP50 ratio but the lowest AP, and alpha=1.0 (``None``, DEIM's
-    # default) nets far ahead — so alpha trades calibration against how much
-    # negative gradient the classifier gets, and the optimum is a dial rather
-    # than a constant. Values >1 push further along that trade.
-    mal_alpha: Annotated[float, Field(gt=0.0, le=8.0)] | None = None
-    # Weight on loss_ce. ``None`` keeps the Sparse R-CNN convention of reusing
-    # ``cost_class``, which ties the matcher's class cost to the loss weight —
-    # so "give classification more weight" cannot be tested without also
-    # perturbing the assignment. Set this to vary the loss weight alone.
-    cls_loss_weight: Annotated[float, Field(gt=0.0)] | None = None
-
-    # Stage-wise classification self-distillation: train every earlier stage's
-    # class posterior toward the final stage's (detached). D-FINE's GO-LSD
-    # distils localization backward; the deficit measured here is calibration
-    # and duplicate suppression instead, which live in the class scores, so
-    # that is what gets transferred. Lets a shallow stack inherit a deep
-    # stack's ranking — AP at lower latency. Training-only, zero inference cost.
-    distill_labels: bool = False
-    distill_weight: Annotated[float, Field(gt=0.0)] = 1.0
-    # Scale each query's distillation term by the teacher's peak confidence,
-    # so an unsure teacher does not drag the student.
-    distill_conf_weight: bool = True
-
-    # Inference-time knobs: use fewer stages or proposals at test time
-    # for speed without retraining. None = use training values.
-    inference_num_stages: Annotated[int, Field(gt=0)] | None = None
-    inference_num_proposals: Annotated[int, Field(gt=0)] | None = None
-
-    @property
-    def total_stages(self) -> int:
-        """Full refinement stages plus appended thin ones."""
-        return self.num_stages + self.num_thin_stages
-
-    @model_validator(mode="after")
-    def _check_cascade_iou(self) -> UniQueryHeadConfig:
-        t = self.cascade_iou_thresholds
-        if t is None:
-            # Enabled by default: tighten the last two stages, sized to num_stages
-            # (single-stage models get no cascade — the concept needs ≥2 stages).
-            n = self.total_stages
-            t = (0.0,) * (n - 2) + (0.5, 0.6) if n >= 2 else ()
-            object.__setattr__(self, "cascade_iou_thresholds", t)
-        if t and len(t) != self.total_stages:
-            raise ValueError(
-                f"cascade_iou_thresholds length ({len(t)}) must equal "
-                f"total stages ({self.total_stages}) or be empty"
-            )
-        if any(v < 0.0 or v > 1.0 for v in t):
-            raise ValueError("cascade_iou_thresholds values must be in [0.0, 1.0]")
-        if self.inference_num_stages is not None and self.inference_num_stages > self.total_stages:
-            raise ValueError(
-                f"inference_num_stages ({self.inference_num_stages}) cannot exceed "
-                f"num_stages ({self.num_stages})"
-            )
-        if (
-            self.inference_num_proposals is not None
-            and self.inference_num_proposals > self.num_proposals
-        ):
-            raise ValueError(
-                f"inference_num_proposals ({self.inference_num_proposals}) cannot exceed "
-                f"num_proposals ({self.num_proposals})"
-            )
-        return self
-
-
-class UniQueryMaskConfig(_BaseModel):
-    """UniQuery dynamic mask head (instance segmentation).
-
-    Built by :func:`build_uniquery` when ``model.uniquery_mask`` is set; drives
-    ``configs/segmentation/mayaku-*``.
-    """
-
-    pooler_resolution: Annotated[int, Field(gt=0)] = 14
-    mask_resolution: Annotated[int, Field(gt=0)] = 28
-    num_conv: Annotated[int, Field(gt=0)] = 4
-    conv_dim: Annotated[int, Field(gt=0)] = 256
-    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
-
-
-class UniQueryKeypointConfig(_BaseModel):
-    """UniQuery keypoint head (person-pose).
-
-    Built by :func:`build_uniquery` when ``model.uniquery_keypoint`` is set;
-    drives ``configs/keypoints/mayaku-*``. ``heatmap_resolution`` is currently
-    advisory — the head derives its output size internally.
-    """
-
-    pooler_resolution: Annotated[int, Field(gt=0)] = 14
-    num_keypoints: Annotated[int, Field(gt=0)] = 17
-    heatmap_resolution: Annotated[int, Field(gt=0)] = 56
-    loss_weight: Annotated[float, Field(gt=0.0)] = 1.0
-
-
-# ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
 
 
 class ModelConfig(_BaseModel):
-    """Top-level model knobs + per-component sub-configs.
+    """Which network: a tier of the family, its heads, and its classes.
 
-    ``pixel_mean`` and ``pixel_std`` are RGB-order per ADR 002. The
-    legacy BGR order from `DETECTRON2_TECHNICAL_SPEC.md` §2.1 is not
-    inherited; channel order is a contract, not a setting (no
-    ``INPUT.FORMAT`` knob).
+    `num_classes` None means "take it from the training annotations".
+    `qat` None means the tier's default: quantization-aware for the small
+    tiers (`mayaku.model.tiers.QAT_TIERS`, whose targets are int8-only
+    accelerators), fp32 training for fp16 deployment otherwise.
     """
 
-    meta_architecture: MetaArchitecture = "faster_rcnn"
-    mask_on: bool = False
-    keypoint_on: bool = False
-    # ImageNet RGB normalisation (ADR 002). Mean is in [0, 255]; std is
-    # the per-channel std x 255. Matches torchvision's pretrained ResNet
-    # contract end-to-end so backbone weights load directly without a
-    # channel swap.
-    pixel_mean: tuple[float, float, float] = (123.675, 116.280, 103.530)
-    pixel_std: tuple[float, float, float] = (58.395, 57.120, 57.375)
-    weights: str | None = None
-    device: DeviceSetting = "auto"
+    tier: TierName = "n"
+    num_classes: Annotated[int, Field(gt=0)] | None = None
+    seg: bool = False
+    keypoints: KeypointConfig | None = None
+    aux_arm: Literal["box_tower", "tower"] = "box_tower"
+    qat: bool | None = None
 
-    backbone: BackboneConfig = Field(default_factory=BackboneConfig)
-    fpn: FPNConfig = Field(default_factory=FPNConfig)
-    anchor_generator: AnchorGeneratorConfig = Field(default_factory=AnchorGeneratorConfig)
-    rpn: RPNConfig = Field(default_factory=RPNConfig)
-    roi_heads: ROIHeadsConfig = Field(default_factory=ROIHeadsConfig)
-    roi_box_head: ROIBoxHeadConfig = Field(default_factory=ROIBoxHeadConfig)
-    roi_mask_head: ROIMaskHeadConfig | None = None
-    roi_keypoint_head: ROIKeypointHeadConfig | None = None
+    @property
+    def qat_enabled(self) -> bool:
+        return self.qat if self.qat is not None else self.tier in QAT_TIERS
 
-    # UniQuery head configs (only used when meta_architecture == "uniquery")
-    uniquery_head: UniQueryHeadConfig | None = None
-    uniquery_mask: UniQueryMaskConfig | None = None
-    uniquery_keypoint: UniQueryKeypointConfig | None = None
+    def to_tier(self) -> Tier:
+        """The `mayaku.model.tiers.Tier` this config builds."""
+        return dataclasses.replace(TIERS[self.tier], seg=self.seg,
+                                   kpt=self.keypoints.num if self.keypoints else 0,
+                                   aux_arm=self.aux_arm)
 
-    @model_validator(mode="after")
-    def _check_consistency(self) -> ModelConfig:
-        # meta_architecture, mask_on, keypoint_on, and the head sub-configs
-        # must agree. We treat meta_architecture as the single source of
-        # truth for which heads are required and accept matching booleans
-        # as a redundant convenience for callers who forget either side.
-        is_query = self.meta_architecture == "uniquery"
-        wants_mask = self.meta_architecture == "mask_rcnn"
-        wants_kpt = self.meta_architecture == "keypoint_rcnn"
-
-        # UniQuery has its own head configs and doesn't use mask_on/keypoint_on flags
-        if is_query:
-            if self.mask_on or self.keypoint_on:
-                raise ValueError(
-                    "uniquery uses uniquery_mask/uniquery_keypoint configs, "
-                    "not mask_on/keypoint_on flags"
-                )
-            if self.uniquery_head is None:
-                raise ValueError("uniquery requires uniquery_head to be set")
-            if self.fpn.out_channels != self.uniquery_head.hidden_dim:
-                raise ValueError(
-                    f"fpn.out_channels ({self.fpn.out_channels}) must equal "
-                    f"uniquery_head.hidden_dim ({self.uniquery_head.hidden_dim}): "
-                    "the FPN feeds the head at this width"
-                )
-            return self
-
-        if self.mask_on != wants_mask:
-            raise ValueError(
-                f"mask_on={self.mask_on} disagrees with "
-                f"meta_architecture={self.meta_architecture!r}"
-            )
-        if self.keypoint_on != wants_kpt:
-            raise ValueError(
-                f"keypoint_on={self.keypoint_on} disagrees with "
-                f"meta_architecture={self.meta_architecture!r}"
-            )
-        if wants_mask and self.roi_mask_head is None:
-            raise ValueError("mask_rcnn requires roi_mask_head to be set")
-        if wants_kpt and self.roi_keypoint_head is None:
-            raise ValueError("keypoint_rcnn requires roi_keypoint_head to be set")
-        if not wants_mask and self.roi_mask_head is not None:
-            raise ValueError("roi_mask_head is set but meta_architecture is not mask_rcnn")
-        if not wants_kpt and self.roi_keypoint_head is not None:
-            raise ValueError("roi_keypoint_head is set but meta_architecture is not keypoint_rcnn")
-        if self.uniquery_head is not None:
-            raise ValueError("uniquery_head is set but meta_architecture is not uniquery")
-        if self.uniquery_mask is not None:
-            raise ValueError("uniquery_mask is only valid with meta_architecture='uniquery'")
-        if self.uniquery_keypoint is not None:
-            raise ValueError("uniquery_keypoint is only valid with meta_architecture='uniquery'")
-        return self
-
-    def resolved_device(self) -> DeviceKind:
-        """Translate the configured device into a concrete backend kind.
-
-        ``"auto"`` resolves through :meth:`mayaku.backends.device.Device.auto`;
-        the literal kinds pass through unchanged.
-        """
-        if self.device == "auto":
-            from mayaku.backends.device import Device
-
-            return Device.auto().kind
-        return self.device
-
-
-# ---------------------------------------------------------------------------
-# Input + dataloader + solver + test
-# ---------------------------------------------------------------------------
+    def build(self, canvas: int | tuple[int, int], num_classes: int | None = None) -> Detector:
+        """The detector this config describes, quantization-aware when
+        `qat_enabled`: QAT changes the graph (and the checkpoint's keys), so
+        a model is built with it before training or loading weights."""
+        nc = num_classes if num_classes is not None else self.num_classes
+        if nc is None:
+            raise ValueError("model.num_classes is unset; pass num_classes")
+        model = Detector(self.to_tier(), nc, canvas)
+        return enable_qat(model) if self.qat_enabled else model
 
 
 class InputConfig(_BaseModel):
-    """Image-pipeline knobs.
+    """The canvas every image is letterboxed onto, for training, evaluation,
+    export and deployment alike.
 
-    ``min_size_train`` defaults to the ``Base-RCNN-FPN.yaml`` jitter
-    range ``(640, 672, 704, 736, 768, 800)`` (`DETECTRON2_TECHNICAL_SPEC.md`
-    §6.1). Pure-train scaling resamples one of these short edges per
-    iteration when ``min_size_train_sampling="choice"``; ``"range"``
-    samples uniformly between the min and max of the tuple.
-
-    There is **no FORMAT field** — ADR 002 fixes channel order to RGB.
+    `size_budget` is the compute dial: a square-equivalent side, so the
+    budget is `size_budget ** 2` pixels. `canvas_hw` is the resolved (H, W):
+    set from the training data's aspect at train start
+    (`mayaku.tuning.sizing.canvas_for_data`), or pinned by hand. Both are
+    multiples of 32, the detector's coarsest stride.
     """
 
-    min_size_train: tuple[int, ...] = (640, 672, 704, 736, 768, 800)
-    max_size_train: Annotated[int, Field(gt=0)] = 1333
-    min_size_train_sampling: Literal["choice", "range"] = "choice"
-    min_size_test: Annotated[int, Field(gt=0)] = 800
-    max_size_test: Annotated[int, Field(gt=0)] = 1333
-    # The COMPUTE BUDGET DIAL for fixed-size letterbox inference: the compute
-    # budget is ``size_budget ** 2`` pixels. The actual canvas is *derived* — the
-    # largest 128-aligned ``(H, W)`` under that budget at the data's native aspect
-    # (square for diverse data). Raise/lower it to trade speed for resolution.
-    size_budget: Annotated[int, Field(gt=0)] = 640
-    # Resolved letterbox canvas ``(H, W)`` — a DEPLOY ARTIFACT, not a user input:
-    # training re-resolves it from *this* run's data every time (so fine-tuning a
-    # 1:1 base on 16:9 data adapts to a 16:9 canvas) and bakes it into the sidecar
-    # so deploy reads the exact shape with no dataset. Any inbound value is
-    # overwritten at train. ``None`` → deploy falls back to the largest aligned
-    # square in budget. Both dims are ``CANVAS_ALIGN`` (128) multiples. See
-    # ``mayaku.tuning.sizing``.
+    size_budget: Annotated[int, Field(gt=0)] = 800
     canvas_hw: tuple[int, int] | None = None
-    # How inference/eval resize an image to the network input:
-    #   "shortest_edge" — variable resize (ResizeShortestEdge), the legacy path.
-    #   "letterbox"     — aspect-preserving resize + pad to the resolved canvas,
-    #                     the fixed-size deploy geometry (host un-letterboxes preds).
-    # The mayaku-* family uses "letterbox"; kept switchable as the proven fallback.
-    resize_mode: Literal["shortest_edge", "letterbox"] = "shortest_edge"
-    # Multi-scale letterbox training: the smallest budget (AREA) fraction; one
-    # canvas is drawn per image, from this fraction up to the full deploy canvas
-    # on a 32-aligned grid. The deploy canvas is always the top — train geometry
-    # == deploy. Default 0.64 reproduces Detectron2's proven scale envelope: D2
-    # trains short-edge [640, 800] and tests at 800, i.e. a smallest scale of
-    # (640/800)**2 = 0.64 of the deploy AREA. Replaces the old explicit
-    # ``train_sizes`` list.
-    train_scale_min: Annotated[float, Field(gt=0.0, le=1.0)] = 0.64
-    mask_format: Literal["polygon", "bitmask"] = "polygon"
-    random_flip: Literal["none", "horizontal", "vertical"] = "horizontal"
 
-    # Photometric augmentation (Phase 1 modernization). Each delta is the
-    # max deviation from no-op; a delta of 0 disables that component. The
-    # defaults below match HSV-V/S/H knobs translated
-    # into mayaku's (brightness, contrast, saturation, hue) parameterisation.
-    # Disabled by default to preserve D2-replication; enable in modernized
-    # configs.
-    color_jitter_enabled: bool = False
-    color_jitter_brightness: Annotated[float, Field(ge=0.0, le=1.0)] = 0.4
-    color_jitter_contrast: Annotated[float, Field(ge=0.0, le=1.0)] = 0.4
-    color_jitter_saturation: Annotated[float, Field(ge=0.0, le=1.0)] = 0.7
-    color_jitter_hue: Annotated[float, Field(ge=0.0, le=0.5)] = 0.015
-    color_jitter_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.5
-
-    # RandAugment (Cubuk et al. 2019), photometric-only pool. Two knobs:
-    # ``num_ops`` (paper's N, ops applied per image) and ``magnitude``
-    # (paper's M, intensity in [0, 30]). Replaces per-op probability /
-    # range tuning with a single intensity dial — useful for users who
-    # don't want to tune brightness/contrast/etc. separately. Compatible
-    # with ``color_jitter_enabled``; usually you'd pick one or the other.
-    randaugment_enabled: bool = False
-    randaugment_num_ops: Annotated[int, Field(ge=0, le=9)] = 2
-    randaugment_magnitude: Annotated[float, Field(ge=0.0, le=30.0)] = 9.0
-
-    # Multi-sample augmentation (Phase 1b modernization). Each
-    # ``*_prob`` is the chance the augmentation fires for any given
-    # training sample; default 0.0 disables. ``copy_paste_prob > 0``
-    # additionally requires ``mask_format='bitmask'`` (validator below).
-    mosaic_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
-    mosaic_canvas_size: tuple[int, int] = (1024, 1024)
-    mixup_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
-    mixup_alpha: Annotated[float, Field(gt=0.0)] = 8.0
-    copy_paste_prob: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
-    # Close all multi-sample augmentation (mosaic/mixup/copy_paste) for the final
-    # fraction of training — the standard "close mosaic" phase. Composite images
-    # regularise well early but cap final AP if never removed, so the tail runs on
-    # clean images to settle (and let the EMA shadow converge on them). e.g. 0.2 =
-    # last 20% clean; 0.0 disables. No-op when no multi-sample aug is active.
-    # Defaults to 0.0 (D2-replication-neutral, like the ``*_prob`` knobs above);
-    # the size-bucket recipe turns it on alongside mosaic (tuning.recipe.SizeBucket).
-    close_mosaic_frac: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
-
-    @model_validator(mode="after")
-    def _check_copy_paste_needs_bitmask(self) -> InputConfig:
-        if self.copy_paste_prob > 0.0 and self.mask_format != "bitmask":
-            raise ValueError(
-                "copy_paste_prob > 0 requires mask_format='bitmask' "
-                "(polygon-mask paste requires a lossy raster→polygon round-trip; "
-                "switch the format or disable CopyPaste)."
-            )
-        return self
-
-    # Both dials align to 128, the grid every shipped canvas is resolved on
-    # (``snap_max_content(align=128)`` — torch.compile-safe, ANE/TensorRT
-    # friendly, and a multiple of the stride-32 FPN floor). 32 would validate but
-    # lie: a 32-aligned budget the 128 grid can't reach silently resolves to a
-    # smaller canvas (``size_budget=800`` → a 768x768 canvas, 92% of the budget),
-    # so the dial wouldn't read as the resolution it produces. The training
-    # ladder still steps on 32 (``multi_scale_canvases``) — those rungs are
-    # per-iteration and never land in ``canvas_hw``.
-    @model_validator(mode="after")
-    def _check_canvas_alignment(self) -> InputConfig:
-        # Imported here, not at module scope: mayaku.tuning imports this module
-        # (recipe.py needs MayakuConfig), so a top-level import would cycle.
-        from mayaku.tuning.sizing import CANVAS_ALIGN
-
-        if self.size_budget % CANVAS_ALIGN != 0:
-            raise ValueError(
-                f"size_budget must be a multiple of {CANVAS_ALIGN} (the canvas alignment "
-                f"grid); got {self.size_budget}. Use e.g. 512, 640, 768, 896, 1024, 1152, "
-                "1280 — for square data the budget dial is then exactly the canvas side."
-            )
-        if self.canvas_hw is not None and any(d % CANVAS_ALIGN != 0 for d in self.canvas_hw):
-            raise ValueError(
-                f"canvas_hw dims must each be a multiple of {CANVAS_ALIGN} (the canvas "
-                f"alignment grid); got {self.canvas_hw}. Resolve it via "
-                "mayaku.tuning.snap_max_content, which aligns to this grid."
-            )
-        return self
-
-
-class SolverConfig(_BaseModel):
-    """Optimizer and LR schedule.
-
-    Training length is set in epochs (:attr:`num_epochs`) and the LR follows a
-    single warmup→cosine decay; the engine resolves epochs to an iteration
-    count at train time from the dataset size and effective batch.
-    """
-
-    # Seeds the training samplers and the per-worker augmentation RNGs, so a
-    # run is reproducible from this one value. Vary it to measure run-to-run
-    # spread — single-seed AP deltas under ~0.5 are not resolvable.
-    seed: int = 0
-    ims_per_batch: Annotated[int, Field(gt=0)] = 16
-    # Gradient accumulation: divide effective batch into ``grad_accum_steps``
-    # micro-batches of ``ims_per_batch``. Memory scales with the micro-batch
-    # only, so this is the standard knob for fitting a large effective batch
-    # into a small GPU. Effective batch = ``ims_per_batch * grad_accum_steps``.
-    # ``base_lr`` should be tuned against the effective batch, not the micro.
-    grad_accum_steps: Annotated[int, Field(ge=1)] = 1
-    base_lr: Annotated[float, Field(gt=0.0)] = 0.02
-    # Training length is expressed in epochs (passes over the dataset). The
-    # engine resolves it to an iteration count at train time from the dataset
-    # size and effective batch (``num_images / (ims_per_batch * grad_accum *
-    # world_size)`` iters per epoch). The LR follows a single warmup→cosine
-    # decay over the full run; ``warmup_fraction`` is the share of total
-    # iterations spent warming up from ``warmup_factor * base_lr`` to
-    # ``base_lr``. Default 16 epochs is a sane fine-tune length for any dataset;
-    # auto-config picks a dataset-adaptive value when enabled.
-    num_epochs: Annotated[int, Field(gt=0)] = 16
-    warmup_fraction: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.03
-    warmup_factor: Annotated[float, Field(gt=0.0, le=1.0)] = 1.0 / 1000.0
-
-    # Optimizer choice. ``"SGD"`` (default) is the D2-replication path
-    # and pairs with ``momentum`` / ``nesterov`` below. ``"AdamW"`` is
-    # the published-validated path for ConvNeXt / Swin / ViT backbones
-    # and pairs with ``betas`` / ``eps``. The unused pair is silently
-    # ignored by the optimizer builder, matching torch's own behaviour.
-    optimizer_name: Literal["SGD", "AdamW"] = "SGD"
-    momentum: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.9
-    nesterov: bool = False
-    betas: tuple[float, float] = (0.9, 0.999)
-    eps: Annotated[float, Field(gt=0.0)] = 1.0e-8
-
-    weight_decay: Annotated[float, Field(ge=0.0)] = 1e-4
-    weight_decay_norm: Annotated[float, Field(ge=0.0)] = 0.0
-
-    # Layer-wise learning rate decay (LLRD). When enabled, each backbone
-    # parameter's LR is scaled by ``llrd_decay ** ((num_layers + 2) - layer_id - 1)``
-    # where ``layer_id`` is assigned input→output along the backbone depth
-    # and ``num_layers`` is derived from the backbone variant (ConvNeXt-T:
-    # 6; ConvNeXt-S/B/L: 12; ResNet: 4). Detector neck/heads (FPN/RPN/ROI)
-    # are treated as the top layer and keep ``base_lr``. Default off so
-    # all prior runs are reproducible bit-for-bit. The ConvNeXt scheme is
-    # MMDet's ``get_layer_id_for_convnext`` (with the stage-2 ``block_id //
-    # 3`` bucketing); ResNet is per-stage. ``llrd_decay`` is a recipe
-    # sweep knob — no canonical per-variant value exists; see the
-    # ``*_llrd.yaml`` recipes for cited starting points.
-    llrd_enabled: bool = False
-    llrd_decay: Annotated[float, Field(gt=0.0, le=1.0)] = 0.8
-    amp_enabled: bool = False
-    # An *intent*, not a guarantee: ``Device.resolve_amp_dtype`` clamps this
-    # to the live hardware at train time. ``"bf16"`` is ideal on CUDA Ampere+
-    # (wider dynamic range, lets us drop GradScaler) and is what the bundled
-    # recipes ask for; it falls back to ``"fp16"`` on pre-Ampere CUDA and to
-    # fp32 (AMP off) on MPS, which is validated for fp16 only. ``"fp16"`` is
-    # the safe cross-backend default.
-    amp_dtype: Literal["fp16", "bf16"] = "fp16"
-    # Checkpoint cadence in EPOCHS (resolved to iterations against the dataset
-    # size at train time, like ``num_epochs``). Epoch-relative so it fires the
-    # same number of times whether a dataset is 200 or 200k images — a fixed
-    # iteration count would silently never trigger on a small dataset.
-    checkpoint_period: Annotated[int, Field(gt=0)] = 1
-    clip_gradients_enabled: bool = False
-    # When clipping is enabled, the defaults below give the standard
-    # global-L2-norm safety net at 5.0 — wide enough to catch genuine
-    # gradient blow-ups without throttling normal training, narrow enough
-    # to keep an accidental NaN from poisoning the rest of the run.
-    # ``"value"`` element-wise clamping is also supported but rarely
-    # what people want.
-    clip_gradients_value: Annotated[float, Field(gt=0.0)] = 5.0
-    clip_gradients_type: Literal["value", "norm"] = "norm"
-
-    # Diagnostic: when true, every training step computes the global L2
-    # gradient norm AND per-module-group sub-norms (RPN cls / RPN loc /
-    # ROI cls / ROI loc / ROI box-head / backbone / FPN) before clipping
-    # and records them on ``trainer.storage`` so MetricsPrinter logs
-    # them. Used to localise gradient blow-ups when training without
-    # clipping. Adds one element-wise op per parameter per step (cheap;
-    # ~ms-level on COCO scale). Default off.
-    grad_norm_log_enabled: bool = False
-
-    # Exponential moving average of model weights (Phase 1 modernization).
-    # When enabled, an EMA shadow tracks the live weights at every step
-    # and a parallel EMA checkpoint is saved alongside the live one.
-    # Default off so D2-replication training runs are bit-identical to
-    # the existing 40.2-AP baseline.
-    # EMA weights are what eval/ship/export see (select_final_weights, EvalHook);
-    # live weights exist for resume. Off is an explicit opt-out.
-    ema_enabled: bool = True
-    ema_decay: Annotated[float, Field(ge=0.0, le=1.0)] = 0.9999
-    ema_tau: Annotated[float, Field(gt=0.0)] = 2000.0
-
-    def effective_batch(self, world_size: int = 1) -> int:
-        """Images per optimizer step: ``ims_per_batch * grad_accum_steps``,
-        times ``world_size`` for the cross-rank total. ``base_lr`` should be
-        tuned against this, and one epoch is ``ceil(num_images / this)`` steps.
-        """
-        return self.ims_per_batch * self.grad_accum_steps * world_size
-
-
-class TestConfig(_BaseModel):
-    # Total per-image budget across ALL classes (COCOeval's maxDets=100 is per
-    # category, and NMS-free decode can spend several slots on one object) —
-    # 100 starves recall on dense/multi-class scenes.
-    detections_per_image: Annotated[int, Field(gt=0)] = 300
-    # Eval cadence in EPOCHS (resolved to iterations against the dataset size at
-    # train time, like ``num_epochs``). Default ``1`` = eval every epoch when a val
-    # dataset is provided; ``0`` disables periodic eval. With no val dataset eval is
-    # skipped regardless, without error (see run_train). Epoch-relative so it fires
-    # the same number of times regardless of dataset size.
-    eval_period: Annotated[int, Field(ge=0)] = 1
-    precise_bn_enabled: bool = False
-    precise_bn_num_iter: Annotated[int, Field(gt=0)] = 200
+    @field_validator("size_budget", "canvas_hw")
+    @classmethod
+    def _on_the_grid(cls, v: int | tuple[int, int] | None) -> int | tuple[int, int] | None:
+        if v is not None:
+            as_canvas(v)
+        return v
 
 
 class DataLoaderConfig(_BaseModel):
-    num_workers: Annotated[int, Field(ge=0)] = 4
-    # Batches each worker pre-builds ahead of demand (PyTorch DataLoader
-    # ``prefetch_factor``; total buffered samples = num_workers x this).
-    # The default of 2 buffers only ~one batch, which starves a fast GPU
-    # because AspectRatioGroupedDataset drains ~1.5x batch_size samples per
-    # step (two aspect buckets) — every step empties the buffer and the GPU
-    # waits while workers rebuild it. Raise it (4-6) for small/fast models
-    # on big-image datasets to give the workers runway to stay ahead.
-    # Ignored when ``num_workers == 0`` (no worker processes to prefetch).
-    prefetch_factor: Annotated[int, Field(ge=1)] = 6
-    aspect_ratio_grouping: bool = True
-    sampler_train: Literal["TrainingSampler", "RepeatFactorTrainingSampler"] = "TrainingSampler"
-    filter_empty_annotations: bool = True
-    # RepeatFactorTrainingSampler threshold ``t`` (Gupta et al. LVIS 2019).
-    # Per-class repeat factor is ``max(1, sqrt(t / f_c))`` where ``f_c`` is
-    # the fraction of training images containing class ``c``. ``t=0.001``
-    # is the LVIS default; raise it (e.g. 0.01) for aggressive balancing
-    # on extremely imbalanced custom datasets, lower it for milder
-    # oversampling. Ignored unless ``sampler_train="RepeatFactorTrainingSampler"``.
-    repeat_threshold: Annotated[float, Field(gt=0.0, le=1.0)] = 0.001
+    num_workers: Annotated[int, Field(ge=0)] = 8
 
 
 class AutoConfig(_BaseModel):
-    """Dataset-aware auto-tuning of fine-tune fields at ``mayaku train`` start.
-
-    When ``enabled`` is true (the default), ``mayaku train`` runs a
-    single read-only pass over the COCO dataset *before* model
-    construction and overrides fine-tune-relevant fields that the user
-    did NOT explicitly set in the source YAML:
-
-    * ``model.roi_heads.num_classes`` — from the dataset's category count.
-      This one is STRUCTURAL: applied at any dataset size (the head must
-      match the data), unlike the heuristics below which need
-      ``MIN_IMAGES_FOR_AUTO_CONFIG`` worth of data.
-    * ``model.anchor_generator.sizes`` / ``aspect_ratios`` — k-means on
-      GT box √area and w/h, measured in the pipeline's actual input frame;
-      only for anchor-consuming meta-architectures (the R-CNN family),
-      skipped if <50 boxes
-    * ``solver.num_epochs`` — a target-total-steps budget resolved to
-      epochs, so total training work is monotone in dataset size
-    * ``solver.base_lr`` — the fine-tune learning rate. Regime-dependent:
-      the checkpoint bakes the *pretraining* LR, and fine-tuning wants
-      ~10x more, so the recipe emits a flat fine-tune default
-      (``FINETUNE_BASE_LR``) batch-scaled to the run's effective batch
-    * ``solver.llrd_decay`` — only when the config runs LLRD: a
-      depth-adjusted decay that puts the backbone stem at ~1/10 the head
-      LR (hot-head/cold-backbone fine-tune split; ``base_lr`` is the head)
-    * ``input.mosaic_prob`` / ``mixup_prob`` / ``copy_paste_prob`` — from
-      dataset size bucket
-    * ``dataloader.sampler_train`` / ``repeat_threshold`` — switched to
-      ``RepeatFactorTrainingSampler`` when class-imbalance ratio > 10
-
-    Architecture-tuned hyperparameters — the EMA constants and
-    ``model.backbone.freeze_at`` — are NEVER auto-overridden: the config
-    that travels with the weights owns them. Auto-config adapts the run to
-    the dataset; it does not re-tune the model (the contract is pinned in
-    ``mayaku.tuning.recipe.ARCHITECTURE_TUNED_PATHS``).
-
-    Explicit user values always win — auto-config only fills gaps. Every
-    applied override is logged as ``old -> new``, and the resolved config
-    is dumped to ``output_dir/config.yaml`` for reproducibility.
-
-    Set ``enabled: false`` for replication runs where the config's
-    defaults are intentional (e.g. the bundled COCO 1x/3x recipes), or
-    to make the train run bit-identical to a hand-written recipe.
-
-    Tiny datasets (<10 images) are skipped automatically — there isn't
-    enough signal to derive a sensible recipe.
-    """
+    """Dataset-aware tuning at train start: fields the user did not set
+    explicitly (the class count, the canvas, the fine-tune schedule) are
+    derived from the training annotations. Explicit values always win."""
 
     enabled: bool = True
 
 
-# ---------------------------------------------------------------------------
-# Top-level
-# ---------------------------------------------------------------------------
-
-
 class MayakuConfig(_BaseModel):
-    """The whole configuration tree, with every section defaulting to the
-    Detectron2 3x convention (modulo ADR-driven changes — RGB channel
-    order, no rotated boxes, no deformable conv, ``device="auto"``)."""
-
-    input: InputConfig = Field(default_factory=InputConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
-    solver: SolverConfig = Field(default_factory=SolverConfig)
-    test: TestConfig = Field(default_factory=TestConfig)
+    input: InputConfig = Field(default_factory=InputConfig)
+    train: Recipe = Field(default_factory=Recipe)
     dataloader: DataLoaderConfig = Field(default_factory=DataLoaderConfig)
     auto_config: AutoConfig = Field(default_factory=AutoConfig)

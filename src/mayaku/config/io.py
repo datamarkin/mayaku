@@ -6,11 +6,9 @@ just bridge YAML on disk and an in-memory pydantic model, plus a
 recursive deep-merge for partial overrides (CLI flags, fragment
 configs).
 
-We deliberately do **not** support ``_BASE_``-style YAML inheritance
-(`DETECTRON2_TECHNICAL_SPEC.md` §6.1). Per the spec's own §9.1
-recommendation, the inheritance chain causes more confusion than it
-removes; users who want fragment composition should construct a
-:class:`MayakuConfig` in Python and call :func:`merge_overrides` once.
+There is deliberately no YAML inheritance: an inheritance chain causes more
+confusion than it removes. Compose fragments by constructing a
+:class:`MayakuConfig` in Python and calling :func:`merge_overrides` once.
 """
 
 from __future__ import annotations
@@ -75,10 +73,8 @@ def merge_overrides(config: MayakuConfig, overrides: Mapping[str, Any]) -> Mayak
     leaf value replaces the corresponding field. Returns a *new*
     :class:`MayakuConfig`; ``config`` is unchanged.
 
-    This is the simple, dataclass-friendly equivalent of Detectron2's
-    ``cfg.merge_from_list`` / ``LazyConfig.apply_overrides`` (`DETECTRON2_TECHNICAL_SPEC.md`
-    §6.1, §6.4) — without the dotted-key string parsing, which the CLI
-    layer in Step 17 will translate.
+    Nested mappings reach into the training recipe too:
+    ``{"train": {"aug": {"mixup": 0.1}}}`` changes that one field.
     """
     merged = _deep_merge(config.model_dump(mode="python"), overrides)
     return MayakuConfig.model_validate(merged)
