@@ -59,12 +59,12 @@ def test_tiny_run_learns(tmp_path, qat) -> None:
     `lr_ref_batch` is 4, not 64: at batch 4 the default would accumulate 16
     batches per update and 36 epochs on 32 images would be 18 steps."""
     r = dataclasses.replace(
-        BASE, epochs=36, batch=4, lr_ref_batch=4, imgsz=192, lr=0.02,
+        BASE, epochs=36, batch=4, lr_ref_batch=4, canvas=192, lr=0.02,
         final_epochs=8, warmup_epochs=1.0, warmup_iters_min=20,
         assigner_warmup=2, amp=False, qat=qat, recalibrate_images=32)
-    tr = fixture(tmp_path / "train", n=32, canvas=r.imgsz, aug=DEFAULT_AUG, seed=3)
-    va = fixture(tmp_path / "val", n=32, canvas=r.imgsz, seed=3)
-    best, _, records = train(Detector(TINY, tr.nc), tr, va, r, eval_every=12,
+    tr = fixture(tmp_path / "train", n=32, canvas=r.canvas, aug=DEFAULT_AUG, seed=3)
+    va = fixture(tmp_path / "val", n=32, canvas=r.canvas, seed=3)
+    best, _, records = train(Detector(TINY, tr.nc, r.canvas), tr, va, r, eval_every=12,
                              log_every=0, out=str(tmp_path / "run"), log=lambda *_: None)
     assert best["AP50"] > 0.08
     assert records[-1]["cls"] < records[0]["cls"] / 1.5

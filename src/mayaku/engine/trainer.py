@@ -34,15 +34,15 @@ from mayaku.data.augment import CLEAN_AUG, DEFAULT_AUG, Augment
 from mayaku.data.batch import (
     batch_to,
     collate,
-    multiscale_sizes,
     rescale_batch,
     seed_worker,
     to_tensor,
 )
-from mayaku.data.geometry import as_canvas
 from mayaku.engine.evaluation import DEPLOY, STATS, Decode, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
+from mayaku.model.blocks import as_canvas
 from mayaku.model.quant import enable_qat, ranges_frozen, recalibrate_ranges
+from mayaku.tuning.sizing import multi_scale_canvases
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,7 +57,7 @@ class Recipe:
 
     epochs: int = 125
     batch: int = 16
-    imgsz: int = 640
+    canvas: tuple = (640, 640)      # (H, W) the network trains and evaluates at; a side is squared
     optimizer: str = "sgd"          # sgd | adamw | musgd
     lr: float = 0.01
     lr_final_frac: float = 0.01     # final LR as a fraction of `lr`
@@ -86,10 +86,11 @@ class Recipe:
     # Lower values let lower-IoU small positives rank.
     tal_beta: float = 6.0
     loc_weight_floor: float = 0.0   # floor the box/DFL loss weight (0 = off)
-    # Multi-scale training: the minimum input size, 0 = off (fixed `imgsz`).
-    # When set, every batch is rendered at `imgsz` (the operating point, the
-    # maximum) and downscaled to a random multiple of 32 in [multiscale,
-    # imgsz]. Eval always runs at `imgsz`.
+    # Multi-scale training: the smallest long side, 0 = off (fixed `canvas`).
+    # When set, every batch is rendered at `canvas` (the operating point, the
+    # maximum) and downscaled to a random rung of
+    # `mayaku.tuning.sizing.multi_scale_canvases`: the canvas aspect, long side
+    # stepping by 32 from `multiscale` up. Eval always runs at `canvas`.
     multiscale: int = 0
     # auxiliary heads: the Dice loss weight and the positive cap for masks.
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
@@ -107,6 +108,7 @@ class Recipe:
     decode: Decode = DEPLOY
 
     def __post_init__(self):
+        object.__setattr__(self, "canvas", as_canvas(self.canvas))
         assert self.optimizer in ("sgd", "adamw", "musgd"), self.optimizer
         assert self.final_epochs < self.epochs
 
@@ -311,8 +313,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     directory can always reproduce and rebuild its own model.
     """
     assert model.nc == train_ds.nc == val_ds.nc, "head and labels disagree"
-    assert train_ds.canvas == val_ds.canvas == as_canvas(r.imgsz), \
-        "recipe imgsz disagrees with the data canvas"
+    assert train_ds.canvas == val_ds.canvas == r.canvas, \
+        "recipe canvas %s disagrees with the data %s / %s" % (r.canvas, train_ds.canvas, val_ds.canvas)
     torch.manual_seed(r.seed)
     model = model.to(device)
     if r.qat:
@@ -337,9 +339,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                           persistent_workers=workers > 0)
 
     loader = make_loader()
-    # multi-scale training downscales each batch from the rendered `imgsz`
-    # (the maximum) to a random size in [multiscale, imgsz]; empty = fixed
-    ms_sizes = multiscale_sizes(r.multiscale, r.imgsz) if r.multiscale else []
+    # multi-scale training downscales each batch from the rendered canvas
+    # (the maximum) to a random rung of the ladder; empty = fixed
+    ms_sizes = multi_scale_canvases(r.canvas, r.multiscale) if r.multiscale else []
     if ms_sizes and out:
         log("multi-scale training over %s" % ms_sizes)
     warmup_iters = max(round(r.warmup_epochs * len(loader)), r.warmup_iters_min)
