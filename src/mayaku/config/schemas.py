@@ -85,6 +85,13 @@ class ModelConfig(_BaseModel):
     def qat_enabled(self) -> bool:
         return self.qat if self.qat is not None else self.tier in QAT_TIERS
 
+    def architecture(self) -> ModelConfig:
+        """This network without what its training data decided -- the class
+        count and keypoint names -- which a warm start derives afresh."""
+        kp = self.keypoints
+        return self.model_copy(update={"num_classes": None,
+                                       "keypoints": KeypointConfig(num=kp.num) if kp else None})
+
     def to_tier(self) -> Tier:
         """The `mayaku.model.tiers.Tier` this config builds."""
         return dataclasses.replace(TIERS[self.tier], seg=self.seg,

@@ -13,7 +13,7 @@ confusion than it removes. Compose fragments by constructing a
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,8 @@ __all__ = [
     "dump_yaml",
     "load_yaml",
     "merge_overrides",
+    "parse_assignments",
+    "read_yaml",
     "to_yaml_string",
 ]
 
@@ -37,13 +39,19 @@ def load_yaml(path: str | Path) -> MayakuConfig:
     :class:`InputConfig` defaults). Unknown keys at any level raise
     ``ValidationError`` so typos fail loudly.
     """
+    return read_yaml(path)[1]
+
+
+def read_yaml(path: str | Path) -> tuple[dict[str, Any], MayakuConfig]:
+    """`load_yaml`, also returning the parsed mapping as written: the keys a
+    user set, which auto-config must leave alone."""
     text = Path(path).read_text(encoding="utf-8")
     raw = yaml.safe_load(text) or {}
     if not isinstance(raw, Mapping):
         raise ValueError(
             f"YAML at {path} must be a mapping at the top level; got {type(raw).__name__}"
         )
-    return MayakuConfig.model_validate(dict(raw))
+    return dict(raw), MayakuConfig.model_validate(dict(raw))
 
 
 def dump_yaml(config: MayakuConfig, path: str | Path) -> None:
@@ -61,7 +69,7 @@ def to_yaml_string(config: MayakuConfig) -> str:
     diffs over time stay meaningful. ``default_flow_style=False`` keeps
     nested maps in block form so the output is human-readable.
     """
-    payload = config.model_dump(mode="python")
+    payload = config.model_dump(mode="json")
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
 
 
@@ -88,3 +96,22 @@ def _deep_merge(base: Any, override: Any) -> Any:
             merged[k] = _deep_merge(base.get(k), v) if k in merged else v
         return merged
     return override
+
+
+def parse_assignments(assignments: Iterable[str]) -> dict[str, Any]:
+    """``["train.lr=0.005", "model.tier=s"]`` -> the nested overrides mapping
+    ``{"train": {"lr": 0.005}, "model": {"tier": "s"}}``. Each value is read
+    as YAML, so numbers, booleans, null and ``[h, w]`` lists get their types."""
+    out: dict[str, Any] = {}
+    for a in assignments:
+        key, sep, value = a.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"expected key=value, got {a!r}")
+        *parents, leaf = key.strip().split(".")
+        node = out
+        for p in parents:
+            node = node.setdefault(p, {})
+            if not isinstance(node, dict):
+                raise ValueError(f"{key} sets inside a field that was given a value")
+        node[leaf] = yaml.safe_load(value)
+    return out
