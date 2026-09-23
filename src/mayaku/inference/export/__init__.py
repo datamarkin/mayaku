@@ -16,6 +16,7 @@ from typing import Any
 import torch
 
 from mayaku.inference.export.metadata import SUFFIX_TO_TARGET, embed_sidecar
+from mayaku.model import Detector
 from mayaku.model.contract import export_onnx
 
 __all__ = ["TARGETS", "export", "onnx_parity"]
@@ -24,7 +25,7 @@ __all__ = ["TARGETS", "export", "onnx_parity"]
 TARGETS = {t: s for s, t in SUFFIX_TO_TARGET.items() if t == "onnx"}
 
 
-def export(model: torch.nn.Module, sidecar: Mapping[str, Any], target: str,
+def export(model: Detector, sidecar: Mapping[str, Any], target: str,
            path: str | Path) -> Path:
     """Write `model` (a trained `Detector`, left untouched) as a `target`
     artifact at `path`, with `sidecar` embedded. The artifact's raw maps must

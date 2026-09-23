@@ -49,7 +49,7 @@ class Assignment:
     scores: torch.Tensor       # (B, N, nc) soft classification target
     fg: torch.Tensor           # (B, N) bool
     starved: torch.Tensor      # (B, M) bool, real objects with no anchor
-    owner: torch.Tensor = None # (B, N) long, the padded GT slot each anchor
+    owner: torch.Tensor | None = None  # (B, N) long, the padded GT slot each anchor
                                # serves; meaningful where `fg`. The mask and
                                # keypoint losses read their targets through it.
 

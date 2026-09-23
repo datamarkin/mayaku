@@ -25,6 +25,7 @@ import torch
 
 if TYPE_CHECKING:
     from mayaku.config import MayakuConfig
+    from mayaku.model import Detector
 
 __all__ = [
     "SIDECAR_KEY",
@@ -49,7 +50,7 @@ SIDECAR_SCHEMA_VERSION = 2
 def build_sidecar(
     cfg: MayakuConfig,
     class_names: Sequence[str],
-    model: torch.nn.Module,
+    model: Detector,
     provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the sidecar for a trained `model` built from `cfg`.
@@ -63,9 +64,7 @@ def build_sidecar(
     import mayaku
     from mayaku.data.geometry import PREPROCESS
 
-    canvas = cfg.input.canvas_hw
-    if canvas is None:
-        raise ValueError("build_sidecar needs a resolved input.canvas_hw")
+    canvas = cfg.input.canvas
     if not cfg.model.num_classes == model.nc == len(class_names):
         raise ValueError(f"model.num_classes {cfg.model.num_classes}, the head's {model.nc} "
                          f"and {len(class_names)} class names disagree")

@@ -58,7 +58,7 @@ def to_coco_kpt(det, image_id, cat_ids):
             for k in range(len(det))]
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def ground_truth(ann_path):
     """The parsed annotations, once per path. Large annotation files cost
     seconds to parse and index and the trainer evaluates every epoch; they
@@ -143,7 +143,7 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
         model.train(was_training)
 
 
-def evaluate_runner(runner, images, annotations, batch=16, log=None):
+def evaluate_runner(runner, images, annotations, batch=16, log=None) -> dict[str, float]:
     """COCO metrics for a deployed detector -- a `mayaku.inference.Runner`,
     so a checkpoint and its exported artifacts score through their own
     preprocessing, graph and precision -- on the split `annotations` /

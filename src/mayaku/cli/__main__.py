@@ -27,7 +27,7 @@ import typer
 from mayaku.api import evaluate, train
 from mayaku.config import parse_assignments
 from mayaku.engine.evaluation import rle
-from mayaku.inference import Predictor, from_pretrained
+from mayaku.inference import Detections, Predictor, from_pretrained
 from mayaku.inference.export import TARGETS
 from mayaku.utils.download import (
     DEFAULT_MANIFEST_URL,
@@ -44,8 +44,6 @@ app = typer.Typer(
 )
 
 _WEIGHTS_HELP = "A checkpoint, a hosted model name, or an exported artifact."
-_JSON = {"exists": True, "dir_okay": False}
-_DIR = {"exists": True, "file_okay": False}
 
 
 @app.command("train")
@@ -56,13 +54,13 @@ def _train(
     weights: str | None = typer.Option(
         None, "--weights", help="Checkpoint or hosted model name to warm-start from."),
     annotations: Path = typer.Option(
-        ..., "--annotations", **_JSON, help="Train COCO annotation JSON."),
-    images: Path = typer.Option(..., "--images", **_DIR, help="Train image directory."),
+        ..., "--annotations", exists=True, dir_okay=False, help="Train COCO annotation JSON."),
+    images: Path = typer.Option(..., "--images", exists=True, file_okay=False, help="Train image directory."),
     val_annotations: Path | None = typer.Option(
-        None, "--val-annotations", **_JSON,
+        None, "--val-annotations", exists=True, dir_okay=False,
         help="Validation COCO JSON; enables per-epoch evaluation."),
     val_images: Path | None = typer.Option(
-        None, "--val-images", **_DIR, help="Validation images."),
+        None, "--val-images", exists=True, file_okay=False, help="Validation images."),
     output: Path | None = typer.Option(
         None, "--output", file_okay=False, help="Run directory; default ./runs/<name>."),
     epochs: int | None = typer.Option(None, "--epochs", min=1, help="Sets train.epochs."),
@@ -97,8 +95,8 @@ def _train(
 @app.command("eval")
 def _eval(
     weights: str = typer.Argument(..., help=_WEIGHTS_HELP),
-    annotations: Path = typer.Option(..., "--annotations", **_JSON, help="COCO annotation JSON."),
-    images: Path = typer.Option(..., "--images", **_DIR, help="Image directory."),
+    annotations: Path = typer.Option(..., "--annotations", exists=True, dir_okay=False, help="COCO annotation JSON."),
+    images: Path = typer.Option(..., "--images", exists=True, file_okay=False, help="Image directory."),
     output: Path | None = typer.Option(
         None, "--output", file_okay=False, help="Directory to write metrics.json to."),
     device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
@@ -172,7 +170,7 @@ def _download(
         typer.echo(f"{n}: {path}")
 
 
-def _to_json(dets, class_names: list[str]) -> list[dict[str, Any]]:
+def _to_json(dets: Detections, class_names: list[str]) -> list[dict[str, Any]]:
     """`Detections` as one JSON object per detection: an xyxy box in the
     image's pixels, keypoints as (x, y, visibility), a mask as COCO RLE."""
     out = []

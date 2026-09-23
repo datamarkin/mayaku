@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from mayaku.config import MayakuConfig, merge_overrides
 from mayaku.data.canvas import canvas_for_data
+
+if TYPE_CHECKING:
+    from mayaku.data.coco import CocoLabels
 
 __all__ = ["AUTO_PATHS", "MIN_IMAGES_FOR_AUTO_CONFIG", "apply_auto_config", "collect_set_paths"]
 
@@ -89,7 +92,7 @@ def _finetune_epochs(num_images: int) -> int:
     return round(MAX_FINETUNE_EPOCHS - t * (MAX_FINETUNE_EPOCHS - MIN_FINETUNE_EPOCHS))
 
 
-def _structural(coco, cfg: MayakuConfig) -> dict[str, Any]:
+def _structural(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
     """The dataset's structural facts as config overrides."""
     out: dict[str, Any] = {
         "model": {"num_classes": len(coco.cat_ids)},
@@ -101,10 +104,11 @@ def _structural(coco, cfg: MayakuConfig) -> dict[str, Any]:
     return out
 
 
-def _required(coco, cfg: MayakuConfig) -> dict[str, Any]:
+def _required(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
     """The class count and canvas still unset after tuning, filled plainly;
     raises when a set class count disagrees with the data."""
-    nc, out = len(coco.cat_ids), {}
+    nc = len(coco.cat_ids)
+    out: dict[str, Any] = {}
     if cfg.model.num_classes is None:
         out["model"] = {"num_classes": nc}
     elif cfg.model.num_classes != nc:
@@ -131,7 +135,7 @@ def _finetune(num_images: int) -> dict[str, Any]:
     }}
 
 
-def apply_auto_config(cfg: MayakuConfig, coco, user_set_paths: Collection[str] = (),
+def apply_auto_config(cfg: MayakuConfig, coco: CocoLabels, user_set_paths: Collection[str] = (),
                       finetune: bool = True) -> tuple[MayakuConfig, list[tuple[str, Any, Any]]]:
     """`cfg` with the auto-derived fields filled in from the training
     annotations `coco` (`mayaku.data.coco.CocoLabels`), and the list of

@@ -9,8 +9,13 @@ given, else in original pixels.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import numpy.typing as npt
+
+if TYPE_CHECKING:
+    from mayaku.data.coco import CocoLabels
 
 __all__ = ["DatasetStats", "analyze_dataset"]
 
@@ -20,8 +25,8 @@ class DatasetStats:
     num_images: int
     num_classes: int
     class_counts: dict[int, int]            # class index -> images containing it
-    sqrt_areas: np.ndarray                  # per box, in the measured frame
-    aspect_ratios: np.ndarray               # per box, w / h
+    sqrt_areas: npt.NDArray[np.floating[Any]]  # per box, in the measured frame
+    aspect_ratios: npt.NDArray[np.floating[Any]]  # per box, w / h
     num_degenerate_boxes: int = 0           # dropped at load: a side of a pixel or less
     num_images_without_annotations: int = 0
 
@@ -39,7 +44,7 @@ class DatasetStats:
         return max(counts) / max(1, min(counts))
 
 
-def analyze_dataset(coco, canvas: tuple[int, int] | None = None) -> DatasetStats:
+def analyze_dataset(coco: CocoLabels, canvas: tuple[int, int] | None = None) -> DatasetStats:
     """`DatasetStats` of a `mayaku.data.coco.CocoLabels`, box sizes measured
     after letterboxing onto `canvas` (H, W) when given."""
     labels = list(coco.labels)

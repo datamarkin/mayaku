@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from mayaku.config import MayakuConfig
 from mayaku.data.canvas import canvas_for_data
@@ -60,7 +61,7 @@ def health_check(annotations: str | Path, images: str | Path,
     }
 
 
-def _size_fractions(sqrt_areas: np.ndarray) -> dict[str, float]:
+def _size_fractions(sqrt_areas: npt.NDArray[np.floating[Any]]) -> dict[str, float]:
     """Fraction of boxes in each COCO size bucket."""
     if not len(sqrt_areas):
         return {"small": 0.0, "medium": 0.0, "large": 0.0}
@@ -69,7 +70,7 @@ def _size_fractions(sqrt_areas: np.ndarray) -> dict[str, float]:
     return {"small": round(small, 2), "medium": round(1 - small - large, 2), "large": round(large, 2)}
 
 
-def _percentiles(values: np.ndarray) -> dict[str, float] | None:
+def _percentiles(values: npt.NDArray[np.floating[Any]]) -> dict[str, float] | None:
     """p10 / median / p90 of ``values``; ``None`` when there's too little."""
     if len(values) < 2:
         return None

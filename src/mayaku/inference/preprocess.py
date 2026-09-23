@@ -7,18 +7,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from mayaku.data.batch import to_tensor
 from mayaku.data.geometry import letterbox
 
-ImageInput = str | Path | np.ndarray
+ImageInput = str | Path | npt.NDArray[Any]
 
 
-def read_bgr(image: ImageInput) -> np.ndarray:
+def read_bgr(image: ImageInput) -> npt.NDArray[Any]:
     """A path (decoded with OpenCV, as in training) or an (H, W, 3) RGB array
     -> (H, W, 3) uint8 BGR, the layout training letterboxes."""
     if isinstance(image, str | Path):
@@ -34,7 +36,7 @@ def read_bgr(image: ImageInput) -> np.ndarray:
 
 
 def letterbox_batch(images: Sequence[ImageInput], canvas: tuple[int, int]
-                    ) -> tuple[torch.Tensor, list[dict]]:
+                    ) -> tuple[torch.Tensor, list[dict[str, Any]]]:
     """Images -> ((B, 3, H, W) uint8 RGB, letterbox metas {"ratio", "pad",
     "shape"})."""
     out, metas = [], []

@@ -123,6 +123,14 @@ class InputConfig(_BaseModel):
     size_budget: Annotated[int, Field(gt=0)] = 800
     canvas_hw: tuple[int, int] | None = None
 
+    @property
+    def canvas(self) -> tuple[int, int]:
+        """The resolved canvas; raises while it is still unset (auto-config
+        sets it from the training data before a model is built)."""
+        if self.canvas_hw is None:
+            raise ValueError("input.canvas_hw is unset")
+        return self.canvas_hw
+
     @field_validator("size_budget", "canvas_hw")
     @classmethod
     def _on_the_grid(cls, v: int | tuple[int, int] | None) -> int | tuple[int, int] | None:

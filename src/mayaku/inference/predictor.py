@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -14,6 +14,9 @@ from mayaku.inference.export.metadata import SUFFIX_TO_TARGET
 from mayaku.inference.runner import Runner
 from mayaku.utils.checkpoint import read_deploy_checkpoint
 
+if TYPE_CHECKING:
+    from mayaku.model import Detector
+
 __all__ = ["Predictor", "from_pretrained"]
 
 
@@ -22,7 +25,7 @@ class Predictor(Runner):
     with its sidecar: architecture, canvas, classes and decode all come from
     the checkpoint."""
 
-    def __init__(self, model: torch.nn.Module, sidecar: Mapping[str, Any], device: str = "auto"):
+    def __init__(self, model: Detector, sidecar: Mapping[str, Any], device: str = "auto"):
         super().__init__(sidecar, "Predictor")
         self.device = torch.device(Device.resolve(device))
         self.model = model.for_deploy().to(self.device)
@@ -32,12 +35,12 @@ class Predictor(Runner):
         """Rebuild the model its sidecar describes (quantization-aware when it
         was trained so) and load the weights strictly."""
         sidecar, cfg, state = read_deploy_checkpoint(Path(path))
-        model = cfg.model.build(cfg.input.canvas_hw, len(sidecar["class_names"]))
+        model = cfg.model.build(cfg.input.canvas, len(sidecar["class_names"]))
         model.load_state_dict(state, strict=True)
         return cls(model, sidecar, device)
 
     def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        return self.model(batch_to(x, self.device))
+        return cast(list[torch.Tensor], self.model(batch_to(x, self.device)))
 
     def export(self, target: str = "onnx", output: str | Path | None = None) -> Path:
         """Write a deployable artifact with this model's sidecar embedded;

@@ -142,7 +142,7 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY):
     return out
 
 
-def decode_sidecar(preds, metas, sidecar, conf=None):
+def decode_sidecar(preds, metas, sidecar, conf=None) -> list[Detections]:
     """`decode` with every parameter read from a model's sidecar (see
     `mayaku.utils.checkpoint.build_sidecar`); `conf` overrides the recorded
     score threshold."""

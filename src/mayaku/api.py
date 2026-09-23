@@ -108,12 +108,12 @@ def train(
                          "directory) are required")
     train_annotations, train_images = Path(train_annotations), Path(train_images)
     _check_split(train_annotations, train_images)
-    if (val_annotations is None) != (val_images is None):
+    val: tuple[Path, Path] | None = None
+    if val_annotations is not None and val_images is not None:
+        val = Path(val_annotations), Path(val_images)
+        _check_split(*val)
+    elif (val_annotations, val_images) != (None, None):
         raise ValueError("val_annotations and val_images go together")
-    has_val = val_annotations is not None
-    if has_val:
-        val_annotations, val_images = Path(val_annotations), Path(val_images)
-        _check_split(val_annotations, val_images)
     if num_gpus != 1:
         raise NotImplementedError("multi-GPU training is not available yet; use num_gpus=1")
     device = Device.resolve(device)
@@ -152,11 +152,13 @@ def train(
     elif resumed["class_names"] != coco.class_names:
         raise ValueError(f"{train_annotations} is not the dataset this run was training on")
 
-    canvas = cfg.input.canvas_hw
+    canvas = cfg.input.canvas
     train_ds = CocoDetection(str(train_images), str(train_annotations), canvas,
                              aug=cfg.train.aug, seed=cfg.train.seed, coco=coco, **labels)
-    val_ds = (CocoDetection(str(val_images), str(val_annotations), canvas, **labels)
-              if has_val else None)
+    val_ds = None
+    if val:
+        val_ann, val_img = val
+        val_ds = CocoDetection(str(val_img), str(val_ann), canvas, **labels)
     model = cfg.model.build(canvas)
     if pretrained is not None:
         info = load_pretrained(model, pretrained)
@@ -178,9 +180,9 @@ def train(
     log(f"[mayaku.train] done in {train_seconds / 3600:.2f}h; final weights {final_weights}")
 
     metrics, eval_seconds = None, None
-    if has_val:
+    if val:
         t0 = time.time()
-        metrics = evaluate(final_weights, annotations=val_annotations, images=val_images,
+        metrics = evaluate(final_weights, annotations=val_ann, images=val_img,
                            output_dir=run_dir / "eval", device=device)
         eval_seconds = time.time() - t0
         log(f"[mayaku.train] box AP {metrics['AP']:.4f}")
@@ -235,14 +237,16 @@ def evaluate(
     annotations, images = Path(annotations), Path(images)
     _check_split(annotations, images)
     runner = from_pretrained(weights, device=device)
-    metrics = evaluate_runner(runner, images, annotations, log=log)
+    metrics: dict[str, Any] = evaluate_runner(runner, images, annotations, log=log)
     if output_dir is not None:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         (Path(output_dir) / "metrics.json").write_text(json.dumps(metrics, indent=2))
     return metrics
 
 
-def _resolve_model(config, weights):
+def _resolve_model(
+    config: str | Path | MayakuConfig | None, weights: str | Path | None,
+) -> tuple[MayakuConfig, str, set[str], dict[str, Any] | None]:
     """``(cfg, run name, user-set paths, pretrained state or None)`` from the
     model source(s); see `train`."""
     pretrained, ckpt_cfg, stem = None, None, "mayaku_run"

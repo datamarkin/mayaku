@@ -23,8 +23,15 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Sequence
+from typing import Any
+
+import numpy as np
+import numpy.typing as npt
 
 from mayaku.model.blocks import CANVAS_ALIGN
+
+#: Image (height, width) pairs: a sequence of pairs or an (n, 2) array.
+Shapes = Sequence[tuple[int, int]] | npt.NDArray[np.integer[Any]]
 
 __all__ = [
     "ASPECT_UNIFORMITY_THRESHOLD",
@@ -50,7 +57,7 @@ def aspect_spread(aspects: Sequence[float]) -> float:
     return s[(n * 9) // 10] / max(s[n // 10], 1e-9)
 
 
-def data_aspect(shapes: Sequence[tuple[int, int]]) -> tuple[float, bool]:
+def data_aspect(shapes: Shapes) -> tuple[float, bool]:
     """Median image aspect ``W / H`` and whether the data is one aspect, from
     (height, width) image shapes. Uniform means the robust spread is within
     :data:`ASPECT_UNIFORMITY_THRESHOLD`, so a few outliers never flip it."""
@@ -96,7 +103,7 @@ def snap_max_content(budget: int, aspect: float) -> tuple[int, int]:
     return best_hw
 
 
-def canvas_for_data(shapes: Sequence[tuple[int, int]], size_budget: int) -> tuple[int, int]:
+def canvas_for_data(shapes: Shapes, size_budget: int) -> tuple[int, int]:
     """The canvas for a dataset of (height, width) image shapes under
     ``size_budget ** 2`` pixels: a rectangle at the data's aspect when it has
     one (no padding waste), else a square, which is robust to any shape."""
