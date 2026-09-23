@@ -80,12 +80,12 @@ class AuxBranch(nn.Module):
         outputs (unused when `arm` is "tower")."""
         f = F.relu(self.p3(feats[0]) + up2x(self.p4(feats[1]))
                    + up2x(up2x(self.p5(feats[2]))))
-        per = boxes if self.tower is None else [t(x) for t, x in zip(self.tower, feats)]
+        per = boxes if self.tower is None else [t(x) for t, x in zip(self.tower, feats, strict=True)]
         out = []
         if self.seg:
-            out += [self.mask(f)] + [k(x) for k, x in zip(self.ker, per)]
+            out += [self.mask(f)] + [k(x) for k, x in zip(self.ker, per, strict=True)]
         if self.kpt:
-            out += [self.heat(f)] + [k(x) for k, x in zip(self.kp, per)]
+            out += [self.heat(f)] + [k(x) for k, x in zip(self.kp, per, strict=True)]
         return out
 
     def readouts(self):

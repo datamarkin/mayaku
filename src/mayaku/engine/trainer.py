@@ -168,9 +168,9 @@ def build_optimizer(model, r, accumulate):
         for w in groups[0]["params"]:
             is_hidden = w.ndim == 4 and w.shape[1] != 3 and id(w) not in readout
             (hidden if is_hidden else plain).append(w)
-        groups = ([{**groups[0], "params": hidden, "muon": True},
-                   {**groups[0], "params": plain, "muon": False}]
-                  + groups[1:])
+        groups = [{**groups[0], "params": hidden, "muon": True},
+                  {**groups[0], "params": plain, "muon": False},
+                  *groups[1:]]
         return MuonSGD(groups, lr=r.lr, momentum=r.momentum, mix=r.muon_mix)
     return torch.optim.AdamW(groups, lr=r.lr, betas=(r.beta1, 0.999))
 

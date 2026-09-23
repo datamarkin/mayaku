@@ -259,7 +259,7 @@ class SPPFAdd(nn.Module):
         p4 = self.pool(self.pool(p2))
         p6 = self.pool(self.pool(p4))
         y = self.proj[0](t)
-        for proj, scale in zip(self.proj[1:], (p2, p4, p6)):
+        for proj, scale in zip(self.proj[1:], (p2, p4, p6), strict=True):
             y = y + proj(scale)
         return F.relu(y)
 

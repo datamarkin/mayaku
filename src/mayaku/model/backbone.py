@@ -12,7 +12,7 @@ class Backbone(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.stem = Stem(cfg.stem)
-        chs = (cfg.stem,) + tuple(cfg.width)
+        chs = (cfg.stem, *tuple(cfg.width))
         self.down, self.stages = nn.ModuleList(), nn.ModuleList()
         for i, n in enumerate(cfg.depth):
             self.down.append(RepConv3x3(chs[i], chs[i + 1], 2))
@@ -23,7 +23,7 @@ class Backbone(nn.Module):
     def forward(self, x):
         x = self.stem(x)
         outs = []
-        for down, stage in zip(self.down, self.stages):
+        for down, stage in zip(self.down, self.stages, strict=True):
             x = stage(down(x))
             outs.append(x)
         outs[-1] = self.sppf(outs[-1])

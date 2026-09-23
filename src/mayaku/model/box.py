@@ -34,7 +34,7 @@ def anchor_grid(shapes, strides, offset=0.5, device="cpu", dtype=torch.float32):
 @functools.lru_cache(maxsize=32)
 def _grid(shapes, strides, offset, device, dtype):
     points, strides_out = [], []
-    for (h, w), s in zip(shapes, strides):
+    for (h, w), s in zip(shapes, strides, strict=True):
         sx = (torch.arange(w, device=device, dtype=dtype) + offset) * s
         sy = (torch.arange(h, device=device, dtype=dtype) + offset) * s
         y, x = torch.meshgrid(sy, sx, indexing="ij")

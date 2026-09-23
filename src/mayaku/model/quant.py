@@ -148,7 +148,7 @@ def fake_quant_disabled(model):
     try:
         yield model
     finally:
-        for m, s in zip(quant, saved):
+        for m, s in zip(quant, saved, strict=True):
             m.fake_quant = s
 
 
@@ -164,7 +164,7 @@ def ranges_frozen(model):
     try:
         yield model
     finally:
-        for m, s in zip(obs, saved):
+        for m, s in zip(obs, saved, strict=True):
             m.observe = s
 
 
@@ -192,6 +192,6 @@ def recalibrate_ranges(model, batches):
         m.train()
     for x in batches:
         model(x)
-    for m, mom in zip(obs, momenta):
+    for m, mom in zip(obs, momenta, strict=True):
         m.momentum = mom
     model.train(was_training)

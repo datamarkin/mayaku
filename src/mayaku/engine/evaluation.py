@@ -33,7 +33,7 @@ def to_coco(det, image_id, cat_ids):
     box = det.boxes.clone()
     box[:, 2:] -= box[:, :2]
     return [{"image_id": image_id, "category_id": cat_ids[int(c)], "bbox": b, "score": s}
-            for b, s, c in zip(box.tolist(), det.scores.tolist(), det.labels.tolist())]
+            for b, s, c in zip(box.tolist(), det.scores.tolist(), det.labels.tolist(), strict=True)]
 
 
 def rle(mask):
@@ -88,7 +88,7 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
         e.evaluate()
         e.accumulate()
         e.summarize()
-    return dict(zip(stats, [float(v) for v in e.stats]))
+    return dict(zip(stats, [float(v) for v in e.stats], strict=True))
 
 
 def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
@@ -134,7 +134,7 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
         for imgs, _, metas, _ in loader:
             preds = model(batch_to(imgs, device))
             dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d)
-            yield from ((meta["id"], det) for meta, det in zip(metas, dets))
+            yield from ((meta["id"], det) for meta, det in zip(metas, dets, strict=True))
 
     try:
         return score(dataset.ann_path, detections(), dataset.cat_ids, seg, kpt,
@@ -164,7 +164,7 @@ def evaluate_runner(runner, images, annotations, batch=16, log=None):
         for i in range(0, len(files), batch):
             if log and i and i % (100 * batch) == 0:
                 log("eval %d/%d" % (i, len(files)))
-            yield from zip(ids[i:i + batch], runner.batch(files[i:i + batch]))
+            yield from zip(ids[i:i + batch], runner.batch(files[i:i + batch]), strict=True)
 
     return score(ann, detections(), cat_ids,
                  seg=runner.sidecar["mask"] is not None, kpt=kp["num"] if kp else 0)

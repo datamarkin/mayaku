@@ -53,7 +53,7 @@ class FPGStage(nn.Module):
             for i in range(self.nl):
                 out[i] = out[i] + self.skip[i](prev[i])
         out = [F.relu(o) for o in out]
-        return [p(o) for p, o in zip(self.proc, out)]
+        return [p(o) for p, o in zip(self.proc, out, strict=True)]
 
 
 class FPG(nn.Module):
@@ -68,17 +68,17 @@ class FPG(nn.Module):
         super().__init__()
         nl = len(STRIDES)
         c = per_level(ch, nl)
-        self.lateral = nn.ModuleList(ConvBNReLU(a, b, 1) for a, b in zip(cin, c))
+        self.lateral = nn.ModuleList(ConvBNReLU(a, b, 1) for a, b in zip(cin, c, strict=True))
         self.paths = nn.ModuleList(
             FPGStage(nl, c, skip=(i >= 2), down=(i == n_path - 1))
             for i in range(n_path))
         self.out = nn.ModuleList(DenseOut(c[i]) for i in range(nl))
 
     def forward(self, xs):
-        xs = [lat(x) for lat, x in zip(self.lateral, xs)]
+        xs = [lat(x) for lat, x in zip(self.lateral, xs, strict=True)]
         history = [xs]
         for path in self.paths:
             prev = history[-2] if len(history) >= 2 else None
             xs = path(xs, prev)
             history.append(xs)
-        return [o(x) for o, x in zip(self.out, xs)]
+        return [o(x) for o, x in zip(self.out, xs, strict=True)]

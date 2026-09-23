@@ -81,7 +81,7 @@ def postprocess(preds, nc, reg_max, d=DEPLOY):
     cls, _, boxes, points, stride, _ = decode_head(preds, nc, reg_max)
     floor = math.log(d.conf / (1 - d.conf))
     out, idxs = [], []
-    for logits, bx in zip(cls, boxes):
+    for logits, bx in zip(cls, boxes, strict=True):
         anchor = torch.arange(len(bx), device=bx.device)
         if d.multi_label:
             i, lab = (logits > floor).nonzero(as_tuple=True)

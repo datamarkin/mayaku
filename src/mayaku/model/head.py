@@ -31,7 +31,7 @@ class Head(Fusible):
         super().__init__()
         nl = len(STRIDES)
         chs = per_level(ch, nl)
-        ws = tuple(w or c for w, c in zip(per_level(width, nl), chs))
+        ws = tuple(w or c for w, c in zip(per_level(width, nl), chs, strict=True))
         self.widths = ws   # tower output width per level; the aux branch reads it
 
         def tower():
@@ -62,7 +62,7 @@ class Head(Fusible):
         density term.
         """
         h, w = canvas
-        for cls, box, s in zip(self.cls, self.box, STRIDES):
+        for cls, box, s in zip(self.cls, self.box, STRIDES, strict=True):
             nn.init.constant_(cls.bias, math.log(objects / nc / ((h / s) * (w / s))))
             nn.init.constant_(box.bias, 1.0)
 

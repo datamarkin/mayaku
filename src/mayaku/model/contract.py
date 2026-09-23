@@ -97,7 +97,7 @@ def check_parity(model, canvas):
     model.fuse()
     with torch.no_grad():
         got = model(x)
-    err = max((r - g).abs().max().item() for r, g in zip(ref, got))
+    err = max((r - g).abs().max().item() for r, g in zip(ref, got, strict=True))
     scale = max(r.abs().max().item() for r in ref)
     assert err < 1e-4 * max(scale, 1.0), "fusion is not exact: %.3e" % err
     with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
