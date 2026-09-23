@@ -60,7 +60,7 @@ def test_tiny_run_learns(tmp_path, qat) -> None:
     batches per update and 36 epochs on 32 images would be 18 steps."""
     r = dataclasses.replace(
         BASE, epochs=36, batch=4, lr_ref_batch=4, lr=0.02,
-        final_epochs=8, warmup_epochs=1.0, warmup_iters_min=20,
+        final_frac=0.22, warmup_epochs=1.0, warmup_iters_min=20,
         assigner_warmup=2, amp=False, recalibrate_images=32)
     tr = fixture(tmp_path / "train", n=32, canvas=192, aug=DEFAULT_AUG, seed=3)
     va = fixture(tmp_path / "val", n=32, canvas=192, seed=3)

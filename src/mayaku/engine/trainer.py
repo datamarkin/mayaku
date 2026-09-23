@@ -72,7 +72,9 @@ class Recipe:
     warmup_iters_min: int = 100     # a floor, so a tiny set still warms up
     warmup_momentum_start: float = 0.8  # momentum ramps up from this
     warmup_bias_lr_start: float = 0.1   # bias LR ramps down from this
-    final_epochs: int = 20          # final epochs run `final_aug`
+    # Share of the run, at the end, trained with `final_aug` (the clean stage):
+    # 0.16 of 125 epochs is the last 20. See `final_epochs`.
+    final_frac: float = 0.16
     assigner_warmup: int = 5        # epochs of ATSS before TAL
     atss_soft: bool = False         # scale the ATSS class target by best IoU
     cls_loss: str = "bce"           # bce | vfl
@@ -104,7 +106,13 @@ class Recipe:
 
     def __post_init__(self):
         assert self.optimizer in ("sgd", "adamw", "musgd"), self.optimizer
-        assert self.final_epochs < self.epochs
+        assert 0.0 <= self.final_frac < 1.0, self.final_frac
+
+    @property
+    def final_epochs(self) -> int:
+        """Epochs in the clean final stage: `final_frac` of the run, rounded,
+        always shorter than the run."""
+        return min(round(self.final_frac * self.epochs), self.epochs - 1)
 
 
 BASE = Recipe()
