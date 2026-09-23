@@ -31,8 +31,15 @@ from torch.optim.swa_utils import update_bn
 from torch.utils.data import DataLoader, Dataset
 
 from mayaku.data.augment import CLEAN_AUG, DEFAULT_AUG, Augment
-from mayaku.data.batch import (batch_to, collate, multiscale_sizes, rescale_batch,
-                               seed_worker, to_tensor)
+from mayaku.data.batch import (
+    batch_to,
+    collate,
+    multiscale_sizes,
+    rescale_batch,
+    seed_worker,
+    to_tensor,
+)
+from mayaku.data.geometry import as_canvas
 from mayaku.engine.evaluation import DEPLOY, STATS, Decode, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
 from mayaku.model.quant import enable_qat, ranges_frozen, recalibrate_ranges
@@ -304,7 +311,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     directory can always reproduce and rebuild its own model.
     """
     assert model.nc == train_ds.nc == val_ds.nc, "head and labels disagree"
-    assert train_ds.imgsz == val_ds.imgsz == r.imgsz, "recipe imgsz disagrees with the data"
+    assert train_ds.canvas == val_ds.canvas == as_canvas(r.imgsz), \
+        "recipe imgsz disagrees with the data canvas"
     torch.manual_seed(r.seed)
     model = model.to(device)
     if r.qat:
