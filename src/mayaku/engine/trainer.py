@@ -43,7 +43,9 @@ from mayaku.engine.evaluation import STATS, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
 from mayaku.model.quant import is_qat, ranges_frozen, recalibrate_ranges
-from mayaku.utils.checkpoint import save_checkpoint
+from mayaku.utils.checkpoint import SIDECAR_KEY, check_sidecar, save_checkpoint
+
+STATE = "state.pt"   # the resumable training state `train` writes to `out`
 
 
 @dataclasses.dataclass(frozen=True)
@@ -301,11 +303,13 @@ def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
 
 
 def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
-          workers=0, eval_every=1, log_every=100, log=print, sidecar=None):
+          workers=0, eval_every=1, log_every=100, log=print, sidecar=None, resume=None):
     """Run the recipe. Returns the best metrics, the EMA model, and the
-    per-epoch records.
+    per-epoch records (this call's epochs only, when resuming).
 
-    The canvas is the datasets' (both must agree). Quantization-aware
+    The canvas is the datasets' (both must agree). `val_ds` None trains
+    without evaluation: nothing is scored and no `best.pt` is written, so
+    `last.pt` is the run's result. Quantization-aware
     training is a property of the model: pass one that went through
     `mayaku.model.enable_qat` and training, scoring and the saved ranges are
     the int8 ones.
@@ -320,11 +324,25 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     directory can always reproduce and rebuild its own model. With a
     `sidecar` (`mayaku.utils.checkpoint.build_sidecar`), `best.pt` and
     `last.pt` carry it next to the weights and are self-describing.
+
+    After every epoch `out/state.pt` holds everything needed to continue:
+    the live and EMA weights, the optimizer, the loss scaler, the best
+    metrics so far and the sidecar. Pass it back as `resume` (`load_state`)
+    with the same recipe and datasets and training continues at the next
+    epoch. The schedule is a function of the epoch and iteration, so it
+    needs no state of its own.
+
+    Returns `best` None when there is no `val_ds`.
     """
-    assert model.nc == train_ds.nc == val_ds.nc, "head and labels disagree"
     canvas = train_ds.canvas
-    assert val_ds.canvas == canvas, "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
-    torch.manual_seed(r.seed)
+    assert model.nc == train_ds.nc, "head and labels disagree"
+    if val_ds is not None:
+        assert val_ds.nc == model.nc, "head and validation labels disagree"
+        assert val_ds.canvas == canvas, "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
+    start = resume["epoch"] + 1 if resume else 0
+    torch.manual_seed(r.seed + start)
+    if resume:
+        model.load_state_dict(resume["model"])
     model = model.to(device)
     qat = is_qat(model)
     accumulate = max(1, round(r.lr_ref_batch / r.batch))
@@ -338,6 +356,11 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     ema = EMA(model, r.ema_decay, r.ema_tau)
     amp = r.amp and device.startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    if resume:
+        ema.model.load_state_dict(resume["ema"])
+        ema.updates = resume["ema_updates"]
+        opt.load_state_dict(resume["optimizer"])
+        scaler.load_state_dict(resume["scaler"])
 
     def make_loader():
         return DataLoader(train_ds, batch_size=r.batch, shuffle=True,
@@ -354,17 +377,19 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         log("multi-scale training over %s" % ms_sizes)
     warmup_iters = max(round(r.warmup_epochs * len(loader)), r.warmup_iters_min)
     log_path = os.path.join(out, "log.jsonl") if out else None
-    if out:
+    if out and not resume:
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "recipe.json"), "w") as f:
             json.dump({**dataclasses.asdict(r), "canvas": list(canvas)}, f, indent=2)
         with open(os.path.join(out, "tier.json"), "w") as f:
             json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
         open(log_path, "w").close()
-    records, best = [], {"AP": -1.0}
+    records, best = [], resume["best"] if resume else {"AP": -1.0}
+    final_start = r.epochs - r.final_epochs
 
-    for epoch in range(r.epochs):
-        if epoch == r.epochs - r.final_epochs and train_ds.aug is not None:
+    for epoch in range(start, r.epochs):
+        # `>=`, not `==`: a run resumed inside the final stage enters it at once
+        if epoch >= final_start and train_ds.aug not in (None, r.final_aug):
             log("epoch %d: mosaic off, final stage %s" % (epoch, r.final_aug))
             train_ds.aug = r.final_aug
             # persistent workers hold their own copy of the dataset, so the
@@ -413,7 +438,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         # honest statistics for everything scored or saved below
         recalibrate(ema.model, train_ds, r.recalibrate_images,
                     device=device, workers=min(workers, 4))
-        if (epoch + 1) % eval_every == 0 or epoch == r.epochs - 1:
+        if val_ds is not None and ((epoch + 1) % eval_every == 0 or epoch == r.epochs - 1):
             rec.update(evaluate(ema.model, val_ds, device=device,
                                 batch=r.batch, workers=workers, d=r.decode))
             if rec["AP"] > best["AP"]:
@@ -431,4 +456,20 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             with open(log_path, "a") as f:
                 f.write(json.dumps(rec) + "\n")
             save_checkpoint(ema.model, os.path.join(out, "last.pt"), sidecar)
-    return best, ema.model, records
+            state = {"epoch": epoch, "model": model.state_dict(), "ema": ema.model.state_dict(),
+                     "ema_updates": ema.updates, "optimizer": opt.state_dict(),
+                     "scaler": scaler.state_dict(), "best": best, SIDECAR_KEY: sidecar}
+            # written aside and renamed, so a crash mid-save keeps the last good one
+            path = os.path.join(out, STATE)
+            torch.save(state, path + ".tmp")
+            os.replace(path + ".tmp", path)
+    return (best if val_ds is not None else None), ema.model, records
+
+
+def load_state(path):
+    """The training state `train` wrote, from the file or its run directory,
+    with its sidecar checked; pass it to `train` as `resume`."""
+    path = os.path.join(path, STATE) if os.path.isdir(path) else str(path)
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    check_sidecar(state.get(SIDECAR_KEY), path)
+    return state
