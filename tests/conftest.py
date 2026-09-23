@@ -6,26 +6,20 @@ actually be available on the host — silent fall-through to CPU has caused
 false-green test runs in past projects, so unavailable accelerators raise
 ``pytest.exit`` with a clear message rather than skipping.
 
-Run the suite once on each physical machine (Linux CPU box, Apple Silicon
-Mac, CUDA Linux box) with the matching ``MAYAKU_DEVICE`` to mark a step
-done — see ``PROJECT_STATUS.md`` for the per-step checklist.
+Tests build their data with `tests.unit._coco_fixture` (a synthetic COCO
+split written in well under a second) and their models on the TINY tier
+(`mayaku.model.TINY`), so the default run needs no downloads and no GPU.
 """
 
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import os
-import shutil
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 import torch
-
-if TYPE_CHECKING:
-    from mayaku.config import MayakuConfig
 
 _VALID_DEVICES = ("cpu", "mps", "cuda")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -63,10 +57,6 @@ def _resolve_device(kind: str) -> torch.device:
             )
         return torch.device("mps")
     return torch.device("cpu")
-
-
-def _is_importable(module: str) -> bool:
-    return importlib.util.find_spec(module) is not None
 
 
 def _verify_editable_install() -> None:
@@ -123,29 +113,7 @@ def _markers_that_will_skip(active_kind: str) -> list[str]:
         skipping.append("mps")
     if _cuda_device_count() < 2:
         skipping.append("multi_gpu")
-    if not _is_importable("coremltools"):
-        skipping.append("coreml")
-    if not _is_importable("openvino"):
-        skipping.append("openvino")
-    # TensorRT requires a CUDA host *and* the tensorrt python runtime.
-    # Skip on either gap so macOS / CPU-only Linux hosts get a clean
-    # session message instead of an import-time crash.
-    if active_kind != "cuda" or not _is_importable("tensorrt"):
-        skipping.append("tensorrt")
     return skipping
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Register backend markers (also declared in pyproject for redundancy)."""
-    for name, doc in (
-        ("cuda", "requires a CUDA device"),
-        ("mps", "requires an Apple-Silicon MPS device"),
-        ("multi_gpu", "requires >= 2 CUDA devices"),
-        ("coreml", "requires coremltools (macOS)"),
-        ("openvino", "requires openvino runtime"),
-        ("tensorrt", "requires a CUDA device + tensorrt runtime"),
-    ):
-        config.addinivalue_line("markers", f"{name}: {doc}")
 
 
 def pytest_report_header(config: pytest.Config) -> str:
@@ -166,10 +134,7 @@ def pytest_report_header(config: pytest.Config) -> str:
 def pytest_collection_modifyitems(config: pytest.Config, items: Iterable[pytest.Item]) -> None:
     """Auto-skip tests whose backend marker doesn't match the active backend."""
     kind = _selected_device_kind()
-    coreml_available = _is_importable("coremltools")
-    openvino_available = _is_importable("openvino")
     cuda_count = _cuda_device_count()
-    tensorrt_available = _is_importable("tensorrt")
 
     for item in items:
         if "cuda" in item.keywords and kind != "cuda":
@@ -182,180 +147,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: Iterable[pytest.
             item.add_marker(
                 pytest.mark.skip(reason=f"requires >= 2 CUDA devices (have {cuda_count})")
             )
-        if "coreml" in item.keywords and not coreml_available:
-            item.add_marker(pytest.mark.skip(reason="coremltools not installed"))
-        if "tensorrt" in item.keywords and (kind != "cuda" or not tensorrt_available):
-            reason = (
-                f"requires CUDA + tensorrt (active: {kind}, "
-                f"tensorrt_available={tensorrt_available})"
-            )
-            item.add_marker(pytest.mark.skip(reason=reason))
-        if "openvino" in item.keywords and not openvino_available:
-            item.add_marker(pytest.mark.skip(reason="openvino not installed"))
 
 
 @pytest.fixture(scope="session")
 def device() -> torch.device:
     """The active torch.device for this session, per MAYAKU_DEVICE."""
     return _resolve_device(_selected_device_kind())
-
-
-class _ToyWorkspace(Mapping[str, "Path | object"]):
-    """``toy_workspace``'s mapping, with ``weights`` materialised on demand.
-
-    Only about half the tests taking the fixture ever read ``weights``; the rest
-    just need the dataset + config. Building the detector and serialising it costs
-    ~550ms and 112MB of disk per test (measured), so it is done once per session
-    and copied here (~18ms) the first time a test actually asks — and never for
-    the tests that don't. Behaves as the plain dict it replaced, so call sites
-    keep using ``ws["weights"]``.
-    """
-
-    def __init__(self, eager: dict[str, Path | object], tmp_path: Path, source: Path) -> None:
-        self._eager = eager
-        self._tmp = tmp_path
-        self._source = source
-        self._weights: Path | None = None
-
-    def __getitem__(self, key: str) -> Path | object:
-        if key != "weights":
-            return self._eager[key]
-        if self._weights is None:
-            # Each test gets its own copy: they pass it to train/eval, which may
-            # write alongside it, and tmp_path keeps them isolated.
-            self._weights = Path(shutil.copy(self._source, self._tmp / "model.pth"))
-        return self._weights
-
-    def __iter__(self) -> Iterator[str]:
-        return iter((*self._eager, "weights"))
-
-    def __len__(self) -> int:
-        return len(self._eager) + 1
-
-
-@pytest.fixture(scope="session")
-def _toy_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The toy detector, built and serialised ONCE for the whole session.
-
-    ``toy_workspace`` copies this per test rather than rebuilding it 40 times.
-    """
-    from mayaku.cli._factory import build_detector
-    from tests.unit._checkpoint import save_self_describing
-
-    cfg = _toy_cfg()
-    return save_self_describing(
-        tmp_path_factory.mktemp("toy_ckpt") / "model.pth",
-        build_detector(cfg),
-        cfg,
-        class_names=("thing", "other"),
-    )
-
-
-def _toy_cfg() -> MayakuConfig:
-    """The tiny detector config shared by the workspace and its checkpoint."""
-    from mayaku.config import (
-        BackboneConfig,
-        InputConfig,
-        MayakuConfig,
-        ModelConfig,
-        ROIBoxHeadConfig,
-        ROIHeadsConfig,
-        RPNConfig,
-        SolverConfig,
-    )
-
-    return MayakuConfig(
-        model=ModelConfig(
-            meta_architecture="faster_rcnn",
-            backbone=BackboneConfig(name="resnet50", freeze_at=2, norm="FrozenBN"),
-            rpn=RPNConfig(
-                pre_nms_topk_train=100,
-                pre_nms_topk_test=50,
-                post_nms_topk_train=20,
-                post_nms_topk_test=10,
-                batch_size_per_image=16,
-            ),
-            roi_heads=ROIHeadsConfig(num_classes=2, batch_size_per_image=8),
-            roi_box_head=ROIBoxHeadConfig(num_fc=1, fc_dim=32),
-        ),
-        # Keep the toy image toy. Without this the InputConfig defaults apply and
-        # the 64x64 image is UPSCALED to 800x800 for every train iteration and
-        # eval pass — 1074ms/iter through ResNet-50-FPN vs 97ms at 128px
-        # (measured). The fine-tune tests feel it most: that path replaces the
-        # toy's num_epochs=2 with MIN_FINETUNE_EPOCHS=16 at ims_per_batch=4, so
-        # they were paying the upscale on every one of those images for no extra
-        # coverage — none of these tests assert anything about resolution. 128
-        # stays a multiple of the FPN's stride-32 floor, so the pyramid is still
-        # exercised down to p5/p6.
-        input=InputConfig(
-            min_size_train=(128,),
-            max_size_train=128,
-            min_size_test=128,
-            max_size_test=128,
-        ),
-        solver=SolverConfig(
-            base_lr=1e-4,
-            momentum=0.0,
-            ims_per_batch=1,
-            num_epochs=2,  # 1-image toy → 2 iters
-            warmup_factor=0.5,
-            checkpoint_period=2,
-        ),
-    )
-
-
-@pytest.fixture
-def toy_workspace(tmp_path: Path, _toy_checkpoint: Path) -> Mapping[str, Path | object]:
-    """1-image COCO + tiny detector config, both committed to disk.
-
-    Used by ``test_cli`` (CLI subcommands) and ``test_api_train`` (the
-    Python-side ``mayaku.train`` orchestrator). The returned mapping
-    carries the paths each test reaches for; the pre-built ``weights``
-    file is only needed by the CLI tests' ``--weights`` flag, so it is
-    copied from the session checkpoint on first access (see
-    :class:`_ToyWorkspace`).
-    """
-    import json as _json
-
-    import numpy as np
-    from PIL import Image as _Image
-
-    from mayaku.config import dump_yaml
-
-    images_dir = tmp_path / "images"
-    images_dir.mkdir()
-    rgb = (np.random.default_rng(0).random((64, 64, 3)) * 255).astype(np.uint8)
-    _Image.fromarray(rgb).save(images_dir / "img.png")
-
-    coco = {
-        "images": [{"id": 1, "file_name": "img.png", "height": 64, "width": 64}],
-        "categories": [{"id": 1, "name": "thing", "supercategory": "thing"}],
-        "annotations": [
-            {
-                "id": 100,
-                "image_id": 1,
-                "category_id": 1,
-                "bbox": [10.0, 10.0, 30.0, 30.0],
-                "area": 900.0,
-                "iscrowd": 0,
-            }
-        ],
-    }
-    json_path = tmp_path / "gt.json"
-    json_path.write_text(_json.dumps(coco))
-
-    cfg = _toy_cfg()
-    cfg_path = tmp_path / "cfg.yaml"
-    dump_yaml(cfg, cfg_path)
-
-    return _ToyWorkspace(
-        {
-            "images": images_dir,
-            "json": json_path,
-            "cfg": cfg_path,
-            "cfg_obj": cfg,
-            "image_file": images_dir / "img.png",
-        },
-        tmp_path,
-        _toy_checkpoint,
-    )
