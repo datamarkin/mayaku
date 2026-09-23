@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mayaku.data.batch import split_extras
 from mayaku.engine.assign import AssignInput, WarmupAssigner
 from mayaku.model import box as boxlib
 from mayaku.model import kpt as kptlib
@@ -27,19 +28,9 @@ from mayaku.model import mask as masklib
 from mayaku.model.box import decode_head
 from mayaku.model.detector import split_outputs
 
-# The target table is [image, class, x1, y1, x2, y2] then a variable tail the
-# dataset appends in a fixed order: has_mask (one column) when it carries
-# masks, then the 3K keypoint values when it carries keypoints. `pad_targets`
-# splits that tail off as `extras`; `split_extras` owns the order.
-
-
-def split_extras(extras, seg, k):
-    """(..., E) extras -> (has_mask (...) or None, keypoints (..., 3k) or None).
-    A keypoint-only table has no has_mask column, so keypoints start at 0."""
-    ko = 1 if seg else 0
-    has_mask = extras[..., 0] if seg and extras.shape[-1] >= 1 else None
-    kpts = extras[..., ko:ko + 3 * k] if k and extras.shape[-1] >= ko + 3 * k else None
-    return has_mask, kpts
+# The target table is [image, class, x1, y1, x2, y2] then a tail of extra
+# columns; `pad_targets` splits the tail off as `extras`, and
+# `mayaku.data.batch.split_extras` owns its column order.
 
 
 def pad_targets(targets, batch):
@@ -212,6 +203,7 @@ class DetectionLoss(nn.Module):
         self.seg = SegLoss(seg_cap) if seg else None
         self.seg_gain = seg_gain
         self.kpt = KeypointLoss(kpt) if kpt else None
+        self.k = kpt
         self.kpt_gains = kpt_gains
 
     def forward(self, preds, targets, epoch=0, masks=None):
@@ -264,8 +256,7 @@ class DetectionLoss(nn.Module):
                  "positives": fg.sum(), "starved": starved.sum()}
         aux = pd_cls.sum() * 0
         grp = split_outputs(preds, seg=self.seg is not None, kpt=self.kpt is not None)
-        has_mask, gt_kpts = split_extras(extras, self.seg is not None,
-                                         self.kpt.k if self.kpt is not None else 0)
+        has_mask, gt_kpts = split_extras(extras, self.seg is not None, self.k)
         if self.seg is not None and masks is not None and has_mask is not None:
             seg, n = self.seg(grp["mask"], grp["ker"], a, points, stride,
                               masks.to(device, non_blocking=True), has_mask)
