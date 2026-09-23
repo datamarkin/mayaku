@@ -1,12 +1,17 @@
-"""Checkpoint-handling helpers shared between train scripts and the
-:func:`mayaku.api.train` orchestrator.
+"""Self-describing checkpoints: the "mayaku" sidecar, and reading it back.
 
-The three functions here were previously duplicated across
-``tools/train_mayaku.py`` and ``benchmarks/training_validation/tier3.py``
-in slightly different shapes; centralising them removes ~30 lines of
-copy-paste and gives both scripts the same behaviour for the
-EMA-checkpoint quirk (the EMA shadow stores ``num_batches_tracked``
-buffers that won't ``strict=True``-load unless stripped first).
+Every checkpoint and every exported artifact carries the same JSON sidecar
+next to the weights, so predict / eval / export rebuild the model and decode
+its outputs from the file alone. `build_sidecar` is its only writer and
+`check_sidecar` / `read_deploy_checkpoint` its readers; `save_checkpoint` /
+`load_checkpoint` own the checkpoint container around it.
+
+Two views, one source. `config` is the full `MayakuConfig`, for rebuilding
+the model in Python. Everything else is the flat runtime contract -- canvas,
+outputs, decode, preprocessing, mask and keypoint constants, quantization --
+which a non-Python runtime reads without understanding the config. The flat
+view is derived from the config and the trained model in `build_sidecar`, so
+the two cannot disagree.
 """
 
 from __future__ import annotations
@@ -22,180 +27,141 @@ if TYPE_CHECKING:
     from mayaku.config import MayakuConfig
 
 __all__ = [
+    "SIDECAR_KEY",
+    "SIDECAR_SCHEMA_VERSION",
     "build_sidecar",
-    "class_names_from_checkpoint",
-    "config_from_checkpoint",
+    "check_sidecar",
     "git_hash",
     "load_checkpoint",
     "read_deploy_checkpoint",
+    "save_checkpoint",
     "select_final_weights",
-    "strip_num_batches_tracked",
 ]
 
+#: Where the sidecar lives: the checkpoint dict key and every artifact's
+#: metadata key.
+SIDECAR_KEY = "mayaku"
 
-def select_final_weights(train_dir: Path) -> Path:
-    """Pick the canonical "final" checkpoint from ``train_dir``.
-
-    Preference order, highest first:
-
-    1. ``train_dir / "ema" / "model_final.pth"`` — EMA shadow, typically
-       +0.3-0.5 box AP over the live weights. If present, this function
-       also strips ``num_batches_tracked`` from it in-place so the file
-       loads with ``strict=True`` (the EMA shadow accumulates buffers
-       the live model doesn't have an entry for).
-    2. ``train_dir / "model_final.pth"`` — live final.
-    3. The latest ``model_iter_*.pth`` checkpoint — training crashed
-       before writing ``model_final.pth``; fall back to the most-recent
-       periodic checkpoint.
-
-    Raises ``RuntimeError`` if none of the three exist — training
-    likely failed before the first checkpoint period.
-    """
-    ema_final = train_dir / "ema" / "model_final.pth"
-    if ema_final.exists():
-        strip_num_batches_tracked(ema_final)
-        return ema_final
-
-    live_final = train_dir / "model_final.pth"
-    if live_final.exists():
-        return live_final
-
-    candidates = sorted(train_dir.glob("model_iter_*.pth"))
-    if candidates:
-        return candidates[-1]
-
-    raise RuntimeError(
-        f"no checkpoint produced under {train_dir} — training likely "
-        "failed before the first checkpoint period."
-    )
-
-
-def strip_num_batches_tracked(checkpoint_path: Path) -> None:
-    """Remove ``num_batches_tracked`` entries from a saved state-dict.
-
-    The EMA shadow tracks BN module buffers including
-    ``num_batches_tracked`` (an int counter), but the live model's
-    state-dict doesn't expose it as a trainable / loadable key — so
-    loading the EMA checkpoint with ``strict=True`` fails with
-    "unexpected keys". Strip in place so the file is drop-in compatible
-    with eval / predict / export paths.
-
-    Idempotent: if the checkpoint has no ``num_batches_tracked`` keys
-    (already stripped, or BN-free model), the file is not rewritten.
-    Cheap re-callability matters for ConvNeXt-Large where the EMA
-    checkpoint is ~800 MB on disk.
-    """
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if not any(k.endswith("num_batches_tracked") for k in state["model"]):
-        return
-    state["model"] = {
-        k: v for k, v in state["model"].items() if not k.endswith("num_batches_tracked")
-    }
-    torch.save(state, checkpoint_path)
-
-
-def load_checkpoint(checkpoint_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Deserialize a checkpoint **once**, returning ``(sidecar, model_state)``.
-
-    A single ``torch.load`` for callers that need both the self-describing
-    ``"mayaku"`` sidecar and the weights — reading a large ``.pth`` twice (once
-    for the config, once for the state) is the cost this avoids. ``sidecar`` is
-    ``None`` for checkpoints written without one; ``model_state`` is the
-    ``"model"`` block, or the whole object when it is a bare state_dict.
-
-    ``weights_only=True`` is safe here: the sidecar holds only JSON primitives
-    (``cfg.model_dump(mode="json")`` + names + provenance), which the restricted
-    unpickler allows alongside tensors.
-    """
-    obj = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    if not isinstance(obj, dict):
-        return None, obj
-    sidecar = obj.get("mayaku")
-    state = obj.get("model", obj)
-    return (sidecar if isinstance(sidecar, dict) else None), state
-
-
-def read_deploy_checkpoint(
-    checkpoint_path: Path,
-) -> tuple[MayakuConfig, list[str] | None, dict[str, Any]]:
-    """Read ``(config, class_names, model_state)`` from a self-describing checkpoint.
-
-    One deserialize for the deploy path (``load_detector``), which needs all
-    three — avoids re-reading a large ``.pth`` once for the config and again for
-    the class names. Both come from the embedded ``"mayaku"`` sidecar (the single
-    source of truth). Raises ``ValueError`` for a checkpoint with no sidecar (an
-    older or externally-produced ``.pth``) — convert it first.
-    """
-    from mayaku.config import MayakuConfig
-
-    sidecar, state = load_checkpoint(checkpoint_path)
-    config = sidecar.get("config") if sidecar else None
-    if not isinstance(config, dict):
-        raise ValueError(
-            f"{checkpoint_path} has no embedded config (an older or externally "
-            "produced checkpoint). Convert it first — predict/eval/export read "
-            "the architecture from the checkpoint's embedded sidecar."
-        )
-    names = sidecar.get("class_names") if sidecar else None
-    class_names = list(names) if isinstance(names, list) else None
-    return MayakuConfig.model_validate(config), class_names, state
-
-
-def config_from_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, dict[str, Any]]:
-    """Read ``(config, model_state)`` from a self-describing checkpoint.
-
-    Thin wrapper over :func:`read_deploy_checkpoint` for callers that don't need
-    the class names.
-    """
-    cfg, _class_names, state = read_deploy_checkpoint(checkpoint_path)
-    return cfg, state
-
-
-def class_names_from_checkpoint(checkpoint_path: Path) -> list[str] | None:
-    """Read the model's training ``class_names`` from a self-describing checkpoint.
-
-    Returns the ordered class list embedded in the ``"mayaku"`` sidecar
-    (contiguous index ``i`` == ``class_names[i]``) — the model's authoritative
-    class identity, used by the evaluator to decode predictions to GT
-    ``category_id`` by name. ``None`` when the checkpoint has no sidecar or no
-    recorded names (an older or externally produced ``.pth``).
-    """
-    sidecar, _ = load_checkpoint(checkpoint_path)
-    names = sidecar.get("class_names") if sidecar else None
-    return list(names) if isinstance(names, list) else None
+#: Version of the sidecar layout. 1 is mayaku 2.x (R-CNN / UniQuery models).
+SIDECAR_SCHEMA_VERSION = 2
 
 
 def build_sidecar(
     cfg: MayakuConfig,
     class_names: Sequence[str],
+    model: torch.nn.Module,
     provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the self-describing ``"mayaku"`` sidecar embedded in checkpoints.
+    """Assemble the sidecar for a trained `model` built from `cfg`.
 
-    The single writer of the sidecar schema, paired with
-    :func:`config_from_checkpoint` (the reader). Training embeds this block next
-    to the weights so ``predict``/``eval``/``export`` reconstruct the
-    architecture from the checkpoint alone — no separate config file.
+    The model's own `deploy_spec` supplies what it computes (outputs,
+    strides, DFL bins, mask and keypoint constants, whether it is QAT); the
+    config supplies the canvas, the decode thresholds and the keypoint names;
+    the data layer supplies the preprocessing contract. `provenance` adds
+    keys to the version and git hash recorded here.
     """
+    import mayaku
+    from mayaku.data.geometry import PREPROCESS
+
+    canvas = cfg.input.canvas_hw
+    if canvas is None:
+        raise ValueError("build_sidecar needs a resolved input.canvas_hw")
+    if not cfg.model.num_classes == model.nc == len(class_names):
+        raise ValueError(f"model.num_classes {cfg.model.num_classes}, the head's {model.nc} "
+                         f"and {len(class_names)} class names disagree")
+    spec, d, kp = model.deploy_spec(), cfg.train.decode, cfg.model.keypoints
+    keypoints = spec["keypoints"]
+    if keypoints and kp:
+        keypoints = {**keypoints, "names": list(kp.names), "flip_pairs": [list(p) for p in kp.flip_pairs]}
     return {
-        "schema_version": 1,
+        "schema_version": SIDECAR_SCHEMA_VERSION,
         "config": cfg.model_dump(mode="json"),
         "class_names": list(class_names),
-        "provenance": dict(provenance) if provenance else {},
+        "canvas_hw": list(canvas),
+        "outputs": spec["outputs"],
+        "decode": {"strides": spec["strides"], "reg_max": spec["reg_max"], "conf": d.conf,
+                   "iou": d.iou, "max_det": d.max_det, "topk": d.topk,
+                   "multi_label": d.multi_label},
+        "preprocess": dict(PREPROCESS),
+        "mask": spec["mask"],
+        "keypoints": keypoints,
+        "quant": {"qat": spec["qat"],
+                  "weights": "int8 per-channel symmetric",
+                  "activations": "int8 per-tensor affine"},
+        "provenance": {"mayaku_version": getattr(mayaku, "__version__", None), "git": git_hash(),
+                       **(provenance or {})},
     }
 
 
-def git_hash() -> str | None:
-    """Best-effort short git hash for metadata.json.
+def check_sidecar(sidecar: Mapping[str, Any] | None, source: str) -> Mapping[str, Any]:
+    """Validate that `sidecar` is one this version reads, and return it.
 
-    Returns ``None`` on non-git checkouts, when ``git`` isn't on PATH,
-    or when any other error makes the command fail. Never raises.
+    A missing sidecar means an externally produced file; schema version 1
+    means a mayaku 2.x model (R-CNN / UniQuery), which only mayaku<3 runs.
     """
+    if not sidecar or not isinstance(sidecar.get("config"), dict):
+        raise ValueError(f"{source} carries no mayaku sidecar: it was not written by mayaku, "
+                         "or its metadata was stripped")
+    version = sidecar.get("schema_version")
+    if version != SIDECAR_SCHEMA_VERSION:
+        if version == 1:
+            raise ValueError(f"{source} was trained with mayaku 2.x (sidecar schema 1); "
+                             "run it with `pip install 'mayaku<3'`")
+        raise ValueError(f"{source} has sidecar schema {version!r}; this mayaku reads "
+                         f"{SIDECAR_SCHEMA_VERSION}")
+    return sidecar
+
+
+def save_checkpoint(model: torch.nn.Module, path: str | Path,
+                    sidecar: Mapping[str, Any] | None = None) -> None:
+    """The weights, with the sidecar next to them when there is one
+    (``{"model": state, SIDECAR_KEY: sidecar}``), else the bare state dict."""
+    state = model.state_dict()
+    torch.save({"model": state, SIDECAR_KEY: dict(sidecar)} if sidecar else state, path)
+
+
+def load_checkpoint(checkpoint_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Deserialize a checkpoint once: ``(sidecar, model_state)``.
+
+    ``sidecar`` is ``None`` for a bare state dict. ``weights_only=True`` is
+    safe: the sidecar holds only JSON primitives, which the restricted
+    unpickler allows alongside tensors.
+    """
+    obj = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(obj, dict) or "model" not in obj:
+        return None, obj
+    sidecar = obj.get(SIDECAR_KEY)
+    return (sidecar if isinstance(sidecar, dict) else None), obj["model"]
+
+
+def read_deploy_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, list[str], dict[str, Any]]:
+    """``(config, class_names, model_state)`` from a self-describing checkpoint,
+    in one deserialize. Raises ``ValueError`` for a checkpoint without a v3
+    sidecar (see `check_sidecar`)."""
+    from mayaku.config import MayakuConfig
+
+    sidecar, state = load_checkpoint(checkpoint_path)
+    sidecar = check_sidecar(sidecar, str(checkpoint_path))
+    return MayakuConfig.model_validate(sidecar["config"]), list(sidecar["class_names"]), state
+
+
+def select_final_weights(train_dir: Path) -> Path:
+    """The run's deliverable weights: ``best.pt`` (the EMA model at its best
+    validation AP) when the run evaluated, else ``last.pt``. Raises
+    ``RuntimeError`` when the run produced neither."""
+    for name in ("best.pt", "last.pt"):
+        if (train_dir / name).exists():
+            return train_dir / name
+    raise RuntimeError(f"no checkpoint under {train_dir}: training likely failed "
+                       "before its first epoch finished")
+
+
+def git_hash() -> str | None:
+    """Best-effort short git hash of the working directory, for provenance.
+    ``None`` when it cannot be determined; never raises."""
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL, text=True,
         ).strip()
     except Exception:
         return None

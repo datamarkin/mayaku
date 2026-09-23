@@ -28,7 +28,7 @@ from typing import Any
 
 __all__ = ["SIDECAR_KEY", "embed_sidecar", "read_sidecar", "target_from_suffix"]
 
-SIDECAR_KEY = "mayaku"
+from mayaku.utils.checkpoint import SIDECAR_KEY
 
 _SUFFIX_TO_TARGET: dict[str, str] = {
     ".onnx": "onnx",
