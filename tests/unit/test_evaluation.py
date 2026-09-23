@@ -61,22 +61,31 @@ def test_letterbox_frame_round_trips_through_the_ruler(ds) -> None:
     assert moved["AP50"] > 0.999 and moved["AP"] < 0.9
 
 
-@pytest.mark.parametrize("multi_label", [False, True])
-def test_postprocess_decodes_a_planted_object(multi_label) -> None:
-    """One lit cell at the finest stride, DFL mass on bin 2: the box is the
-    anchor centre plus and minus two strides."""
-    nc, reg_max, imgsz = 4, 8, 64
+def _planted(nc, reg_max, hw, cell, bin_):
+    """Head outputs on an (H, W) canvas with one object lit at the finest
+    stride: class 1 at `cell` (row, col), DFL mass on `bin_` for every side,
+    so its box is the anchor centre plus and minus `bin_` strides."""
+    (h, w), (row, col) = hw, cell
     preds = []
     for s in STRIDES:
-        h = imgsz // s
-        preds += [torch.full((1, nc, h, h), -10.0), torch.zeros(1, 4 * reg_max, h, h)]
-    preds[0][0, 1, 2, 3] = 10.0              # class 1 at row 2, col 3
-    preds[1][0, 2::reg_max, 2, 3] = 10.0     # each side: bin 2
+        preds += [torch.full((1, nc, h // s, w // s), -10.0),
+                  torch.zeros(1, 4 * reg_max, h // s, w // s)]
+    preds[0][0, 1, row, col] = 10.0
+    preds[1][0, bin_::reg_max, row, col] = 10.0
+    cx, cy, reach = (col + 0.5) * STRIDES[0], (row + 0.5) * STRIDES[0], bin_ * STRIDES[0]
+    return preds, torch.tensor([cx - reach, cy - reach, cx + reach, cy + reach, 1.0, 1.0])
+
+
+@pytest.mark.parametrize("multi_label", [False, True])
+@pytest.mark.parametrize(("hw", "cell"), [((64, 64), (2, 3)), ((64, 128), (2, 11))])
+def test_postprocess_decodes_a_planted_object(multi_label, hw, cell) -> None:
+    """Anchor indices run row-major per level, so the lit cell is anchor
+    row * (W / 8) + col, on square and rectangular canvases alike."""
+    nc, reg_max = 4, 8
+    preds, want = _planted(nc, reg_max, hw, cell, 2)
     d = dataclasses.replace(DEPLOY, conf=0.5, multi_label=multi_label)
     dets, idxs, _, _ = postprocess(preds, nc, reg_max, d)
-    assert len(dets[0]) == 1 and idxs[0].tolist() == [2 * 8 + 3]
-    cx, cy, reach = 3.5 * STRIDES[0], 2.5 * STRIDES[0], 2 * STRIDES[0]
-    want = torch.tensor([cx - reach, cy - reach, cx + reach, cy + reach, 1.0, 1.0])
+    assert len(dets[0]) == 1 and idxs[0].tolist() == [cell[0] * (hw[1] // 8) + cell[1]]
     assert (dets[0][0] - want).abs().max().item() < 0.05
 
 
@@ -85,8 +94,9 @@ def test_evaluate_runs_end_to_end(ds) -> None:
     assert stats["AP"] < 0.05     # untrained: what is under test is the plumbing
 
 
-def test_evaluate_with_masks_and_keypoints(tmp_path) -> None:
-    ev = fixture(tmp_path, masks=True, kpt=3)
+@pytest.mark.parametrize("canvas", [320, (256, 384)])
+def test_evaluate_with_masks_and_keypoints(tmp_path, canvas) -> None:
+    ev = fixture(tmp_path, canvas=canvas, masks=True, kpt=3)
     m = Detector(dataclasses.replace(TINY, seg=True, kpt=3), ev.nc).eval()
     out = evaluate(m, ev, batch=4)
     assert "segm_AP" in out and "kpt_AP" in out
