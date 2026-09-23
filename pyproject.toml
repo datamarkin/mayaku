@@ -65,7 +65,7 @@ typecheck = [
 ]
 
 [project.scripts]
-mayaku = "mayaku.cli.__main__:app"
+mayaku = "mayaku.cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/datamarkin/mayaku"
@@ -107,7 +107,7 @@ ignore = [
 # Typer's idiom puts function calls in argument defaults; that's the
 # whole point of `typer.Argument(...)` / `typer.Option(...)` and
 # matches the official examples.
-"src/mayaku/cli/__main__.py" = ["B008"]
+"src/mayaku/cli/main.py" = ["B008"]
 
 [tool.ruff.format]
 quote-style = "double"
