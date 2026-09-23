@@ -21,8 +21,8 @@ from PIL import Image, ImageOps
 
 # Disable Pillow's decompression-bomb guard. That limit (~89 Mpix) defends a
 # *web service* against malicious uploads; here we read trusted training/eval
-# images, and large-image datasets (e.g. Objects365 has frames up to ~96 Mpix,
-# satellite/medical sets go higher) legitimately exceed it. Left at the default
+# images, and large-image datasets (high-resolution photo, satellite and
+# medical sets) legitimately exceed it. Left at the default
 # it floods the logs with DecompressionBombWarning and — above 2x the limit
 # (~179 Mpix) — raises DecompressionBombError, which would crash a dataloader
 # worker and kill a run mid-training. ``None`` removes both; the mapper resizes

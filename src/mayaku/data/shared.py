@@ -2,8 +2,8 @@
 
 Under DDP every process runs the training entrypoint and would otherwise parse
 the full annotation JSON independently — N parses + N copies of the dataset
-dicts *per node*, which OOMs host RAM for large datasets (e.g. Objects365's
-14 GB / 25 M-annotation JSON × 4 GPUs).
+dicts *per node*, which OOMs host RAM for large datasets (a multi-gigabyte,
+tens-of-millions-of-annotations JSON × 4 GPUs).
 
 This loads the dataset **once per node** (on the node's local rank 0), writes
 the serialized buffer to a temp file, and broadcasts the small handle (path +
