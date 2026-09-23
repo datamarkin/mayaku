@@ -1,152 +1,78 @@
 """Aspect-aware input sizing under a compute budget.
 
-The keystone of native-size training/inference. ``size_budget`` is the *budget
-dial* — the square-equivalent side, so the compute budget is ``size_budget**2``
-pixels. :func:`snap_max_content` resolves the actual ``(H, W)`` canvas that
-maximizes real letterbox content for the data's native aspect while staying
-*under* that budget, on a stride-aligned grid.
+The canvas is the one fixed (H, W) every image is letterboxed onto, for
+training, evaluation, export and deployment alike. ``size_budget`` is the
+budget dial -- the square-equivalent side, so the compute budget is
+``size_budget ** 2`` pixels -- and :func:`snap_max_content` resolves the canvas
+that holds the most real image content for the data's aspect while staying
+under that budget.
 
-Why max-content-under-budget (not closest-aspect, not long-edge): it's a strict
-Pareto win over square letterbox — equal-or-more real resolution at equal-or-less
-compute on every aspect — and the never-exceed ceiling gives a hard compute /
-memory bound (no OOM past the square baseline).
+Why max-content-under-budget: it is a strict Pareto win over a square
+letterbox -- equal-or-more real resolution at equal-or-less compute on every
+aspect -- and the never-exceed ceiling gives a hard compute / memory bound.
 
-Two alignment grids, on purpose:
-    * **Deploy / eval / export** use :data:`CANVAS_ALIGN` (128, the default):
-      torch.compile-safe and ANE/TensorRT-friendly, so the single shipped size
-      specialises best on every backend. ``InputConfig`` validates the budget
-      dial against this same grid, so the dial reads as the canvas it produces.
-    * **Training** uses :data:`TRAIN_LADDER_ALIGN` (32, :func:`multi_scale_canvases`): the FPN
-      stride floor and what the detector already pads to internally
-      (``size_divisibility``). The finer grid gives a dense multi-scale ladder
-      (e.g. 480/512/.../640 instead of the coarse 128-grid 384/512/640) — the
-      coarse grid leaves ~2 AP on the table. The top rung is still pinned to the
-      128-aligned deploy canvas, so train geometry == deploy at full scale.
+Every canvas is aligned to :data:`CANVAS_ALIGN` (32), the detector's coarsest
+stride: both sides must divide by it for the stride-32 level, and for the
+mask branch's exact 4x upsample from stride 32 onto stride 8. Nothing coarser
+is needed, and a coarser grid wastes budget: at 800² a 128 grid leaves a
+16:9 canvas holding 73% real content where the 32 grid holds 92%.
 """
 
 from __future__ import annotations
 
 import math
+import statistics
+from collections.abc import Sequence
+
+from mayaku.model.blocks import CANVAS_ALIGN
 
 __all__ = [
+    "ASPECT_UNIFORMITY_THRESHOLD",
     "CANVAS_ALIGN",
-    "TRAIN_LADDER_ALIGN",
+    "aspect_spread",
+    "canvas_for_data",
+    "data_aspect",
     "multi_scale_canvases",
-    "resolve_canvas",
-    "resolve_deploy_canvas",
     "snap_max_content",
 ]
 
-#: Alignment grid for every canvas that ships — deploy, eval, export. Also the
-#: grid ``InputConfig`` validates ``size_budget`` / ``canvas_hw`` against, so the
-#: budget dial reads as the resolution it produces (for square data, dial ==
-#: canvas side). Single source for the 128 in both places.
-CANVAS_ALIGN = 128
-
-#: Alignment grid for the *intermediate* multi-scale training rungs: the FPN
-#: stride floor, i.e. what the detector already pads to internally. Finer than
-#: :data:`CANVAS_ALIGN` on purpose — the coarse grid costs ~2 AP. These rungs are
-#: per-iteration and never land in ``canvas_hw``.
-TRAIN_LADDER_ALIGN = 32
+#: Robust aspect spread (p90 / p10) at or below this: the dataset is "one
+#: aspect", and a canvas at that aspect beats a square letterbox.
+ASPECT_UNIFORMITY_THRESHOLD = 1.10
 
 
-def multi_scale_canvases(
-    deploy_canvas: tuple[int, int],
-    *,
-    scale_min: float = 0.5,
-    align: int = TRAIN_LADDER_ALIGN,
-) -> list[tuple[int, int]]:
-    """Multi-scale letterbox canvases for training, anchored on the deploy canvas.
-
-    The top rung is exactly ``deploy_canvas`` (the 128-aligned deploy / export
-    geometry), so train geometry == deploy at full scale. Smaller rungs step the
-    long edge DOWN by ``align`` — 32, the FPN stride floor the detector already
-    pads to — to roughly ``scale_min`` of the deploy *area*, each snapped to a
-    max-content canvas at the deploy aspect. The fine 32 grid yields a dense
-    ladder (e.g. 480/512/.../640) where the coarse 128 grid would give only
-    384/512/640; that coarseness costs ~2 AP. Returns a de-duplicated list
-    ascending by area; the deploy canvas is always the last entry.
-    """
-    if not 0.0 < scale_min <= 1.0:
-        raise ValueError(f"scale_min must be in (0, 1]; got {scale_min}")
-    h, w = deploy_canvas
-    area = h * w
-    aspect = w / h
-    long_edge = max(h, w)
-    # scale_min is an *area* fraction, so the long-edge floor is its sqrt;
-    # round that floor UP to the grid so the smallest rung never dips below
-    # scale_min of the budget.
-    min_long = max(align, math.ceil(scale_min**0.5 * long_edge / align) * align)
-    canvases: set[tuple[int, int]] = {deploy_canvas}
-    for side in range(min_long, long_edge, align):
-        frac = side / long_edge
-        canvases.add(
-            snap_max_content(max(align * align, int(area * frac * frac)), aspect, align=align)
-        )
-    return sorted(canvases, key=lambda hw: hw[0] * hw[1])
+def aspect_spread(aspects: Sequence[float]) -> float:
+    """Robust aspect spread ``p90 / p10`` (1.0 for fewer than 10 samples)."""
+    n = len(aspects)
+    if n < 10:
+        return 1.0
+    s = sorted(aspects)
+    return s[(n * 9) // 10] / max(s[n // 10], 1e-9)
 
 
-def resolve_canvas(
-    size_budget: int,
-    aspect: float,
-    uniform: bool,
-    *,
-    align: int = CANVAS_ALIGN,
-) -> tuple[tuple[int, int], float]:
-    """Resolve the train/deploy canvas from the budget dial + data aspect.
-
-    ``size_budget`` is the budget dial (``budget = size_budget ** 2``). Uniform-aspect
-    data fits a rectangle at ``aspect`` (no pad waste); diverse data falls back to
-    a square (``aspect = 1.0``) — robust to any shape.
-
-    Returns ``((H, W), budget_use)`` where ``budget_use = H * W / size_budget ** 2``
-    in ``(0, 1]`` — a value well under 1 means the 128-grid left headroom and a
-    larger ``size_budget`` would buy more resolution.
-    """
-    budget = size_budget * size_budget
-    canvas = snap_max_content(budget, aspect if uniform else 1.0, align=align)
-    return canvas, (canvas[0] * canvas[1]) / budget
+def data_aspect(shapes: Sequence[tuple[int, int]]) -> tuple[float, bool]:
+    """Median image aspect ``W / H`` and whether the data is one aspect, from
+    (height, width) image shapes. Uniform means the robust spread is within
+    :data:`ASPECT_UNIFORMITY_THRESHOLD`, so a few outliers never flip it."""
+    aspects = [w / h for h, w in shapes]
+    if not aspects:
+        return 1.0, False
+    return statistics.median(aspects), aspect_spread(aspects) <= ASPECT_UNIFORMITY_THRESHOLD
 
 
-def resolve_deploy_canvas(
-    canvas_hw: tuple[int, int] | None,
-    size_budget: int,
-    *,
-    align: int = CANVAS_ALIGN,
-) -> tuple[int, int]:
-    """The fixed deploy/eval canvas: the pinned ``canvas_hw`` (resolved at train
-    time or set manually), else the largest aligned square in the ``size_budget**2``
-    budget. The single source for this fallback (resize builder + Predictor)."""
-    return (
-        canvas_hw
-        if canvas_hw is not None
-        else snap_max_content(size_budget * size_budget, 1.0, align=align)
-    )
-
-
-def snap_max_content(
-    budget: int,
-    aspect: float,
-    *,
-    align: int = CANVAS_ALIGN,
-    min_side: int = 128,
-) -> tuple[int, int]:
-    """Resolve the ``(H, W)`` canvas that maximizes letterbox content under budget.
+def snap_max_content(budget: int, aspect: float) -> tuple[int, int]:
+    """The aligned ``(H, W)`` canvas that maximises letterbox content under a
+    budget.
 
     Args:
-        budget: Max canvas area in pixels (``size_budget ** 2``). The result never
-            exceeds it (``H * W <= budget``).
+        budget: Max canvas area in pixels (``size_budget ** 2``). The result
+            never exceeds it (``H * W <= budget``).
         aspect: Data aspect ``W / H`` (>1 landscape, <1 portrait, 1 square).
-        align: Both sides are multiples of this. 128 is torch.compile-safe and
-            also satisfies the FPN stride-32 minimum, so the size is valid on
-            every backend.
-        min_side: Smallest allowed side (multiple of ``align``).
 
     Returns:
-        ``(H, W)``, both multiples of ``align``, with ``H * W <= budget``, chosen
-        to maximize real content ``min(W**2 / aspect, aspect * H**2)`` — the
-        binding-dimension content after an aspect-preserving letterbox. For a
-        square aspect this is the largest aligned ``(s, s)`` under budget.
+        ``(H, W)`` maximising real content ``min(W**2 / aspect, aspect * H**2)``
+        -- the binding dimension's content after an aspect-preserving
+        letterbox. For a square aspect this is the largest aligned square.
     """
     if budget <= 0:
         raise ValueError(f"budget must be > 0; got {budget}")
@@ -155,20 +81,45 @@ def snap_max_content(
     # A side never needs to exceed the long edge of the most extreme fit,
     # sqrt(budget * max(a, 1/a)); round up to the grid for the search bound.
     reach = math.isqrt(int(budget * max(aspect, 1.0 / aspect)))
-    max_side = ((reach // align) + 1) * align
-    start = max(align, ((min_side + align - 1) // align) * align)
-    sides = range(start, max_side + 1, align)
+    sides = range(CANVAS_ALIGN, ((reach // CANVAS_ALIGN) + 1) * CANVAS_ALIGN + 1, CANVAS_ALIGN)
 
     best_content = -1.0
-    best_hw = (start, start)
+    best_hw = (CANVAS_ALIGN, CANVAS_ALIGN)
     for w in sides:
         for h in sides:
             if w * h > budget:
                 continue
-            # Real content after a uniform-scale letterbox of a `aspect`-shaped
-            # image into (h, w): the binding dimension caps it.
             content = min(w * w / aspect, aspect * h * h)
             if content > best_content:
                 best_content = content
                 best_hw = (h, w)
     return best_hw
+
+
+def canvas_for_data(shapes: Sequence[tuple[int, int]], size_budget: int) -> tuple[int, int]:
+    """The canvas for a dataset of (height, width) image shapes under
+    ``size_budget ** 2`` pixels: a rectangle at the data's aspect when it has
+    one (no padding waste), else a square, which is robust to any shape."""
+    aspect, uniform = data_aspect(shapes)
+    return snap_max_content(size_budget * size_budget, aspect if uniform else 1.0)
+
+
+def multi_scale_canvases(deploy_canvas: tuple[int, int], min_long: int) -> list[tuple[int, int]]:
+    """Training canvases for multi-scale, anchored on the deploy canvas.
+
+    The long edge steps by ``CANVAS_ALIGN`` from ``min_long`` (floored to the grid)
+    up to the deploy canvas's; each rung is the max-content canvas at the
+    deploy aspect with the area that long edge implies, and the top rung is
+    exactly ``deploy_canvas``, so train geometry equals deploy geometry at
+    full scale. On a square canvas the rungs are the squares
+    ``min_long, min_long + 32, ..., side``. Ascending, de-duplicated.
+    """
+    h, w = deploy_canvas
+    long_edge = max(h, w)
+    area, aspect = h * w, w / h
+    lo = max(CANVAS_ALIGN, (min_long // CANVAS_ALIGN) * CANVAS_ALIGN)
+    canvases = {(h, w)}
+    for side in range(lo, long_edge, CANVAS_ALIGN):
+        frac = side / long_edge
+        canvases.add(snap_max_content(max(CANVAS_ALIGN ** 2, int(area * frac * frac)), aspect))
+    return sorted(canvases, key=lambda c: c[0] * c[1])

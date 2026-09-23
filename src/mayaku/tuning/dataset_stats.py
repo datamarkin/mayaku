@@ -23,36 +23,14 @@ from typing import Any
 
 from mayaku.data.transforms.augmentation import compute_resized_hw
 from mayaku.data.transforms.geometry import letterbox_scale
+from mayaku.tuning.sizing import aspect_spread as _aspect_spread
+from mayaku.tuning.sizing import data_aspect
 
 __all__ = ["DatasetStats", "analyze_dataset", "dataset_aspect"]
 
-# Robust aspect spread (p90/p10) at or below this → the dataset is "one aspect"
-# and a fixed (H, W) canvas beats square letterbox. Consumed by the train-time
-# canvas resolver via :func:`dataset_aspect`.
-ASPECT_UNIFORMITY_THRESHOLD = 1.10
-
-
-def _aspect_spread(aspects: Sequence[float]) -> float:
-    """Robust aspect spread ``p90 / p10`` (1.0 for < 10 samples). The one place
-    the percentile math lives — shared by ``dataset_aspect`` and ``DatasetStats``."""
-    n = len(aspects)
-    if n < 10:
-        return 1.0
-    s = sorted(aspects)
-    return s[(n * 9) // 10] / max(s[n // 10], 1e-9)
-
-
 def dataset_aspect(dataset_dicts: Sequence[dict[str, Any]]) -> tuple[float, bool]:
-    """Median image aspect ``W / H`` + uniformity, from image dims only.
-
-    A light dims-only pass (no box analysis) shared by the letterbox canvas
-    resolver. Uniform = robust ``p90 / p10 <= ASPECT_UNIFORMITY_THRESHOLD`` so a
-    few outliers never flip it. Returns ``(median_aspect, is_uniform)``.
-    """
-    aspects = [int(d["width"]) / int(d["height"]) for d in dataset_dicts]
-    if not aspects:
-        return 1.0, False
-    return statistics.median(aspects), _aspect_spread(aspects) <= ASPECT_UNIFORMITY_THRESHOLD
+    """`mayaku.tuning.sizing.data_aspect` over dataset dicts' image dims."""
+    return data_aspect([(int(d["height"]), int(d["width"])) for d in dataset_dicts])
 
 
 @dataclass(frozen=True)
