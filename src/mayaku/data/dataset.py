@@ -28,7 +28,6 @@ from mayaku.data.batch import to_tensor
 from mayaku.data.coco import load_coco
 from mayaku.data.geometry import (
     PAD,
-    as_canvas,
     fit,
     flip_boxes,
     flip_kpts,
@@ -39,6 +38,7 @@ from mayaku.data.geometry import (
     warp_kpts,
 )
 from mayaku.data.polygons import Polys
+from mayaku.model.blocks import as_canvas
 
 
 class CocoDetection(Dataset):

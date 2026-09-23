@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from mayaku.data import CLEAN_AUG, DEFAULT_AUG, Augment, CocoDetection, batch_to, collate
-from mayaku.data.batch import multiscale_sizes, rescale_batch, to_tensor
+from mayaku.data.batch import rescale_batch, to_tensor
 from mayaku.data.coco import COCO_FLIP_PAIRS, flip_pairs
 from mayaku.data.geometry import keep, letterbox, unletterbox
 from mayaku.data.polygons import Polys
@@ -156,10 +156,6 @@ def test_rescale_batch_moves_boxes_keypoints_and_raster(coco, canvas) -> None:
     assert torch.equal(k1[..., 2], k0[..., 2])
     assert set(rm.unique().tolist()) <= set(m.unique().tolist())
     assert rescale_batch(imgs, t, m, (h, w), seg=True, kpt=SYNTH_KPT)[0] is imgs
-
-
-def test_multiscale_sizes() -> None:
-    assert multiscale_sizes(512, 800) == list(range(512, 801, 32))
 
 
 def test_flip_pairs() -> None:

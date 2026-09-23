@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from mayaku.data.geometry import as_canvas
 from mayaku.model.aux import MASK_STRIDE
 
 
@@ -69,16 +68,9 @@ def collate(batch):
             torch.stack([b["masks"] for b in batch]) if "masks" in batch[0] else None)
 
 
-def multiscale_sizes(lo, hi, step=32):
-    """Square input sizes for multi-scale training: multiples of `step` from
-    `lo` up to and including `hi`, the operating point."""
-    lo = max(step, (lo // step) * step)
-    return list(range(lo, (hi // step) * step + 1, step))
-
-
 def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
-    """Resize one rendered batch to `size` (a side or (h, w)) for multi-scale
-    training.
+    """Resize one rendered batch to `size` (h, w) for multi-scale
+    training (`mayaku.tuning.sizing.multi_scale_canvases` gives the sizes).
 
     The dataset renders at the operating point, the maximum; this downscales
     the batch, so there is only ever one resize and it never invents detail.
@@ -86,7 +78,7 @@ def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
     the stride-8 instance raster resizes nearest so its integer indices
     survive. Coordinates stay in pixels of the resized batch.
     """
-    h, w = as_canvas(size)
+    h, w = size
     H, W = imgs.shape[-2:]
     if (h, w) == (H, W):
         return imgs, targets, masks

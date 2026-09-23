@@ -15,11 +15,6 @@ import torch.nn.functional as F
 PAD = 114  # mid-grey padding
 
 
-def as_canvas(canvas):
-    """An int side or an (H, W) pair -> (H, W)."""
-    return (canvas, canvas) if isinstance(canvas, int) else tuple(canvas)
-
-
 def fitted(hw, r):
     """The (h, w) an image of shape `hw` has after scaling by `r`."""
     return round(hw[0] * r), round(hw[1] * r)
