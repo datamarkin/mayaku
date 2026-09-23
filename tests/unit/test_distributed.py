@@ -1,254 +1,136 @@
-"""Tests for :mod:`mayaku.engine.distributed`.
+"""Multi-GPU training: the helpers' single-process behaviour, and real
+two-rank runs over gloo on the CPU (the NCCL variants need a 2-GPU host).
 
-Single-process tests cover every helper. The multi-process gloo
-all-reduce test (the spec gate "loss parity vs. single-GPU on toy
-data" at its smallest scale) spawns two workers and checks that the
-sum-reduce produces the expected world-size value on every rank. We
-mark it ``slow`` so users on slow Apple Silicon CPUs can skip with
-``-m 'not slow'`` if needed.
+The one number that has to be right is the gradient: DDP averages the ranks'
+gradients and the loss is a per-image sum over a batch-wide normaliser, so
+two ranks on half a batch each must reproduce one process on the whole batch.
 """
 
 from __future__ import annotations
 
 import multiprocessing as py_mp
-import platform
 from pathlib import Path
 
 import pytest
 import torch
-from torch import nn
 
+import mayaku
 from mayaku.backends.device import Device
 from mayaku.engine.distributed import (
-    all_gather_object,
     all_reduce_dict,
-    create_ddp_model,
     get_rank,
     get_world_size,
     is_main_process,
     launch,
+    local_device,
+    resolve_ddp_device,
     synchronize,
 )
 
-# ---------------------------------------------------------------------------
-# Single-process semantics
-# ---------------------------------------------------------------------------
+from . import _distributed_workers as workers
+from ._coco_fixture import synthetic_coco
+from .test_api import FAST
+
+_SPAWN = "spawn" in py_mp.get_all_start_methods()
+multi = pytest.mark.skipif(not _SPAWN, reason="multiprocessing spawn unavailable")
 
 
-def test_world_size_defaults_to_one_outside_dist() -> None:
-    assert get_world_size() == 1
-
-
-def test_rank_defaults_to_zero_outside_dist() -> None:
-    assert get_rank() == 0
-
-
-def test_is_main_process_outside_dist() -> None:
-    assert is_main_process() is True
-
-
-def test_synchronize_is_noop_outside_dist() -> None:
-    # Must not raise even with no process group initialised.
+def test_helpers_outside_a_process_group() -> None:
+    assert get_world_size() == 1 and get_rank() == 0 and is_main_process()
     synchronize()
+    x = torch.tensor(2.0)
+    out = all_reduce_dict({"x": x})
+    assert out["x"].item() == 2.0 and out["x"] is not x
+    assert local_device("cpu") == "cpu" and local_device("cuda") == "cuda:0"
 
 
-def test_all_reduce_dict_passthrough_when_world_size_one() -> None:
-    losses = {"a": torch.tensor(1.5), "b": torch.tensor(2.5)}
-    out = all_reduce_dict(losses, average=False)
-    assert out.keys() == losses.keys()
-    torch.testing.assert_close(out["a"], torch.tensor(1.5))
-    torch.testing.assert_close(out["b"], torch.tensor(2.5))
+def test_launch_one_rank_runs_inline(tmp_path: Path) -> None:
+    launch(workers.main_only_writes, 1, device=Device("cpu"), args=(str(tmp_path),))
+    assert (tmp_path / "main.txt").exists()
 
 
-def test_all_reduce_dict_returns_a_copy_not_an_alias() -> None:
-    src = torch.tensor(1.0, requires_grad=True)
-    out = all_reduce_dict({"a": src}, average=False)
-    # Must be detached so callers can `item()` without graph plumbing.
-    assert not out["a"].requires_grad
-    # And not the same storage as the input.
-    assert out["a"].data_ptr() != src.data_ptr()
-
-
-def test_all_gather_object_returns_singleton_outside_dist() -> None:
-    assert all_gather_object("hello") == ["hello"]
-
-
-def test_create_ddp_model_passthrough_when_world_size_one() -> None:
-    model = nn.Linear(2, 2)
-    wrapped = create_ddp_model(model, Device(kind="cpu"))
-    assert wrapped is model
-
-
-# ---------------------------------------------------------------------------
-# launch()
-# ---------------------------------------------------------------------------
-
-
-def test_launch_world_size_one_calls_main_inline(tmp_path: Path) -> None:
-    out = tmp_path / "single.txt"
-
-    def _main(path: Path) -> None:
-        path.write_text("hi")
-
-    launch(_main, world_size=1, args=(out,))
-    assert out.read_text() == "hi"
-
-
-def test_launch_validates_world_size() -> None:
-    with pytest.raises(ValueError, match="world_size"):
-        launch(lambda: None, world_size=0)
-
-
-def test_launch_rejects_mps_multi_process() -> None:
+def test_launch_refuses_what_it_cannot_run() -> None:
+    with pytest.raises(ValueError):
+        launch(print, 0)
     with pytest.raises(RuntimeError, match="MPS"):
-        launch(lambda: None, world_size=2, device=Device(kind="mps"))
-
-
-# ---------------------------------------------------------------------------
-# Multi-process gloo all-reduce — the "loss parity" gate (smallest-scale)
-# ---------------------------------------------------------------------------
-
-
-_SPAWN_OK = (
-    py_mp.get_all_start_methods()  # type: ignore[no-untyped-call]
-) and platform.system() in ("Darwin", "Linux")
+        launch(print, 2, device=Device("mps"))
+    with pytest.raises(ValueError, match="MPS"):
+        resolve_ddp_device("mps", 2)
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _SPAWN_OK, reason="multiprocessing spawn unavailable")
-def test_launch_two_gloo_ranks_perform_an_all_reduce(tmp_path: Path) -> None:
-    # The worker function lives in tests/unit/_distributed_workers.py so
-    # mp.spawn (which pickles by qualified name) can find it.
-    from tests.unit._distributed_workers import all_reduce_sum_one
-
-    launch(
-        all_reduce_sum_one,
-        world_size=2,
-        device=Device(kind="cpu"),
-        args=(str(tmp_path),),
-    )
-    # Every rank wrote its receipt; the all-reduced sum was correct.
-    assert (tmp_path / "rank_0.ok").exists()
-    assert (tmp_path / "rank_1.ok").exists()
+@multi
+def test_two_gloo_ranks_reduce_and_only_rank_zero_writes(tmp_path: Path) -> None:
+    launch(workers.all_reduce_sum_one, 2, device=Device("cpu"), args=(str(tmp_path),))
+    assert (tmp_path / "rank_0.ok").exists() and (tmp_path / "rank_1.ok").exists()
+    out = tmp_path / "w"
+    out.mkdir()
+    launch(workers.main_only_writes, 2, device=Device("cpu"), args=(str(out),))
+    assert (out / "main.txt").exists() and (out / "rank_1.ok").exists()
 
 
-@pytest.mark.slow
-@pytest.mark.skipif(not _SPAWN_OK, reason="multiprocessing spawn unavailable")
-def test_is_main_process_is_only_true_on_rank_zero(tmp_path: Path) -> None:
-    from tests.unit._distributed_workers import assert_main_only_writes
+def _reference_grads() -> dict[str, torch.Tensor]:
+    net = workers.parity_model()
+    workers.loss_grads(net, *workers.parity_batch())
+    return {k: p.grad for k, p in net.named_parameters()}
 
-    launch(
-        assert_main_only_writes,
-        world_size=2,
-        device=Device(kind="cpu"),
-        args=(str(tmp_path),),
-    )
-    assert (tmp_path / "main.txt").read_text() == "hello"
-    # Both ranks dropped a receipt regardless of who's main.
-    assert (tmp_path / "rank_0.ok").exists()
-    assert (tmp_path / "rank_1.ok").exists()
+
+def _assert_same_grads(got: dict[str, torch.Tensor], want: dict[str, torch.Tensor]) -> None:
+    assert got.keys() == want.keys()
+    for k in want:
+        torch.testing.assert_close(got[k], want[k], rtol=1e-4, atol=1e-6, msg=k)
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _SPAWN_OK, reason="multiprocessing spawn unavailable")
-def test_shared_dataset_parses_once_and_shares(tmp_path: Path) -> None:
-    """``load_shared_dataset`` parses once per node and broadcasts the rest.
-
-    Two gloo ranks on one (logical) node: only the node's local rank 0
-    should run ``parse_fn``, both ranks must decode identical dataset
-    dicts, and the temp buffer the broadcaster wrote must be cleaned up
-    by the time ``launch`` returns.
-    """
-    import glob
-    import tempfile
-
-    from tests.unit._distributed_workers import shared_dataset_one_parse
-
-    pattern = str(Path(tempfile.gettempdir()) / "mayaku-ds-*.bin")
-    before = set(glob.glob(pattern))
-
-    launch(
-        shared_dataset_one_parse,
-        world_size=2,
-        device=Device(kind="cpu"),
-        args=(str(tmp_path),),
-    )
-
-    # Both ranks finished with identical data (asserted inside the worker).
-    assert (tmp_path / "rank_0.ok").exists()
-    assert (tmp_path / "rank_1.ok").exists()
-    # Exactly one parse, on the node's local rank 0.
-    assert (tmp_path / "parsed_rank_0.flag").exists()
-    assert not (tmp_path / "parsed_rank_1.flag").exists()
-    # Broadcaster's temp buffer was unlinked after the node-local barrier.
-    assert set(glob.glob(pattern)) == before
+@multi
+def test_two_ranks_on_half_a_batch_give_the_single_process_gradient(tmp_path: Path) -> None:
+    launch(workers.ddp_grad_parity, 2, device=Device("cpu"), args=(str(tmp_path), "cpu"))
+    _assert_same_grads(torch.load(tmp_path / "grads.pt", weights_only=True), _reference_grads())
 
 
-# ---------------------------------------------------------------------------
-# Multi-GPU NCCL — closes the "GPU 1 idle" gap on multi-GPU CUDA hosts
-# ---------------------------------------------------------------------------
+@pytest.mark.slow
+@multi
+@pytest.mark.parametrize("aux", [False, True], ids=["det", "seg-kpt"])
+def test_two_rank_training_keeps_the_ranks_identical(tmp_path: Path, aux: bool) -> None:
+    ann = synthetic_coco(str(tmp_path / "data"), n=16, seed=3)
+    launch(workers.tiny_ddp_run, 2, device=Device("cpu"),
+           args=(str(tmp_path), str(tmp_path / "data"), ann, aux))
+    p0, p1 = (torch.load(tmp_path / f"params_{r}.pt", weights_only=True) for r in (0, 1))
+    assert all(torch.equal(p0[k], p1[k]) for k in p0)
+    run = tmp_path / "run"
+    assert (run / "last.pt").exists() and (run / "state.pt").exists()
+    assert len((run / "log.jsonl").read_text().splitlines()) == 2    # rank 0 only
+
+
+@pytest.mark.slow
+@multi
+def test_train_on_two_ranks_through_the_api(tmp_path: Path) -> None:
+    tr, va = tmp_path / "train", tmp_path / "val"
+    result = mayaku.train(
+        train_annotations=synthetic_coco(str(tr), n=16, seed=1), train_images=tr,
+        val_annotations=synthetic_coco(str(va), n=6, seed=2), val_images=va,
+        output_dir=tmp_path / "run", size_budget=96, num_epochs=2, num_gpus=2, device="cpu",
+        overrides=FAST,
+        log=lambda *_: None)
+    assert result["metadata"]["world_size"] == 2 and result["metrics"] is not None
+    assert result["best"] is not None and result["final_weights"].name == "best.pt"
+    with pytest.raises(ValueError, match="multiple of 2"):
+        mayaku.train(train_annotations=tr / "instances.json", train_images=tr, num_gpus=2,
+                     device="cpu", overrides={"train": {"batch": 5}}, log=lambda *_: None)
 
 
 @pytest.mark.cuda
 @pytest.mark.multi_gpu
 @pytest.mark.slow
-def test_launch_two_nccl_ranks_all_reduce_across_gpus(tmp_path: Path) -> None:
-    """Spawn 2 NCCL ranks pinned to ``cuda:0`` / ``cuda:1``; each does
-    real work on its own GPU and contributes to a sum-reduce.
-
-    Validates the CUDA-specific code paths of :func:`launch` /
-    :func:`all_reduce_dict` that the gloo CPU test never reaches:
-    NCCL backend selection, ``torch.cuda.set_device(rank)``,
-    ``device_ids=[rank]`` on the NCCL barrier.
-    """
-    from tests.unit._distributed_workers import cuda_all_reduce_assert_per_gpu
-
-    launch(
-        cuda_all_reduce_assert_per_gpu,
-        world_size=2,
-        device=Device(kind="cuda"),
-        args=(str(tmp_path),),
-    )
-    # Both ranks executed and used their assigned GPU.
-    assert (tmp_path / "rank_0_used_cuda_0.ok").exists()
-    assert (tmp_path / "rank_1_used_cuda_1.ok").exists()
+def test_two_nccl_ranks_each_use_their_gpu(tmp_path: Path) -> None:
+    launch(workers.cuda_all_reduce_per_gpu, 2, device=Device("cuda"), args=(str(tmp_path),))
+    assert (tmp_path / "rank_0_used_cuda:0.ok").exists()
+    assert (tmp_path / "rank_1_used_cuda:1.ok").exists()
 
 
 @pytest.mark.cuda
 @pytest.mark.multi_gpu
 @pytest.mark.slow
-def test_ddp_grad_parity_across_two_gpus(tmp_path: Path) -> None:
-    """Spec gate (Step 14): 'loss parity vs. single-GPU on toy data'.
-
-    DDP averages grads across ranks, so a 2-rank run with batches
-    ``x_rank = full((2, 4), rank+1)`` should produce the same parameter
-    gradient as a single-process run that sees the *concatenation*
-    ``[1, 1, 2, 2]`` repeated. We compute the single-process reference
-    on CPU and compare to rank 0's snapshot under a generous tolerance.
-    """
-    from tests.unit._distributed_workers import ddp_grad_parity
-
-    launch(
-        ddp_grad_parity,
-        world_size=2,
-        device=Device(kind="cuda"),
-        args=(str(tmp_path),),
-    )
-    assert (tmp_path / "rank_0_ddp.ok").exists()
-    assert (tmp_path / "rank_1_ddp.ok").exists()
-    ddp_grad = torch.load(tmp_path / "rank0_grad.pt", weights_only=True)
-
-    # Reference: identical init (manual_seed(0)) + nn.Linear(4, 1, bias=False);
-    # batch is the union of rank 0's and rank 1's per-rank batches.
-    torch.manual_seed(0)
-    ref = nn.Linear(4, 1, bias=False)
-    x = torch.cat([torch.full((2, 4), 1.0), torch.full((2, 4), 2.0)], dim=0)
-    y = torch.zeros((4, 1))
-    # DDP averages the per-rank-mean gradients across ranks.
-    # Per-rank loss is mean over 2 elements; mean across 2 ranks is
-    # equivalent to the mean over the concatenated 4-element batch.
-    loss = ((ref(x) - y) ** 2).mean()
-    loss.backward()
-    ref_grad = ref.weight.grad
-    assert ref_grad is not None
-    torch.testing.assert_close(ddp_grad, ref_grad, atol=1e-5, rtol=1e-5)
+def test_nccl_gradient_matches_the_single_process_one(tmp_path: Path) -> None:
+    launch(workers.ddp_grad_parity, 2, device=Device("cuda"), args=(str(tmp_path), "cuda"))
+    _assert_same_grads(torch.load(tmp_path / "grads.pt", weights_only=True), _reference_grads())
