@@ -134,15 +134,17 @@ def load_checkpoint(checkpoint_path: Path) -> tuple[dict[str, Any] | None, dict[
     return (sidecar if isinstance(sidecar, dict) else None), obj["model"]
 
 
-def read_deploy_checkpoint(checkpoint_path: Path) -> tuple[MayakuConfig, list[str], dict[str, Any]]:
-    """``(config, class_names, model_state)`` from a self-describing checkpoint,
-    in one deserialize. Raises ``ValueError`` for a checkpoint without a v3
+def read_deploy_checkpoint(
+    checkpoint_path: Path,
+) -> tuple[dict[str, Any], MayakuConfig, dict[str, Any]]:
+    """``(sidecar, config, model_state)`` from a self-describing checkpoint, in
+    one deserialize. Raises ``ValueError`` for a checkpoint without a v3
     sidecar (see `check_sidecar`)."""
     from mayaku.config import MayakuConfig
 
     sidecar, state = load_checkpoint(checkpoint_path)
-    sidecar = check_sidecar(sidecar, str(checkpoint_path))
-    return MayakuConfig.model_validate(sidecar["config"]), list(sidecar["class_names"]), state
+    sidecar = dict(check_sidecar(sidecar, str(checkpoint_path)))
+    return sidecar, MayakuConfig.model_validate(sidecar["config"]), state
 
 
 def select_final_weights(train_dir: Path) -> Path:

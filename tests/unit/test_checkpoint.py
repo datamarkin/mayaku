@@ -76,7 +76,8 @@ def test_checkpoint_round_trip(tmp_path: Path) -> None:
     model = cfg.model.build(cfg.input.canvas_hw)
     path = tmp_path / "best.pt"
     save_checkpoint(model, path, build_sidecar(cfg, NAMES, model))
-    got_cfg, names, state = read_deploy_checkpoint(path)
+    sidecar, got_cfg, state = read_deploy_checkpoint(path)
+    names = sidecar["class_names"]
     assert got_cfg == cfg and names == NAMES
     # a QAT checkpoint loads into the model its own config builds
     got_cfg.model.build(got_cfg.input.canvas_hw, len(names)).load_state_dict(state, strict=True)
