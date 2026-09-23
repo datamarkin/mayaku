@@ -118,15 +118,44 @@ def split_outputs(preds, seg=False, kpt=0):
     return g
 
 
-def load_weights(model, state, strict_aux=False):
-    """Load a checkpoint across the auxiliary-branch boundary.
+# Which checkpoint keys may be absent on one side. The auxiliary branch is
+# detachable, so its keys (`aux.`) may exist on either side alone; a model
+# trained quantization-aware carries activation observers (`.act_fq.`) a plain
+# one lacks; and the classifier (`head.cls.`) depends on the class count.
+AUX_KEY, QAT_KEY, CLASS_KEY = "aux.", ".act_fq.", "head.cls."
 
-    A detector trained with masks / keypoints loads into a plain detector and
-    a plain detector's weights load into one with the branch; only `aux.*`
-    keys may be missing or unexpected, anything else is a real mismatch and
-    raises. `strict_aux` forbids even that."""
-    r = model.load_state_dict(state, strict=False)
+
+def _load(model, state, optional, reinit_classes):
+    """Load `state` non-strictly, then refuse any mismatch `optional(key)`
+    does not allow; with `reinit_classes`, classifier weights of another shape
+    are left at their initialisation instead of failing."""
+    own = model.state_dict()
+    shaped = [k for k, v in state.items() if k in own and v.shape != own[k].shape]
+    reinit = [k for k in shaped if reinit_classes and k.startswith(CLASS_KEY)]
+    wrong = [k for k in shaped if k not in reinit]
+    assert not wrong, "state dict does not fit this model: %s" % wrong[:8]
+    r = model.load_state_dict({k: v for k, v in state.items() if k not in reinit}, strict=False)
     stray = [k for k in list(r.missing_keys) + list(r.unexpected_keys)
-             if strict_aux or not k.startswith("aux.")]
-    assert not stray, "state dict mismatch outside aux.*: %s" % stray[:8]
-    return r
+             if k not in reinit and not optional(k)]
+    assert not stray, "state dict does not fit this model: %s" % stray[:8]
+    return {"reinitialised": reinit, "missing": list(r.missing_keys),
+            "unexpected": list(r.unexpected_keys)}
+
+
+def load_pretrained(model, state):
+    """Warm-start `model` from pretrained weights of the same tier: the
+    classifier is re-initialised when the class count changes, and the
+    auxiliary branch and QAT observers may be present on either side alone.
+    Anything else that fails to match (another tier) raises. Returns
+    {"reinitialised", "missing", "unexpected"} key lists."""
+    return _load(model, state, lambda k: k.startswith(AUX_KEY) or QAT_KEY in k,
+                 reinit_classes=True)
+
+
+def load_weights(model, state, strict_aux=False):
+    """Load a checkpoint of this model across the auxiliary-branch boundary:
+    a detector trained with masks / keypoints loads into a plain detector and
+    back; only `aux.*` keys may be missing or unexpected (none with
+    `strict_aux`), anything else raises."""
+    return _load(model, state, lambda k: not strict_aux and k.startswith(AUX_KEY),
+                 reinit_classes=False)

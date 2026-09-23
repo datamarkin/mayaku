@@ -8,7 +8,16 @@ import dataclasses
 import pytest
 import torch
 
-from mayaku.model import STRIDES, TIERS, TINY, Detector, check_parity, enable_qat, load_weights
+from mayaku.model import (
+    STRIDES,
+    TIERS,
+    TINY,
+    Detector,
+    check_parity,
+    enable_qat,
+    load_pretrained,
+    load_weights,
+)
 from mayaku.model.blocks import as_canvas
 from mayaku.model.contract import DEPLOY_OPS, count, export_onnx
 
@@ -102,11 +111,22 @@ def test_qat_export_stays_in_contract(tmp_path) -> None:
 def test_load_weights_across_the_aux_boundary() -> None:
     plain, with_aux = Detector(TINY, 4), Detector(SEG_KPT, 4)
     r = load_weights(plain, with_aux.state_dict())
-    assert r.unexpected_keys and all(k.startswith("aux.") for k in r.unexpected_keys)
+    assert r["unexpected"] and all(k.startswith("aux.") for k in r["unexpected"])
     r = load_weights(with_aux, plain.state_dict())
-    assert r.missing_keys and all(k.startswith("aux.") for k in r.missing_keys)
+    assert r["missing"] and all(k.startswith("aux.") for k in r["missing"])
     with pytest.raises(AssertionError):
         load_weights(plain, with_aux.state_dict(), strict_aux=True)
     other = Detector(dataclasses.replace(TINY, neck=(16, 16, 32)), 4)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(AssertionError, match="does not fit"):
         load_weights(plain, other.state_dict())
+
+
+def test_load_pretrained_reinitialises_only_the_classifier() -> None:
+    base = enable_qat(Detector(SEG_KPT, 80))                 # e.g. a QAT base with aux heads
+    target = Detector(TINY, 3)                               # fp32, 3 classes, no aux
+    report = load_pretrained(target, base.state_dict())
+    assert report["reinitialised"] and all(k.startswith("head.cls.") for k in report["reinitialised"])
+    assert all(k.startswith("aux.") or ".act_fq." in k for k in report["unexpected"])
+    assert torch.equal(target.head.box[0].weight, base.head.box[0].weight)
+    with pytest.raises(AssertionError, match="does not fit"):
+        load_pretrained(Detector(dataclasses.replace(TINY, neck=(16, 16, 32)), 3), base.state_dict())
