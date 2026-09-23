@@ -22,9 +22,6 @@ from mayaku.model.box import flatten_levels
 # flat 0.05, the middle of this range.
 COCO_SIGMAS = (.026, .025, .025, .035, .035, .079, .079, .072, .072, .062,
                .062, .107, .107, .087, .087, .089, .089)
-# left/right pairs of the COCO skeleton, swapped under a horizontal flip
-COCO_FLIP_PAIRS = ((1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12),
-                   (13, 14), (15, 16))
 # half-width, in cells, of the window each keypoint's Gaussian is painted
 # into: 3 sigma with the sigma clamp at 3 cells (see gaussian_targets)
 HEAT_RADIUS = 9
@@ -32,10 +29,6 @@ HEAT_RADIUS = 9
 
 def sigmas(k):
     return torch.tensor(COCO_SIGMAS if k == 17 else (0.05,) * k)
-
-
-def flip_pairs(k):
-    return COCO_FLIP_PAIRS if k == 17 else ()
 
 
 def flatten_kpt(preds, k):
