@@ -142,8 +142,11 @@ def test_masks_and_keypoints_follow_their_boxes(coco, canvas, aug) -> None:
 def test_rescale_batch_moves_boxes_keypoints_and_raster(coco, canvas) -> None:
     ds = _dataset(coco, canvas=canvas, aug=DEFAULT_AUG, seed=2, masks=True, kpt=SYNTH_KPT)
     imgs, t, _, m = collate([ds[i] for i in range(4)])
-    imgs = imgs.float() / 255
     h, w = ds.canvas
+    # [image, class, box, has_mask, 3K keypoints] rows; a uint8 stride-8 raster
+    assert imgs.dtype == m.dtype == torch.uint8 and m.shape == (4, h // 8, w // 8)
+    assert t.shape[1] == 7 + 3 * SYNTH_KPT
+    imgs = imgs.float() / 255
     size = (h // 2, w // 2)
     ri, rt, rm = rescale_batch(imgs, t.clone(), m.clone(), size, seg=True, kpt=SYNTH_KPT)
     assert ri.shape == (4, 3, *size) and rm.shape == (4, size[0] // 8, size[1] // 8)

@@ -40,7 +40,9 @@ def test_fuse_parity_and_contract(cfg) -> None:
 @pytest.mark.slow
 @pytest.mark.parametrize("tier", sorted(TIERS))
 def test_tier_fuse_parity_and_contract(tier: str) -> None:
-    err, scale, inv = check_parity(Detector(TIERS[tier], 80), 256)
+    # with masks and keypoints: that graph contains the detection graph
+    cfg = dataclasses.replace(TIERS[tier], seg=True, kpt=17)
+    err, scale, inv = check_parity(Detector(cfg, 80), 256)
     assert err < 1e-4 * max(scale, 1.0)
     assert set(inv) <= DEPLOY_OPS
 

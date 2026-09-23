@@ -8,6 +8,7 @@ import dataclasses
 
 import pytest
 import torch
+from torchvision.ops import box_iou
 
 from mayaku.config import InputConfig, KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.batch import batch_to
@@ -15,6 +16,7 @@ from mayaku.inference import ArtifactPredictor, Predictor, from_pretrained
 from mayaku.inference.decode import decode_sidecar
 from mayaku.inference.export import export
 from mayaku.inference.export.metadata import read_sidecar
+from mayaku.inference.preprocess import letterbox_batch
 from mayaku.utils.checkpoint import build_sidecar, check_sidecar, save_checkpoint
 
 from ._coco_fixture import fixture
@@ -24,7 +26,6 @@ ort = pytest.importorskip("onnxruntime")
 
 def _trained_like(model):
     """Random but non-trivial weights with enough confidence to detect."""
-    torch.manual_seed(0)
     with torch.no_grad():
         for p in model.parameters():
             p.add_(torch.randn_like(p) * 0.05)
@@ -45,6 +46,7 @@ def run(request, tmp_path_factory):
         input=InputConfig(canvas_hw=canvas),
         train=dataclasses.replace(MayakuConfig().train,
                                   decode=dataclasses.replace(MayakuConfig().train.decode, conf=0.3)))
+    torch.manual_seed(0)   # the init too, so the weights do not depend on test order
     model = _trained_like(cfg.model.build(canvas))
     ckpt = root / "best.pt"
     save_checkpoint(model, ckpt, build_sidecar(cfg, ds.coco.class_names, model))
@@ -102,13 +104,22 @@ def test_onnx_export_embeds_the_sidecar_and_runs_the_same(run, predictor, onnx_p
     assert check_sidecar(read_sidecar(onnx_path, "onnx"), str(onnx_path)) == predictor.sidecar
     a = ArtifactPredictor(onnx_path, "cpu")
     assert a.canvas == predictor.canvas and a.class_names == ds.coco.class_names
+    x, _ = letterbox_batch(files, predictor.canvas)
+    for gm, wm in zip(a._forward(x), predictor._forward(x), strict=True):
+        assert torch.allclose(gm, wm.cpu(), atol=1e-3)
+    # decoded: every confident detection has its twin. Near the threshold, or
+    # tied in NMS, a 1e-4 difference in the maps may legitimately flip one.
     for g, w in zip(a.batch(files), predictor.batch(files), strict=True):
-        assert len(g) == len(w) and torch.equal(g.labels, w.labels)
-        assert torch.allclose(g.boxes, w.boxes, atol=1e-2)
-        assert torch.allclose(g.scores, w.scores, atol=1e-4)
-        assert torch.allclose(g.keypoints[..., :2], w.keypoints[..., :2], atol=1e-1)
-        # a mask may differ only on its boundary pixels
-        assert (g.masks != w.masks).float().mean() < 0.01
+        for k in (g.scores > 0.5).nonzero().flatten().tolist():
+            # its twin: same class, same box, closest score (the untrained
+            # model emits many identical clipped boxes)
+            twin = (box_iou(g.boxes[k:k + 1], w.boxes)[0] > 0.99) & (w.labels == g.labels[k])
+            gap = torch.where(twin, (w.scores - g.scores[k]).abs(), torch.inf)
+            j = int(gap.argmin())
+            assert gap[j] < 1e-3
+            assert torch.allclose(g.keypoints[k, :, :2], w.keypoints[j, :, :2], atol=1e-1)
+            # a mask may differ only on its boundary pixels
+            assert (g.masks[k] != w.masks[j]).float().mean() < 0.01
 
 
 def test_from_pretrained_picks_the_backend(run, onnx_path) -> None:
