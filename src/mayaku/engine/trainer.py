@@ -18,6 +18,7 @@ EMA is universally adopted and has no published isolated ablation: it is here
 because the whole field uses it.
 """
 
+import contextlib
 import copy
 import dataclasses
 import json
@@ -27,8 +28,9 @@ import time
 
 import torch
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.optim.swa_utils import update_bn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from mayaku.data.augment import CLEAN_AUG, DEFAULT_AUG, Augment
 from mayaku.data.batch import (
@@ -39,6 +41,7 @@ from mayaku.data.batch import (
     to_tensor,
 )
 from mayaku.data.canvas import multi_scale_canvases
+from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size, synchronize
 from mayaku.engine.evaluation import STATS, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
@@ -59,6 +62,8 @@ class Recipe:
     """
 
     epochs: int = 125
+    # Images per optimizer micro-step across all GPUs: a run keeps its recipe
+    # on any GPU count, each of `world` ranks taking `batch / world` of it.
     batch: int = 16
     optimizer: str = "sgd"          # sgd | adamw | musgd
     lr: float = 0.01
@@ -102,6 +107,9 @@ class Recipe:
     seg_cap: int = 250
     seed: int = 0
     amp: bool = True
+    # Multi-GPU (CUDA) only: BatchNorm statistics over the whole batch rather
+    # than each GPU's share, so the run matches its single-GPU equivalent.
+    sync_bn: bool = True
     aug: Augment = DEFAULT_AUG
     final_aug: Augment = CLEAN_AUG
     decode: Decode = DEPLOY
@@ -332,15 +340,33 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     epoch. The schedule is a function of the epoch and iteration, so it
     needs no state of its own.
 
-    Returns `best` None when there is no `val_ds`.
+    Under `torch.distributed` (see `mayaku.engine.distributed.launch`) every
+    rank calls this with the same arguments. Each trains on its own share of
+    every batch (`Recipe.batch` is the global batch, so the recipe does not
+    depend on the GPU count); rank 0 alone keeps the EMA, recalibrates,
+    evaluates, logs and writes, and only rank 0 needs a `val_ds`.
+
+    Returns `best` None when there is no `val_ds`, and (None, None, [])
+    on ranks other than 0.
     """
     canvas = train_ds.canvas
+    world, rank = get_world_size(), get_rank()
+    main = rank == 0
+    if r.batch % world:
+        raise ValueError("batch %d does not split over %d GPUs; use a multiple of %d"
+                         % (r.batch, world, world))
     assert model.nc == train_ds.nc, "head and labels disagree"
+    if not main:
+        val_ds, out, log = None, None, lambda *_: None
     if val_ds is not None:
         assert val_ds.nc == model.nc, "head and validation labels disagree"
         assert val_ds.canvas == canvas, "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
     start = resume["epoch"] + 1 if resume else 0
-    torch.manual_seed(r.seed + start)
+    # rank 0 keeps the single-GPU stream; the others draw their own
+    # augmentation (the weights are rank 0's, broadcast when wrapped)
+    torch.manual_seed(r.seed + start + 7919 * rank)
+    if rank:
+        train_ds.rng.seed(r.seed + start + 7919 * rank)
     if resume:
         model.load_state_dict(resume["model"])
     model = model.to(device)
@@ -353,18 +379,32 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                          loc_weight_floor=r.loc_weight_floor,
                          seg=model.cfg.seg, seg_gain=r.seg_gain, seg_cap=r.seg_cap,
                          kpt=model.cfg.kpt).to(device)
-    ema = EMA(model, r.ema_decay, r.ema_tau)
+    # Built from the plain model before any SyncBatchNorm swap, so the shadow
+    # (which rank 0 recalibrates and evaluates alone) never needs its peers.
+    ema = EMA(model, r.ema_decay, r.ema_tau) if main else None
     amp = r.amp and device.startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
     if resume:
-        ema.model.load_state_dict(resume["ema"])
-        ema.updates = resume["ema_updates"]
+        if ema is not None:
+            ema.model.load_state_dict(resume["ema"])
+            ema.updates = resume["ema_updates"]
         opt.load_state_dict(resume["optimizer"])
         scaler.load_state_dict(resume["scaler"])
+    # `fwd` runs the training forward: the model itself, or its DDP wrapper
+    fwd, sampler = model, None
+    if world > 1:
+        if r.sync_bn and device.startswith("cuda"):
+            # shares the parameters and buffers, so the model, the optimizer
+            # and the EMA keep reading the live tensors
+            fwd = nn.SyncBatchNorm.convert_sync_batchnorm(fwd)
+        cuda = [torch.device(device).index or 0] if device.startswith("cuda") else None
+        fwd = DistributedDataParallel(fwd, device_ids=cuda)
+        sampler = DistributedSampler(train_ds, world, rank, shuffle=True, seed=r.seed,
+                                     drop_last=True)
 
     def make_loader():
-        return DataLoader(train_ds, batch_size=r.batch, shuffle=True,
-                          num_workers=workers, collate_fn=collate,
+        return DataLoader(train_ds, batch_size=r.batch // world, shuffle=sampler is None,
+                          sampler=sampler, num_workers=workers, collate_fn=collate,
                           drop_last=True, pin_memory=device.startswith("cuda"),
                           worker_init_fn=seed_worker,
                           persistent_workers=workers > 0)
@@ -398,7 +438,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             # dropped first so its workers exit before new ones fork.
             loader = None
             loader = make_loader()
-        model.train()
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        fwd.train()
         totals, t0 = {}, time.perf_counter()
         for i, (imgs, targets, _, masks) in enumerate(loader):
             it = epoch * len(loader) + i
@@ -408,21 +450,28 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                 s = ms_sizes[torch.randint(len(ms_sizes), (1,)).item()]
                 imgs, targets, masks = rescale_batch(
                     imgs, targets, masks, s, model.cfg.seg, model.cfg.kpt)
-            with torch.amp.autocast("cuda", enabled=amp):
-                loss, parts = crit(model(imgs), targets, epoch=epoch, masks=masks)
-            scaler.scale(loss / accumulate).backward()
-            if (i + 1) % accumulate == 0:
+            step = (i + 1) % accumulate == 0
+            # gradients are only exchanged on the micro-batch that steps
+            no_sync = fwd.no_sync() if world > 1 and not step else contextlib.nullcontext()
+            with no_sync:
+                with torch.amp.autocast("cuda", enabled=amp):
+                    loss, parts = crit(fwd(imgs), targets, epoch=epoch, masks=masks)
+                # DDP averages the ranks' gradients; the loss is a sum over
+                # the batch, so the ranks' shares are summed back
+                scaler.scale((loss * world if world > 1 else loss) / accumulate).backward()
+            if step:
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), 10.0)
                 scaler.step(opt)
                 scaler.update()
                 opt.zero_grad(set_to_none=True)
-                ema.update()
+                if ema is not None:
+                    ema.update()
             # kept as device tensors and reduced once below; reading them
             # every iteration would sync the host against the GPU
             for k, v in parts.items():
                 totals[k] = totals.get(k, 0) + v
-            if log_every and (i + 1) % log_every == 0:
+            if main and log_every and (i + 1) % log_every == 0:
                 done, spent = i + 1, time.perf_counter() - t0
                 log("  %5d/%-5d  box %.3f cls %.3f dfl %.3f  lr %.5f  "
                     "%.0f img/s  epoch eta %s"
@@ -431,6 +480,11 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                        opt.param_groups[0]["lr"], done * r.batch / spent,
                        hms(spent / done * (len(loader) - done))))
 
+        if world > 1:
+            totals = all_reduce_dict(totals)     # the mean over ranks
+        if not main:
+            synchronize()                        # wait out rank 0's epoch end
+            continue
         left = (r.epochs - epoch - 1) * (time.perf_counter() - t0)
         rec = {"epoch": epoch, "lr": r.lr * lr,
                "secs": time.perf_counter() - t0,
@@ -445,6 +499,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                 best = {"epoch": epoch, **{k: rec[k] for k in STATS}}
                 if out:
                     save_checkpoint(ema.model, os.path.join(out, "best.pt"), sidecar)
+                    with open(os.path.join(out, "best.json"), "w") as f:
+                        json.dump(best, f, indent=2)
             log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s"
                 % (epoch, rec["box"], rec["cls"], rec["dfl"], summary(rec)))
         else:
@@ -463,6 +519,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             path = os.path.join(out, STATE)
             torch.save(state, path + ".tmp")
             os.replace(path + ".tmp", path)
+        synchronize()
+    if not main:
+        return None, None, []
     return (best if val_ds is not None else None), ema.model, records
 
 
