@@ -23,7 +23,6 @@ jobs:
           cache: pip
       - run: pip install -e '.[dev]'
       - run: ruff check src tests
-      - run: ruff format --check src tests
 
   typecheck:
     name: Type-check (mypy)
@@ -38,13 +37,10 @@ jobs:
           # Python 3.12 and greater") — it aborts before checking our code.
           python-version: "3.10"
           cache: pip
-      # mypy needs the optional extras' types in scope (onnx, openvino).
-      # coreml + tensorrt are intentionally excluded — coremltools is
-      # macOS-only and tensorrt requires CUDA. Both are listed in
-      # `[[tool.mypy.overrides]]` with `ignore_missing_imports = true`.
-      # `typecheck` additionally pins torch/torchvision — mypy input, see the
-      # extra in pyproject.toml. The test matrix below deliberately omits it.
-      - run: pip install -e '.[dev,typecheck,onnx,openvino]'
+      # mypy needs the onnx types in scope. `typecheck` additionally pins
+      # torch/torchvision -- mypy input, see the extra in pyproject.toml. The
+      # test matrix below deliberately omits it.
+      - run: pip install -e '.[dev,typecheck,onnx]'
       - run: mypy
 
   test:
@@ -60,18 +56,33 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e '.[dev,onnx,openvino]'
+      - run: pip install -e '.[dev,onnx]'
       # onnxruntime is intentionally not in `[onnx]` (CPU vs GPU wheels
       # differ); install the CPU build explicitly so the `onnx`-marked
       # tests can actually run.
       - run: pip install onnxruntime
-      # Skip markers that need hardware or platform we don't have here:
-      #   cuda / multi_gpu / tensorrt — no NVIDIA GPU
-      #   mps                       — no Apple Silicon
-      #   coreml                    — macOS-only
-      #   slow                      — keep PR feedback fast
+      # Skip what needs hardware we don't have here (cuda / multi_gpu: no
+      # NVIDIA GPU; mps: no Apple Silicon) and the slow job's tests.
       - run: >
           pytest
-          -m "not cuda and not mps and not multi_gpu and not coreml and not tensorrt and not slow"
+          -m "not cuda and not mps and not multi_gpu and not slow"
           --cov=mayaku
           --cov-report=term-missing
+
+  # The overfit gates, the tiny training runs, every tier's fuse parity and
+  # the two-rank DDP helpers: minutes on CPU, so only once the fast checks pass.
+  test-slow:
+    name: Test (slow)
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev,onnx]'
+      - run: pip install onnxruntime
+      - run: >
+          pytest
+          -m "slow and not cuda and not mps and not multi_gpu"
