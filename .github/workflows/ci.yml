@@ -40,7 +40,7 @@ jobs:
       # mypy needs the onnx types in scope. `typecheck` additionally pins
       # torch/torchvision -- mypy input, see the extra in pyproject.toml. The
       # test matrix below deliberately omits it.
-      - run: pip install -e '.[dev,typecheck,onnx]'
+      - run: pip install -e '.[dev,typecheck,openvino]'
       - run: mypy
 
   test:
@@ -56,7 +56,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e '.[dev,onnx]'
+      - run: pip install -e '.[dev,openvino]'
       # onnxruntime is intentionally not in `[onnx]` (CPU vs GPU wheels
       # differ); install the CPU build explicitly so the `onnx`-marked
       # tests can actually run.
@@ -81,7 +81,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e '.[dev,onnx]'
+      - run: pip install -e '.[dev,openvino]'
       - run: pip install onnxruntime
       - run: >
           pytest

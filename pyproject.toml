@@ -40,6 +40,11 @@ dependencies = [
 #   CUDA Linux/Windows:   pip install onnxruntime-gpu
 # The CLI reports the right install command if the package is missing.
 onnx = ["onnx>=1.16"]
+coreml = ["onnx>=1.16", "coremltools>=8.0"]
+openvino = ["onnx>=1.16", "openvino>=2024.3"]
+# TensorRT is CUDA-only and has no macOS wheels; the marker keeps a single
+# `pip install mayaku[tensorrt]` harmless there.
+tensorrt = ["onnx>=1.16", "tensorrt>=10.0; sys_platform != 'darwin'"]
 
 # The lint/type toolchain is PINNED, not floored. ruff and mypy change their
 # diagnostics between releases, and typeshed stubs change whether a third-party
