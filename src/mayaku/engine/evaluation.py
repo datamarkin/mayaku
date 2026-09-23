@@ -36,16 +36,19 @@ def to_coco(det, image_id, cat_ids):
             for b, s, c in zip(box.tolist(), det.scores.tolist(), det.labels.tolist())]
 
 
+def rle(mask):
+    """An (h, w) bool mask -> COCO run-length encoding, JSON-ready."""
+    from pycocotools import mask as maskutil
+    r = maskutil.encode(np.asfortranarray(mask.numpy()))
+    r["counts"] = r["counts"].decode("ascii")
+    return r
+
+
 def to_coco_segm(det, image_id, cat_ids):
     """One image's `Detections` with masks -> COCO segm result records (RLE)."""
-    from pycocotools import mask as maskutil
-    recs = []
-    for k in range(len(det)):
-        rle = maskutil.encode(np.asfortranarray(det.masks[k].numpy()))
-        rle["counts"] = rle["counts"].decode("ascii")
-        recs.append({"image_id": image_id, "category_id": cat_ids[int(det.labels[k])],
-                     "segmentation": rle, "score": float(det.scores[k])})
-    return recs
+    return [{"image_id": image_id, "category_id": cat_ids[int(det.labels[k])],
+             "segmentation": rle(det.masks[k]), "score": float(det.scores[k])}
+            for k in range(len(det))]
 
 
 def to_coco_kpt(det, image_id, cat_ids):
@@ -88,6 +91,26 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
     return dict(zip(stats, [float(v) for v in e.stats]))
 
 
+def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
+    """COCO metrics for `(image_id, Detections)` pairs: box AP, plus mask AP
+    under "segm_" and keypoint AP under "kpt_" when the model has those heads.
+    Keypoints are scored against `kpt_ann_path` when the file is separate."""
+    results, segm, kpts = [], [], []
+    for image_id, det in detections:
+        results += to_coco(det, image_id, cat_ids)
+        if seg:
+            segm += to_coco_segm(det, image_id, cat_ids)
+        if kpt:
+            kpts += to_coco_kpt(det, image_id, cat_ids)
+    out = coco_ap(ann_path, results)
+    if seg:
+        out.update({"segm_" + k: v for k, v in coco_ap(ann_path, segm, "segm").items()})
+    if kpt:
+        out.update({"kpt_" + k: v for k, v in
+                    coco_ap(kpt_ann_path or ann_path, kpts, "keypoints", k=kpt).items()})
+    return out
+
+
 @torch.no_grad()
 def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
     """Run a model over a dataset and return the COCO metrics.
@@ -106,24 +129,45 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
     was_training = model.training
     model.eval()
     seg, kpt = model.cfg.seg, model.cfg.kpt
-    results, segm, kpts = [], [], []
-    for imgs, _, metas, _ in loader:
-        preds = model(batch_to(imgs, device))
-        for det, meta in zip(decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d),
-                             metas):
-            results += to_coco(det, meta["id"], dataset.cat_ids)
-            if seg:
-                segm += to_coco_segm(det, meta["id"], dataset.cat_ids)
-            if kpt:
-                kpts += to_coco_kpt(det, meta["id"], dataset.cat_ids)
-    model.train(was_training)
-    out = coco_ap(dataset.ann_path, results)
-    if seg:
-        out.update({"segm_" + k: v for k, v in coco_ap(dataset.ann_path, segm, "segm").items()})
-    if kpt:
-        out.update({"kpt_" + k: v
-                    for k, v in coco_ap(dataset.kpt_ann_path, kpts, "keypoints", k=kpt).items()})
-    return out
+
+    def detections():
+        for imgs, _, metas, _ in loader:
+            preds = model(batch_to(imgs, device))
+            dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d)
+            yield from ((meta["id"], det) for meta, det in zip(metas, dets))
+
+    try:
+        return score(dataset.ann_path, detections(), dataset.cat_ids, seg, kpt,
+                     dataset.kpt_ann_path)
+    finally:
+        model.train(was_training)
+
+
+def evaluate_runner(runner, images, annotations, batch=16, log=None):
+    """COCO metrics for a deployed detector -- a `mayaku.inference.Runner`,
+    so a checkpoint and its exported artifacts score through their own
+    preprocessing, graph and precision -- on the split `annotations` /
+    `images`. `log` receives a progress line every 100 batches."""
+    import os
+
+    ann = str(annotations)
+    gt = ground_truth(ann)             # the index scoring reads, parsed once
+    cat_ids = sorted(gt.getCatIds())   # dense class order, as `load_coco` has it
+    if len(runner.class_names) != len(cat_ids):
+        raise ValueError(f"the model has {len(runner.class_names)} classes and "
+                         f"{annotations} has {len(cat_ids)}")
+    ids = list(gt.imgs)
+    files = [os.path.join(images, gt.imgs[i]["file_name"]) for i in ids]
+    kp = runner.sidecar["keypoints"]
+
+    def detections():
+        for i in range(0, len(files), batch):
+            if log and i and i % (100 * batch) == 0:
+                log("eval %d/%d" % (i, len(files)))
+            yield from zip(ids[i:i + batch], runner.batch(files[i:i + batch]))
+
+    return score(ann, detections(), cat_ids,
+                 seg=runner.sidecar["mask"] is not None, kpt=kp["num"] if kp else 0)
 
 
 def summary(stats, prefix=""):
