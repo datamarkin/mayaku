@@ -7,7 +7,9 @@ import dataclasses
 import pytest
 import torch
 
-from mayaku.engine.evaluation import DEPLOY, coco_ap, evaluate, postprocess, to_coco, to_coco_segm
+from mayaku.data.geometry import unletterbox
+from mayaku.engine.evaluation import coco_ap, evaluate, to_coco, to_coco_segm
+from mayaku.inference.decode import DEPLOY, Detections, postprocess
 from mayaku.model import STRIDES, TINY, Detector
 
 from ._coco_fixture import fixture
@@ -18,19 +20,15 @@ def ds(tmp_path_factory):
     return fixture(tmp_path_factory.mktemp("coco"))
 
 
-def _as_detections(labels):
-    """(n, 5) [class, x1, y1, x2, y2] -> (n, 6) detections scored 1.0."""
-    return torch.cat((labels[:, 1:5], torch.ones(len(labels), 1), labels[:, :1]), 1)
-
-
-def _original_frame(ds, i):
-    return {"id": ds.ids[i], "ratio": 1.0, "pad": (0, 0), "shape": ds.shapes[i]}
+def _as_detections(labels, masks=None):
+    """(n, 5) [class, x1, y1, x2, y2] labels -> `Detections` scored 1.0."""
+    return Detections(labels[:, 1:5].clone(), torch.ones(len(labels)), labels[:, 0].long(), masks)
 
 
 def test_annotations_as_detections_score_ap_1(ds) -> None:
     raw = []
     for i in range(len(ds)):
-        raw += to_coco(_as_detections(torch.from_numpy(ds.labels[i])), _original_frame(ds, i), ds.cat_ids)
+        raw += to_coco(_as_detections(torch.from_numpy(ds.labels[i])), ds.ids[i], ds.cat_ids)
     assert coco_ap(ds.ann_path, raw)["AP"] > 0.999
 
 
@@ -42,7 +40,7 @@ def test_rasterised_boxes_score_segm_ap_1(ds) -> None:
         masks = torch.zeros(len(labels), h, w, dtype=torch.bool)
         for k, (x1, y1, x2, y2) in enumerate(labels[:, 1:5].int().tolist()):
             masks[k, y1:y2, x1:x2] = True
-        res += to_coco_segm(_as_detections(labels), masks, _original_frame(ds, i), ds.cat_ids)
+        res += to_coco_segm(_as_detections(labels, masks), ds.ids[i], ds.cat_ids)
     assert coco_ap(ds.ann_path, res, "segm")["AP"] > 0.999
 
 
@@ -52,7 +50,10 @@ def test_letterbox_frame_round_trips_through_the_ruler(ds) -> None:
     boxed = []
     for i in range(len(ds)):
         s = ds[i]
-        boxed += to_coco(_as_detections(s["labels"]), s["meta"], ds.cat_ids)
+        m = s["meta"]
+        back = s["labels"].clone()
+        back[:, 1:5] = unletterbox(back[:, 1:5], m["ratio"], m["pad"], m["shape"])
+        boxed += to_coco(_as_detections(back), m["id"], ds.cat_ids)
     assert coco_ap(ds.ann_path, boxed)["AP"] > 0.99
     # a known displacement costs AP without costing AP50
     nudged = [dict(r, bbox=[r["bbox"][0] + 0.12 * r["bbox"][2], r["bbox"][1] + 0.12 * r["bbox"][3],

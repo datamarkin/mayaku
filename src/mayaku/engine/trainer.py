@@ -38,8 +38,9 @@ from mayaku.data.batch import (
     seed_worker,
     to_tensor,
 )
-from mayaku.engine.evaluation import DEPLOY, STATS, Decode, evaluate, summary
+from mayaku.engine.evaluation import STATS, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
+from mayaku.inference.decode import DEPLOY, Decode
 from mayaku.model.quant import is_qat, ranges_frozen, recalibrate_ranges
 from mayaku.tuning.sizing import multi_scale_canvases
 from mayaku.utils.checkpoint import save_checkpoint
