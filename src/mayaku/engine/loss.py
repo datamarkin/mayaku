@@ -17,11 +17,13 @@ sigmoid, the softmax expectation and the decode run on the host.
 """
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 from mayaku.data.batch import split_extras
 from mayaku.engine.assign import AssignInput, WarmupAssigner
+from mayaku.engine.distributed import get_world_size
 from mayaku.model import box as boxlib
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
@@ -228,7 +230,16 @@ class DetectionLoss(nn.Module):
                 epoch)
         tgt_boxes, tgt_scores, fg, starved = a.boxes, a.scores, a.fg, a.starved
 
-        norm = tgt_scores.sum().clamp_(min=1)
+        # Under DDP each rank holds a share of the batch; every rank normalises
+        # by the whole batch's target sum, divided by the rank count, so the
+        # ranks' losses sum to the single-process loss (the trainer turns
+        # DDP's gradient average back into that sum).
+        world = get_world_size()
+        norm = tgt_scores.sum()
+        if world > 1:
+            dist.all_reduce(norm)
+            norm = norm / world
+        norm = norm.clamp_(min=1 / world)
         if self.cls_loss == "vfl":
             cls = varifocal(pd_cls, tgt_scores).sum() / norm
         else:
@@ -254,7 +265,9 @@ class DetectionLoss(nn.Module):
 
         parts = {"box": box.detach(), "cls": cls.detach(), "dfl": dfl.detach(),
                  "positives": fg.sum(), "starved": starved.sum()}
-        aux = pd_cls.sum() * 0
+        # every output in the graph, even with no positives this step, so no
+        # parameter is ever left without a gradient (DDP requires it)
+        aux = sum(p.sum() for p in preds) * 0
         grp = split_outputs(preds, seg=self.seg is not None, kpt=self.kpt is not None)
         has_mask, gt_kpts = split_extras(extras, self.seg is not None, self.k)
         if self.seg is not None and masks is not None and has_mask is not None:
@@ -277,6 +290,8 @@ class DetectionLoss(nn.Module):
         # gradient's magnitude relative to the fixed clip norm (10): without
         # it the gradient falls under the clip early in training and the
         # steps shrink with it, which costs substantial AP.
+        # (The auxiliary terms normalise by their own rank-local counts, so
+        # under DDP they match a single-GPU run in expectation, not exactly.)
         total = (gb * box + gc * cls + gd * dfl + aux) * b
         # every part stays a device tensor; converting here would sync the
         # host against the GPU several times per step
