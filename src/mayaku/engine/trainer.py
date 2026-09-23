@@ -40,9 +40,9 @@ from mayaku.data.batch import (
 )
 from mayaku.engine.evaluation import DEPLOY, STATS, Decode, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
-from mayaku.model.blocks import as_canvas
-from mayaku.model.quant import enable_qat, ranges_frozen, recalibrate_ranges
+from mayaku.model.quant import is_qat, ranges_frozen, recalibrate_ranges
 from mayaku.tuning.sizing import multi_scale_canvases
+from mayaku.utils.checkpoint import save_checkpoint
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,7 +57,6 @@ class Recipe:
 
     epochs: int = 125
     batch: int = 16
-    canvas: tuple = (640, 640)      # (H, W) the network trains and evaluates at; a side is squared
     optimizer: str = "sgd"          # sgd | adamw | musgd
     lr: float = 0.01
     lr_final_frac: float = 0.01     # final LR as a fraction of `lr`
@@ -86,21 +85,16 @@ class Recipe:
     # Lower values let lower-IoU small positives rank.
     tal_beta: float = 6.0
     loc_weight_floor: float = 0.0   # floor the box/DFL loss weight (0 = off)
-    # Multi-scale training: the smallest long side, 0 = off (fixed `canvas`).
-    # When set, every batch is rendered at `canvas` (the operating point, the
+    # Multi-scale training: the smallest long side, 0 = off. When set, every
+    # batch is rendered at the dataset's canvas (the operating point, the
     # maximum) and downscaled to a random rung of
     # `mayaku.tuning.sizing.multi_scale_canvases`: the canvas aspect, long side
-    # stepping by 32 from `multiscale` up. Eval always runs at `canvas`.
+    # stepping by 32 from `multiscale` up. Eval always runs at the canvas.
     multiscale: int = 0
     # auxiliary heads: the Dice loss weight and the positive cap for masks.
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
     seg_gain: float = 2.0
     seg_cap: int = 250
-    # Quantization-aware training: fake-quantize (per-channel symmetric
-    # weights, per-tensor affine activations) so training and the scored AP
-    # reflect the int8 deploy. Near-lossless by design (QARepVGG blocks).
-    # Set False for an fp32 run.
-    qat: bool = True
     seed: int = 0
     amp: bool = True
     aug: Augment = DEFAULT_AUG
@@ -108,7 +102,6 @@ class Recipe:
     decode: Decode = DEPLOY
 
     def __post_init__(self):
-        object.__setattr__(self, "canvas", as_canvas(self.canvas))
         assert self.optimizer in ("sgd", "adamw", "musgd"), self.optimizer
         assert self.final_epochs < self.epochs
 
@@ -299,9 +292,14 @@ def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
 
 
 def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
-          workers=0, eval_every=1, log_every=100, log=print):
+          workers=0, eval_every=1, log_every=100, log=print, sidecar=None):
     """Run the recipe. Returns the best metrics, the EMA model, and the
     per-epoch records.
+
+    The canvas is the datasets' (both must agree). Quantization-aware
+    training is a property of the model: pass one that went through
+    `mayaku.model.enable_qat` and training, scoring and the saved ranges are
+    the int8 ones.
 
     Every `log_every` iterations the running loss is printed with a rate and
     an estimate; that line is the only place the host waits on the device
@@ -310,15 +308,16 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     A record per epoch carries the loss parts, the assigner counters and the
     full COCO metrics. They are returned, and appended to `out/log.jsonl` when
     there is an `out`, next to `recipe.json` and `tier.json`, so a run
-    directory can always reproduce and rebuild its own model.
+    directory can always reproduce and rebuild its own model. With a
+    `sidecar` (`mayaku.utils.checkpoint.build_sidecar`), `best.pt` and
+    `last.pt` carry it next to the weights and are self-describing.
     """
     assert model.nc == train_ds.nc == val_ds.nc, "head and labels disagree"
-    assert train_ds.canvas == val_ds.canvas == r.canvas, \
-        "recipe canvas %s disagrees with the data %s / %s" % (r.canvas, train_ds.canvas, val_ds.canvas)
+    canvas = train_ds.canvas
+    assert val_ds.canvas == canvas, "train canvas %s, val canvas %s" % (canvas, val_ds.canvas)
     torch.manual_seed(r.seed)
     model = model.to(device)
-    if r.qat:
-        enable_qat(model)
+    qat = is_qat(model)
     accumulate = max(1, round(r.lr_ref_batch / r.batch))
     opt = build_optimizer(model, r, accumulate)
     crit = DetectionLoss(nc=model.nc, reg_max=model.cfg.reg_max,
@@ -341,7 +340,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     loader = make_loader()
     # multi-scale training downscales each batch from the rendered canvas
     # (the maximum) to a random rung of the ladder; empty = fixed
-    ms_sizes = multi_scale_canvases(r.canvas, r.multiscale) if r.multiscale else []
+    ms_sizes = multi_scale_canvases(canvas, r.multiscale) if r.multiscale else []
     if ms_sizes and out:
         log("multi-scale training over %s" % ms_sizes)
     warmup_iters = max(round(r.warmup_epochs * len(loader)), r.warmup_iters_min)
@@ -349,9 +348,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     if out:
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "recipe.json"), "w") as f:
-            json.dump(dataclasses.asdict(r), f, indent=2)
+            json.dump({**dataclasses.asdict(r), "canvas": list(canvas)}, f, indent=2)
         with open(os.path.join(out, "tier.json"), "w") as f:
-            json.dump(dataclasses.asdict(model.cfg), f, indent=2)
+            json.dump({**dataclasses.asdict(model.cfg), "qat": qat}, f, indent=2)
         open(log_path, "w").close()
     records, best = [], {"AP": -1.0}
 
@@ -411,7 +410,7 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             if rec["AP"] > best["AP"]:
                 best = {"epoch": epoch, **{k: rec[k] for k in STATS}}
                 if out:
-                    torch.save(ema.model.state_dict(), os.path.join(out, "best.pt"))
+                    save_checkpoint(ema.model, os.path.join(out, "best.pt"), sidecar)
             log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s"
                 % (epoch, rec["box"], rec["cls"], rec["dfl"], summary(rec)))
         else:
@@ -422,5 +421,5 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         if out:
             with open(log_path, "a") as f:
                 f.write(json.dumps(rec) + "\n")
-            torch.save(ema.model.state_dict(), os.path.join(out, "last.pt"))
+            save_checkpoint(ema.model, os.path.join(out, "last.pt"), sidecar)
     return best, ema.model, records
