@@ -19,7 +19,8 @@ from mayaku.model import (
     load_weights,
 )
 from mayaku.model.blocks import as_canvas
-from mayaku.model.contract import DEPLOY_OPS, count, export_onnx
+from mayaku.model.contract import DEPLOY_OPS, QDQ_OPS, count, export_onnx
+from mayaku.model.quant import qdq_export
 
 onnx = pytest.importorskip("onnx")
 
@@ -108,6 +109,37 @@ def test_qat_export_stays_in_contract(tmp_path) -> None:
     m.fuse()
     inv = export_onnx(m, str(tmp_path / "qat.onnx"), 64)
     assert set(inv) <= DEPLOY_OPS
+
+
+def _calibrated_qat():
+    m = enable_qat(Detector(SEG_KPT, 4))
+    m.train()
+    with torch.no_grad():
+        m(torch.rand(2, 3, 64, 64))    # observers see a range
+    return m.eval()
+
+
+def test_qat_ranges_survive_fusion() -> None:
+    """Every deployed conv keeps an int8 input range, the fused RepVGG kernels
+    included (they read the same input their branches did)."""
+    m = _calibrated_qat().fuse()
+    assert not [n for n, c in m.named_modules() if type(c) is torch.nn.Conv2d]
+
+
+def test_int8_graph_is_the_training_simulation(tmp_path) -> None:
+    """The QDQ graph computes exactly what fake-quant trained, and exports as
+    the contract plus Q/DQ pairs; a model without QAT has no int8 graph."""
+    m = _calibrated_qat().fuse()
+    x = torch.rand(1, 3, 64, 64)
+    with torch.no_grad():
+        sim = m(x)
+        with qdq_export(m):
+            qdq = m(x)
+    assert all(torch.equal(a, b) for a, b in zip(sim, qdq, strict=True))
+    inv = export_onnx(m, str(tmp_path / "int8.onnx"), 64, int8=True)
+    assert set(inv) <= DEPLOY_OPS | QDQ_OPS and inv["QuantizeLinear"] > 0
+    with pytest.raises(ValueError, match="quantization-aware"):
+        export_onnx(Detector(TINY, 4).fuse(), str(tmp_path / "x.onnx"), 64, int8=True)
 
 
 def test_load_weights_across_the_aux_boundary() -> None:

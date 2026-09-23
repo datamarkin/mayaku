@@ -60,9 +60,10 @@ class Detector(nn.Module):
         return fuse_tree(self.eval())
 
     def for_deploy(self):
-        """A fused copy that runs the deployed fp32 graph: the one this model
-        exports as, which a runtime quantizes from the observed ranges when
-        it was trained quantization-aware. The original is left as it is."""
+        """A fused copy that runs the deployed fp32 graph, the one this model
+        exports as; a quantization-aware model keeps its trained ranges, so
+        its int8 graph can be traced from the copy too (`quant.qdq_export`).
+        The original is left as it is."""
         from mayaku.model.quant import strip_fake_quant
 
         return strip_fake_quant(copy.deepcopy(self).fuse())

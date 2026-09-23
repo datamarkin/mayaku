@@ -5,9 +5,10 @@ never calls `enable_qat` is plain `nn.Conv2d` and unchanged. Once `enable_qat`
 swaps its convolutions, they fake-quantize in train and eval, so the scored AP
 is the int8 number (ranges freeze in eval). Quantization is a property of the
 swapped module (`fake_quant`), not a process flag: two models can hold
-different settings and nothing leaks between them. The exported deploy graph
-is structural five-op fp32 -- int8 is applied at runtime from the observed
-ranges -- so the exporter turns `fake_quant` off before tracing.
+different settings and nothing leaks between them. An export traces either
+the structural five-op fp32 graph (`fake_quant_disabled`) or the explicit
+int8 one (`qdq_export`: the trained ranges as quantize / dequantize ops);
+`deploy_mode` picks between them.
 
 The observed ranges are statistics of the weights they were observed with,
 like BatchNorm's running statistics, so whenever those weights change without
@@ -22,9 +23,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _weight_scales(w, n=127):
+    """Per-output-channel symmetric int8 scales of a conv weight, (out,)."""
+    return w.detach().abs().amax(dim=(1, 2, 3)).clamp_min(1e-8) / n
+
+
 def _fq_weight_perchannel(w, n=127):
     """Per-output-channel symmetric int8 fake-quant, straight-through."""
-    s = w.detach().abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-8) / n
+    s = _weight_scales(w, n)[:, None, None, None]
     wq = torch.clamp(torch.round(w / s), -n - 1, n) * s
     return w + (wq - w).detach()
 
@@ -75,13 +81,19 @@ class ActFakeQuant(nn.Module):
             else:
                 self.mn.mul_(self.momentum).add_((1 - self.momentum) * cmn)
                 self.mx.mul_(self.momentum).add_((1 - self.momentum) * cmx)
-        mn = self.mn.clamp(max=0.0)  # the range must include zero
-        mx = self.mx.clamp(min=0.0)
-        scale = ((mx - mn) / (self.qmax - self.qmin)).clamp_min(1e-8)
-        zp = torch.round(self.qmin - mn / scale).clamp(self.qmin, self.qmax)
+        scale, zp = self.qparams()
         xq = torch.clamp(torch.round(x / scale) + zp, self.qmin, self.qmax)
         xdq = (xq - zp) * scale
         return x + (xdq - x).detach()
+
+    def qparams(self):
+        """(scale, zero point) of the int8 grid over the observed range, as
+        0-d tensors; the range is widened to include zero."""
+        mn = self.mn.clamp(max=0.0)
+        mx = self.mx.clamp(min=0.0)
+        scale = ((mx - mn) / (self.qmax - self.qmin)).clamp_min(1e-8)
+        zp = torch.round(self.qmin - mn / scale).clamp(self.qmin, self.qmax)
+        return scale, zp
 
 
 class QuantConv2d(nn.Conv2d):
@@ -93,14 +105,40 @@ class QuantConv2d(nn.Conv2d):
     observed ranges)."""
 
     fake_quant = True
+    qdq = None    # (activation scale, zero point, weight scales), set by `qdq_export`
 
     def forward(self, x):
+        if self.qdq is not None:
+            return self._qdq_forward(x)
         if not self.fake_quant:
             return super().forward(x)
         xq = self.act_fq(x)
         wq = _fq_weight_perchannel(self.weight)
         return F.conv2d(xq, wq, self.bias, self.stride, self.padding,
                         self.dilation, self.groups)
+
+    def _qdq_forward(self, x):
+        """The same int8 simulation through PyTorch's quantize ops, which
+        trace to ONNX QuantizeLinear / DequantizeLinear pairs: the explicit
+        int8 graph an int8 runtime executes. The quantization parameters are
+        constants (see `qdq_export`), so they trace as values, not as ops."""
+        scale, zp, ws = self.qdq
+        x = torch.fake_quantize_per_tensor_affine(x, scale, zp, -128, 127)
+        w = torch.fake_quantize_per_channel_affine(
+            self.weight, ws, torch.zeros_like(ws, dtype=torch.int32), 0, -128, 127)
+        return F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+
+def _quantized(conv, act_fq):
+    """`conv` as a QuantConv2d sharing its parameters, observing with `act_fq`."""
+    q = QuantConv2d(conv.in_channels, conv.out_channels, conv.kernel_size,
+                    conv.stride, conv.padding, conv.dilation, conv.groups,
+                    conv.bias is not None)
+    q.weight = conv.weight
+    if conv.bias is not None:
+        q.bias = conv.bias
+    q.add_module("act_fq", act_fq)
+    return q.to(conv.weight.device)
 
 
 def enable_qat(model):
@@ -109,16 +147,9 @@ def enable_qat(model):
     for m in model.modules():
         for name, c in list(m.named_children()):
             if type(c) is nn.Conv2d:
-                q = QuantConv2d(c.in_channels, c.out_channels, c.kernel_size,
-                                c.stride, c.padding, c.dilation, c.groups,
-                                c.bias is not None)
-                q.weight = c.weight
-                if c.bias is not None:
-                    q.bias = c.bias
-                q.add_module("act_fq", ActFakeQuant())
-                q.to(c.weight.device)
-                setattr(m, name, q)
+                setattr(m, name, _quantized(c, ActFakeQuant()))
     return model
+
 
 
 def is_qat(model):
@@ -128,8 +159,8 @@ def is_qat(model):
 
 def strip_fake_quant(model):
     """Run every QuantConv2d in `model` as a plain convolution from now on:
-    the deployed fp32 graph, which a runtime quantizes from the observed
-    ranges. For a model that is only served, not trained further."""
+    the deployed fp32 graph (the int8 one is traced with `qdq_export`, which
+    overrides this). For a model that is only served, not trained further."""
     for m in model.modules():
         if isinstance(m, QuantConv2d):
             m.fake_quant = False
@@ -150,6 +181,28 @@ def fake_quant_disabled(model):
     finally:
         for m, s in zip(quant, saved, strict=True):
             m.fake_quant = s
+
+
+@contextlib.contextmanager
+def qdq_export(model):
+    """Inside the block every QuantConv2d in `model` runs the explicit int8
+    graph (`QuantConv2d._qdq_forward`), so an ONNX export carries the trained
+    ranges as QuantizeLinear / DequantizeLinear pairs. Use on a fused model."""
+    quant = [m for m in model.modules() if isinstance(m, QuantConv2d)]
+    for m in quant:
+        scale, zp = m.act_fq.qparams()
+        m.qdq = float(scale), int(zp), _weight_scales(m.weight)
+    try:
+        yield model
+    finally:
+        for m in quant:
+            m.qdq = None
+
+
+def deploy_mode(model, int8=False):
+    """The graph an export traces: the explicit int8 graph (`qdq_export`) or
+    the structural fp32 one (`fake_quant_disabled`)."""
+    return qdq_export(model) if int8 else fake_quant_disabled(model)
 
 
 @contextlib.contextmanager

@@ -13,9 +13,14 @@ import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
 
 from mayaku.model.blocks import as_canvas
-from mayaku.model.quant import fake_quant_disabled
+from mayaku.model.quant import deploy_mode, is_qat
 
 DEPLOY_OPS = {"Conv", "Relu", "Add", "Resize", "MaxPool"}
+
+# The int8 graph adds the quantization boundary around every conv: its input
+# activation and its weights quantized, then dequantized for the fp32 op a
+# runtime fuses them into.
+QDQ_OPS = {"QuantizeLinear", "DequantizeLinear"}
 
 # Compile-time scaffolding, not compute: Constant feeds every Resize's scales
 # tensor, and Identity appears when the exporter aliases two byte-identical
@@ -24,15 +29,15 @@ DEPLOY_OPS = {"Conv", "Relu", "Add", "Resize", "MaxPool"}
 FOLDABLE_OPS = {"Constant", "Identity", "Cast", "Shape", "ConstantOfShape"}
 
 
-def assert_contract(path):
+def assert_contract(path, int8=False):
     """Every conv 1x1 or 3x3 at stride 1 or 2 with a bias and no grouping,
     every maxpool 3x3 stride 1, every resize nearest, and no other compute
-    op. Returns the compute-op inventory."""
+    op (`int8` also allows the Q/DQ pairs). Returns the op inventory."""
     import onnx
 
     model = onnx.load(path)
     inv = collections.Counter(n.op_type for n in model.graph.node)
-    extra = set(inv) - DEPLOY_OPS - FOLDABLE_OPS
+    extra = set(inv) - DEPLOY_OPS - FOLDABLE_OPS - (QDQ_OPS if int8 else set())
     assert not extra, "ops outside the contract: %s" % sorted(extra)
     for n in model.graph.node:
         a = {x.name: x for x in n.attribute}
@@ -49,19 +54,23 @@ def assert_contract(path):
     return collections.Counter({k: v for k, v in inv.items() if k not in FOLDABLE_OPS})
 
 
-def export_onnx(model, path, canvas, batch=1):
+def export_onnx(model, path, canvas, batch=1, int8=False):
     """Trace the (fused) detector at a fixed (H, W) canvas to ONNX and assert
     the contract on the file.
 
-    Fake-quant is a train/eval simulation; the deploy graph is structural fp32
-    (int8 is applied at runtime from the observed ranges).
+    The default is the structural fp32 graph: fake-quant is a training
+    simulation and is left out. `int8` (a quantization-aware model only)
+    writes the explicit int8 graph instead, the trained ranges as
+    QuantizeLinear / DequantizeLinear around every conv.
     """
     h, w = as_canvas(canvas)
-    with fake_quant_disabled(model):
+    if int8 and not is_qat(model):
+        raise ValueError("an int8 graph needs a quantization-aware model (model.qat)")
+    with deploy_mode(model, int8):
         torch.onnx.export(model, torch.zeros(batch, 3, h, w), path,
                           input_names=["images"], output_names=model.out_names,
                           opset_version=17, dynamo=False)
-    return assert_contract(path)
+    return assert_contract(path, int8)
 
 
 def count(model, canvas=640):
