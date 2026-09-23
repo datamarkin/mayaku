@@ -34,6 +34,7 @@ __all__ = [
     "download_model",
     "list_models",
     "list_revisions",
+    "resolve_weights",
 ]
 
 DEFAULT_MANIFEST_URL = "https://dtmfiles.com/mayaku/v1/models/manifest.json"
@@ -214,3 +215,31 @@ def download_model(
         expected_sha256=cast(str, entry["sha256"]) if verify_sha256 else None,
     )
     return local
+
+
+def resolve_weights(weights: str | Path | None) -> Path | None:
+    """Return a real ``Path`` for ``weights``.
+
+    * ``None`` → ``None`` (caller decides whether weights are required).
+    * An existing local file → that path (cwd-relative).
+    * Otherwise a model name → downloaded to ``./<name>.pth`` via
+      :func:`download_model` (which treats a trailing ``.pth`` as cosmetic).
+    """
+    if weights is None:
+        return None
+
+    p = Path(weights)
+    if p.exists():  # a local file wins — a path, or an already-downloaded model
+        return p
+
+    s = str(weights)
+    if "/" in s or "\\" in s:  # a path was given but doesn't exist
+        raise FileNotFoundError(f"weights file not found: {s}")
+
+    try:
+        return download_model(s)  # a bare model name (a trailing .pth is cosmetic)
+    except DownloadError as e:
+        raise FileNotFoundError(
+            f"weights {s!r}: not a local file and not in the manifest. Run "
+            f"`mayaku download --list`, or pass a .pth path. ({e})"
+        ) from e
