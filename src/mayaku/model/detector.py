@@ -57,6 +57,27 @@ class Detector(nn.Module):
         """Rewrite the train graph into the deploy graph, in place."""
         return fuse_tree(self.eval())
 
+    def deploy_spec(self):
+        """What a runtime needs to know about this network's outputs, as
+        plain JSON: their names in order, the strides and DFL bins the box
+        decode uses, the mask and keypoint decode constants when those heads
+        exist, and whether the weights were trained quantization-aware."""
+        from mayaku.model.aux import KERNEL_LAYOUT, MASK_CH, MASK_STRIDE
+        from mayaku.model.kpt import sigma_values
+        from mayaku.model.mask import COORD_SCALE
+        from mayaku.model.quant import is_qat
+
+        return {
+            "outputs": self.out_names,
+            "strides": list(STRIDES),
+            "reg_max": self.cfg.reg_max,
+            "qat": is_qat(self),
+            "mask": {"stride": MASK_STRIDE, "channels": MASK_CH, "coord_scale": COORD_SCALE,
+                     "kernel_layout": [list(layer) for layer in KERNEL_LAYOUT]} if self.cfg.seg else None,
+            "keypoints": {"num": self.cfg.kpt, "sigmas": list(sigma_values(self.cfg.kpt))}
+                         if self.cfg.kpt else None,
+        }
+
 
 def build(tier="n", nc=80):
     return Detector(TIERS[tier], nc)

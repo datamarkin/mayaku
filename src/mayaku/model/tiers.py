@@ -54,3 +54,7 @@ TIERS = {
 # train a real network end to end in seconds.
 TINY = Tier(stem=8, width=(16, 32, 64), depth=(1, 1, 1), neck=(16, 16, 16),
             paths=1, head_conv=1, reg_max=8)
+
+# Tiers trained quantization-aware by default: the small ones, whose targets
+# are int8-only accelerators. Larger tiers deploy in fp16.
+QAT_TIERS = ("n", "s")

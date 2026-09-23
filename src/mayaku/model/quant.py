@@ -121,6 +121,11 @@ def enable_qat(model):
     return model
 
 
+def is_qat(model):
+    """Whether `model` went through `enable_qat`."""
+    return any(isinstance(m, QuantConv2d) for m in model.modules())
+
+
 @contextlib.contextmanager
 def fake_quant_disabled(model):
     """Every QuantConv2d in `model` runs as a plain convolution inside the

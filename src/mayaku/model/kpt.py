@@ -27,8 +27,14 @@ COCO_SIGMAS = (.026, .025, .025, .035, .035, .079, .079, .072, .072, .062,
 HEAT_RADIUS = 9
 
 
+def sigma_values(k):
+    """The OKS falloff constants for K keypoints: COCO's person ones for 17,
+    a flat 0.05 otherwise. Plain floats, as recorded in the sidecar."""
+    return COCO_SIGMAS if k == 17 else (0.05,) * k
+
+
 def sigmas(k):
-    return torch.tensor(COCO_SIGMAS if k == 17 else (0.05,) * k)
+    return torch.tensor(sigma_values(k))
 
 
 def flatten_kpt(preds, k):
