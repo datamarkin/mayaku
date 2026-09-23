@@ -1,1 +1,0 @@
-# Mayaku model configs
