@@ -2,14 +2,19 @@
 
 Two kinds of override, both skipped for any field the user set explicitly:
 
-* **Structural facts**, applied whenever auto-config is on, at any dataset
-  size: the class count, the canvas (the data's aspect under the size budget,
-  `mayaku.data.canvas.canvas_for_data`), and, for a keypoint model, the
-  keypoint names and left/right flip pairs the annotations define.
+* **Structural facts**, at any dataset size: the class count, the canvas (the
+  data's aspect under the size budget, `mayaku.data.canvas.canvas_for_data`),
+  and, for a keypoint model, the keypoint names and left/right flip pairs the
+  annotations define.
 * **The fine-tune recipe**, applied only when training starts from pretrained
   weights and the dataset has at least `MIN_IMAGES_FOR_AUTO_CONFIG` images:
   run length, the clean final stage, augmentation strength, learning rate and
   warmup, keyed on dataset size. A from-scratch run keeps its recipe.
+
+With ``auto_config.enabled`` False nothing is tuned, but a model cannot be
+built without a class count and a canvas: left unset, they are filled plainly
+-- the data's class count, a square canvas at the size budget. A class count
+that disagrees with the data raises either way.
 
 Auto-config adapts the run to the data; it never changes the model or its
 loss. The only fields it may set are listed in `AUTO_PATHS`, and a test holds
@@ -96,6 +101,20 @@ def _structural(coco, cfg: MayakuConfig) -> dict[str, Any]:
     return out
 
 
+def _required(coco, cfg: MayakuConfig) -> dict[str, Any]:
+    """The class count and canvas still unset after tuning, filled plainly;
+    raises when a set class count disagrees with the data."""
+    nc, out = len(coco.cat_ids), {}
+    if cfg.model.num_classes is None:
+        out["model"] = {"num_classes": nc}
+    elif cfg.model.num_classes != nc:
+        raise ValueError(f"model.num_classes is {cfg.model.num_classes} and the training "
+                         f"annotations have {nc} categories")
+    if cfg.input.canvas_hw is None:
+        out["input"] = {"canvas_hw": (cfg.input.size_budget,) * 2}
+    return out
+
+
 def _finetune(num_images: int) -> dict[str, Any]:
     """The fine-tune recipe for a dataset of this size; empty below
     `MIN_IMAGES_FOR_AUTO_CONFIG`."""
@@ -118,17 +137,20 @@ def apply_auto_config(cfg: MayakuConfig, coco, user_set_paths: Collection[str] =
     annotations `coco` (`mayaku.data.coco.CocoLabels`), and the list of
     ``(path, old, new)`` changes made. Paths in `user_set_paths` are never
     touched; `finetune` False (training from scratch) applies the structural
-    facts only. A config with ``auto_config.enabled`` False is returned as is.
+    facts only. With ``auto_config.enabled`` False only the class count and
+    canvas are filled, when unset (see the module docstring).
     """
-    if not cfg.auto_config.enabled:
-        return cfg, []
-    overrides = _structural(coco, cfg) | (_finetune(len(coco.shapes)) if finetune else {})
-    overrides = _filter_unset(overrides, user_set_paths)
+    overrides: dict[str, Any] = {}
+    if cfg.auto_config.enabled:
+        overrides = _structural(coco, cfg) | (_finetune(len(coco.shapes)) if finetune else {})
+        overrides = _filter_unset(overrides, user_set_paths)
     new = merge_overrides(cfg, overrides)
+    required = _required(coco, new)
+    new = merge_overrides(new, required)
     before = dict(_walk_leaves(cfg.model_dump(mode="json")))
     after = dict(_walk_leaves(new.model_dump(mode="json")))
-    changes = [(p, before.get(p), after[p]) for p, _ in _walk_leaves(overrides)
-               if before.get(p) != after[p]]
+    paths = {p for ov in (overrides, required) for p, _ in _walk_leaves(ov)}
+    changes = [(p, before.get(p), after[p]) for p in sorted(paths) if before.get(p) != after[p]]
     return new, changes
 
 

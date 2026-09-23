@@ -63,11 +63,11 @@ def test_keypoint_names_and_flip_pairs_come_from_the_data(coco) -> None:
 
 
 def test_user_values_always_win(coco) -> None:
-    raw = {"model": {"num_classes": 7}, "input": {"canvas_hw": [576, 1024]},
+    raw = {"model": {"num_classes": 4}, "input": {"canvas_hw": [576, 1024]},
            "train": {"epochs": 5, "aug": {"mosaic": 0.9}}}
     cfg = MayakuConfig.model_validate(raw)
     cfg, changes = apply_auto_config(cfg, coco, collect_set_paths(raw))
-    assert cfg.model.num_classes == 7 and cfg.input.canvas_hw == (576, 1024)
+    assert cfg.model.num_classes == 4 and cfg.input.canvas_hw == (576, 1024)
     assert cfg.train.epochs == 5 and cfg.train.aug.mosaic == 0.9
     # the clean final stage is a share of whatever run the user pinned
     assert cfg.train.final_epochs == 1
@@ -80,9 +80,21 @@ def test_a_pinned_clean_stage_survives_a_derived_run_length(coco) -> None:
     assert cfg.train.epochs == MAX_FINETUNE_EPOCHS and cfg.train.final_epochs == 15
 
 
-def test_disabled_changes_nothing(coco) -> None:
+def test_disabled_fills_only_what_a_model_needs(coco) -> None:
     cfg = MayakuConfig.model_validate({"auto_config": {"enabled": False}})
-    assert apply_auto_config(cfg, coco) == (cfg, [])
+    new, changes = apply_auto_config(cfg, coco)
+    assert new.model.num_classes == 4 and new.input.canvas_hw == (800, 800)
+    assert new.train == cfg.train and len(changes) == 2
+    pinned = MayakuConfig.model_validate({"auto_config": {"enabled": False},
+                                          "model": {"num_classes": 4},
+                                          "input": {"canvas_hw": [256, 384]}})
+    assert apply_auto_config(pinned, coco) == (pinned, [])
+
+
+def test_a_class_count_that_disagrees_with_the_data_raises(coco) -> None:
+    raw = {"model": {"num_classes": 7}}
+    with pytest.raises(ValueError, match="num_classes"):
+        apply_auto_config(MayakuConfig.model_validate(raw), coco, collect_set_paths(raw))
 
 
 def test_tiny_datasets_get_structure_only(tmp_path) -> None:
