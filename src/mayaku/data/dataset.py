@@ -46,17 +46,18 @@ class CocoDetection(Dataset):
 
     `canvas` is the network input: a side, or (H, W). Labels come out as the
     [class, x1, y1, x2, y2, has_mask?, keypoints...] rows the loss reads, in
-    canvas pixels.
+    canvas pixels. `coco` is the already parsed file (`load_coco` with the
+    same `masks` and `kpt`), to save a caller that read it a second parse.
     """
 
     def __init__(self, images, annotations, canvas=640, aug=None, seed=0,
-                 masks=False, kpt=0, kpt_annotations=None):
+                 masks=False, kpt=0, kpt_annotations=None, coco=None):
         self.canvas = as_canvas(canvas)
         self.aug = aug
         self.rng = random.Random(seed)
         self.masks, self.kpt = masks, kpt
-        self.coco = load_coco(images, annotations, masks=masks, kpt=kpt,
-                              kpt_annotations=kpt_annotations)
+        self.coco = coco or load_coco(images, annotations, masks=masks, kpt=kpt,
+                                      kpt_annotations=kpt_annotations)
 
     # the fields the trainer, the evaluator and the tests read
     ann_path = property(lambda self: self.coco.ann_path)
