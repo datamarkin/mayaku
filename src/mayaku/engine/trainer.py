@@ -38,11 +38,11 @@ from mayaku.data.batch import (
     seed_worker,
     to_tensor,
 )
+from mayaku.data.canvas import multi_scale_canvases
 from mayaku.engine.evaluation import STATS, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
 from mayaku.model.quant import is_qat, ranges_frozen, recalibrate_ranges
-from mayaku.tuning.sizing import multi_scale_canvases
 from mayaku.utils.checkpoint import save_checkpoint
 
 
@@ -89,7 +89,7 @@ class Recipe:
     # Multi-scale training: the smallest long side, 0 = off. When set, every
     # batch is rendered at the dataset's canvas (the operating point, the
     # maximum) and downscaled to a random rung of
-    # `mayaku.tuning.sizing.multi_scale_canvases`: the canvas aspect, long side
+    # `mayaku.data.canvas.multi_scale_canvases`: the canvas aspect, long side
     # stepping by 32 from `multiscale` up. Eval always runs at the canvas.
     multiscale: int = 0
     # auxiliary heads: the Dice loss weight and the positive cap for masks.

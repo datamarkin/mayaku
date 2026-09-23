@@ -70,7 +70,7 @@ def collate(batch):
 
 def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
     """Resize one rendered batch to `size` (h, w) for multi-scale
-    training (`mayaku.tuning.sizing.multi_scale_canvases` gives the sizes).
+    training (`mayaku.data.canvas.multi_scale_canvases` gives the sizes).
 
     The dataset renders at the operating point, the maximum; this downscales
     the batch, so there is only ever one resize and it never invents detail.

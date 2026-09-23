@@ -1,10 +1,10 @@
-"""Aspect-aware canvas sizing (:mod:`mayaku.tuning.sizing`) on the 32 grid."""
+"""Aspect-aware canvas sizing (:mod:`mayaku.data.canvas`) on the 32 grid."""
 
 from __future__ import annotations
 
 import pytest
 
-from mayaku.tuning.sizing import (
+from mayaku.data.canvas import (
     canvas_for_data,
     data_aspect,
     multi_scale_canvases,

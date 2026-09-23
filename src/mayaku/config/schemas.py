@@ -109,7 +109,7 @@ class InputConfig(_BaseModel):
     `size_budget` is the compute dial: a square-equivalent side, so the
     budget is `size_budget ** 2` pixels. `canvas_hw` is the resolved (H, W):
     set from the training data's aspect at train start
-    (`mayaku.tuning.sizing.canvas_for_data`), or pinned by hand. Both are
+    (`mayaku.data.canvas.canvas_for_data`), or pinned by hand. Both are
     multiples of 32, the detector's coarsest stride.
     """
 
