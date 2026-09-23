@@ -50,20 +50,22 @@ class CocoLabels:
     with dense class indices; `polys[i]` and `kpts[i]` ((n, 3K)) are empty
     unless requested.
 
-    The per-image fields are `SerializedList`s: one bytes buffer each rather
+    The per-image fields are `SerializedList`s (one bytes buffer each rather
     than a Python object per image, so DataLoader workers do not copy the
     whole label set page by page as they touch refcounts, and every access
-    returns a fresh object the caller may modify.
+    returns a fresh object the caller may modify), and `shapes` one array.
     """
 
     ann_path: str
     kpt_ann_path: str      # where keypoint ground truth is scored from
+    num_degenerate: int    # non-crowd annotations dropped for a side of a pixel or less
     cat_ids: list          # dense class index -> the file's category id
     class_names: list      # dense class index -> name
+    kpt_names: list        # keypoint names from the categories, when the file has them
     kpt_flip_pairs: tuple
     ids: SerializedList
     files: SerializedList
-    shapes: SerializedList  # (height, width)
+    shapes: np.ndarray     # (n, 2) int32 (height, width)
     labels: SerializedList
     polys: SerializedList
     kpts: SerializedList
@@ -98,8 +100,10 @@ def load_coco(images, annotations, masks=False, kpt=0, kpt_annotations=None):
     dense = {c: i for i, c in enumerate(cat_ids)}
 
     per_image, segs, kps = {}, {}, {}
+    degenerate = 0
     for a in data["annotations"]:
         if not keep_ann(a):
+            degenerate += not a.get("iscrowd", 0)
             continue
         x, y, w, h = a["bbox"]
         per_image.setdefault(a["image_id"], []).append(
@@ -115,12 +119,14 @@ def load_coco(images, annotations, masks=False, kpt=0, kpt_annotations=None):
     return CocoLabels(
         ann_path=annotations,
         kpt_ann_path=kpt_annotations or annotations,
+        num_degenerate=degenerate,
         cat_ids=cat_ids,
         class_names=[c.get("name", str(c["id"])) for c in cats],
+        kpt_names=kpt_names,
         kpt_flip_pairs=flip_pairs(kpt_names, kpt),
         ids=SerializedList([im["id"] for im in ims]),
         files=SerializedList([os.path.join(images, im["file_name"]) for im in ims]),
-        shapes=SerializedList([(im["height"], im["width"]) for im in ims]),
+        shapes=np.array([(im["height"], im["width"]) for im in ims], np.int32).reshape(-1, 2),
         labels=SerializedList([np.array(per_image[im["id"]], np.float32)
                                if im["id"] in per_image else np.zeros((0, 5), np.float32)
                                for im in ims]),

@@ -192,7 +192,8 @@ class CocoDetection(Dataset):
             # scored at one scale
             img, r, pad = self.load(i)
             assert img is not None, "eval image missing: %s" % self.coco.files[i]
-            meta = {"id": self.coco.ids[i], "ratio": r, "pad": pad, "shape": self.coco.shapes[i]}
+            meta = {"id": self.coco.ids[i], "ratio": r, "pad": pad,
+                    "shape": tuple(int(v) for v in self.coco.shapes[i])}
             boxes, raster = self._table(*self.labels_at(i, r, pad))
         else:
             img, (boxes, raster) = self.train_item(i)
