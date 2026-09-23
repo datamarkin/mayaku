@@ -1,5 +1,7 @@
 """The detector: backbone, neck, head, and the optional mask / keypoint branch."""
 
+import copy
+
 import torch.nn as nn
 
 from mayaku.model.aux import AuxBranch
@@ -56,6 +58,14 @@ class Detector(nn.Module):
     def fuse(self):
         """Rewrite the train graph into the deploy graph, in place."""
         return fuse_tree(self.eval())
+
+    def for_deploy(self):
+        """A fused copy that runs the deployed fp32 graph: the one this model
+        exports as, which a runtime quantizes from the observed ranges when
+        it was trained quantization-aware. The original is left as it is."""
+        from mayaku.model.quant import strip_fake_quant
+
+        return strip_fake_quant(copy.deepcopy(self).fuse())
 
     def deploy_spec(self):
         """What a runtime needs to know about this network's outputs, as

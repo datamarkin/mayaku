@@ -126,6 +126,16 @@ def is_qat(model):
     return any(isinstance(m, QuantConv2d) for m in model.modules())
 
 
+def strip_fake_quant(model):
+    """Run every QuantConv2d in `model` as a plain convolution from now on:
+    the deployed fp32 graph, which a runtime quantizes from the observed
+    ranges. For a model that is only served, not trained further."""
+    for m in model.modules():
+        if isinstance(m, QuantConv2d):
+            m.fake_quant = False
+    return model
+
+
 @contextlib.contextmanager
 def fake_quant_disabled(model):
     """Every QuantConv2d in `model` runs as a plain convolution inside the
