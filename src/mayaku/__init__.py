@@ -18,7 +18,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 # reading it back from `importlib.metadata` also means a source tree with no
 # install reports its real version instead of a `0.0.0` placeholder — that
 # string is stamped into every checkpoint's provenance sidecar.
-__version__ = "2.0.1"
+__version__ = "3.0.0.dev0"
 
 # Eager top-level exports. Every entry point pulls in torch anyway (this is a
 # PyTorch CV library — there is no torch-free code path to protect), so there
