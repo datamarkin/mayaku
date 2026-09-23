@@ -8,6 +8,11 @@ swapped module (`fake_quant`), not a process flag: two models can hold
 different settings and nothing leaks between them. The exported deploy graph
 is structural five-op fp32 -- int8 is applied at runtime from the observed
 ranges -- so the exporter turns `fake_quant` off before tracing.
+
+The observed ranges are statistics of the weights they were observed with,
+like BatchNorm's running statistics, so whenever those weights change without
+the observers seeing it (an EMA copy) they are recomputed with
+`recalibrate_ranges`, after BatchNorm is recalibrated.
 """
 
 import contextlib
@@ -25,27 +30,48 @@ def _fq_weight_perchannel(w, n=127):
 
 
 class ActFakeQuant(nn.Module):
-    """Per-tensor affine (int8, zero-point) activation fake-quant with an EMA
-    min/max observer. Training updates the range; eval freezes it."""
+    """Per-tensor affine (int8, zero-point) activation fake-quant with a
+    min/max observer. Training updates the range; eval, or `observe = False`,
+    freezes it.
+
+    `momentum` weights the running range as an EMA of per-batch min / max;
+    None makes it the cumulative mean instead (a population estimate, as
+    BatchNorm's `momentum=None`), which is what `recalibrate_ranges` uses.
+    """
 
     def __init__(self, momentum=0.99):
         super().__init__()
         self.qmin, self.qmax, self.momentum = -128, 127, momentum
+        self.observe = True
         self.register_buffer("mn", torch.zeros(()))
         self.register_buffer("mx", torch.zeros(()))
-        # A plain Python flag, not a buffer: reading a CUDA bool buffer per
-        # forward forces a device->host sync, and this runs on every conv
-        # every step. It survives a deep copy; only the ranges (mn, mx) need
-        # to persist in the state dict.
+        # Plain Python state, not buffers: reading a CUDA buffer per forward
+        # forces a device->host sync, and this runs on every conv every step.
+        # Loading a state dict sets `_inited` (see `_load_from_state_dict`),
+        # so loaded ranges are continued, not overwritten.
+        self.reset()
+
+    def reset(self):
+        """Forget the range: the next observed batch sets it outright."""
         self._inited = False
+        self._n = 0
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        if prefix + "mn" in state_dict:
+            self._inited, self._n = True, 1
 
     def forward(self, x):
-        if self.training:
+        if self.training and self.observe:
             cmn, cmx = torch.aminmax(x.detach())
             if not self._inited:
                 self.mn.copy_(cmn)
                 self.mx.copy_(cmx)
-                self._inited = True
+                self._inited, self._n = True, 1
+            elif self.momentum is None:
+                self._n += 1
+                self.mn.add_((cmn - self.mn) / self._n)
+                self.mx.add_((cmx - self.mx) / self._n)
             else:
                 self.mn.mul_(self.momentum).add_((1 - self.momentum) * cmn)
                 self.mx.mul_(self.momentum).add_((1 - self.momentum) * cmx)
@@ -109,3 +135,48 @@ def fake_quant_disabled(model):
     finally:
         for m, s in zip(quant, saved):
             m.fake_quant = s
+
+
+@contextlib.contextmanager
+def ranges_frozen(model):
+    """No activation observer in `model` updates its range inside the block,
+    even in train mode, so a pass that exists for another reason (BatchNorm
+    recalibration) does not move the int8 ranges."""
+    obs = [m for m in model.modules() if isinstance(m, ActFakeQuant)]
+    saved = [m.observe for m in obs]
+    for m in obs:
+        m.observe = False
+    try:
+        yield model
+    finally:
+        for m, s in zip(obs, saved):
+            m.observe = s
+
+
+@torch.no_grad()
+def recalibrate_ranges(model, batches):
+    """Recompute every activation range for the model's own weights.
+
+    The counterpart of BatchNorm recalibration: an EMA of the weights, or any
+    model whose weights moved since its ranges were observed, carries ranges
+    that describe other weights. Every observer is reset and its range
+    recomputed as the cumulative mean of per-batch min / max over `batches`,
+    with BatchNorm in eval mode, so the ranges describe exactly the
+    activations that evaluation and export will see. Recalibrate BatchNorm
+    first. A model without QAT is untouched and `batches` is not read.
+    """
+    obs = [m for m in model.modules() if isinstance(m, ActFakeQuant)]
+    if not obs:
+        return
+    was_training = model.training
+    model.eval()
+    momenta = [m.momentum for m in obs]
+    for m in obs:
+        m.reset()
+        m.momentum = None
+        m.train()
+    for x in batches:
+        model(x)
+    for m, mom in zip(obs, momenta):
+        m.momentum = mom
+    model.train(was_training)

@@ -35,7 +35,7 @@ from mayaku.data.batch import (batch_to, collate, multiscale_sizes, rescale_batc
                                seed_worker, to_tensor)
 from mayaku.engine.evaluation import DEPLOY, STATS, Decode, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
-from mayaku.model.quant import enable_qat
+from mayaku.model.quant import enable_qat, ranges_frozen, recalibrate_ranges
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,10 +71,10 @@ class Recipe:
     cls_loss: str = "bce"           # bce | vfl
     ema_decay: float = 0.9999
     ema_tau: float = 2000.0
-    # Unaugmented training images the EMA's BatchNorm statistics are
-    # recomputed over before every evaluation and every checkpoint. 0
-    # disables it. See `recalibrate_bn`.
-    bn_recalibrate: int = 640
+    # Unaugmented training images the EMA's BatchNorm statistics (and, with
+    # QAT, its int8 activation ranges) are recomputed over before every
+    # evaluation and every checkpoint. 0 disables it. See `recalibrate`.
+    recalibrate_images: int = 640
     # TaskAligned alignment exponent beta in s^alpha * u^beta (TOOD's 6.0).
     # Lower values let lower-IoU small positives rank.
     tal_beta: float = 6.0
@@ -257,8 +257,9 @@ class _Unaugmented(Dataset):
 
 
 @torch.no_grad()
-def recalibrate_bn(model, train_ds, n, batch=16, device="cpu", workers=4):
-    """Recompute BatchNorm running statistics for the model's own weights.
+def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
+    """Recompute BatchNorm running statistics, then int8 activation ranges,
+    for the model's own weights.
 
     The EMA averages weights over the last ~tau steps, but its BatchNorm
     buffers describe the live model's current weights; at a high learning
@@ -272,12 +273,20 @@ def recalibrate_bn(model, train_ds, n, batch=16, device="cpu", workers=4):
     touches augmentation state. Runs before every evaluation and every
     checkpoint, so the best checkpoint is chosen on honest numbers and
     `fuse()` folds honest statistics into the deployed conv bias.
+
+    With QAT the activation ranges are statistics of the weights in the same
+    way, so they follow: BatchNorm is recomputed with the ranges frozen, then
+    the ranges are recomputed with BatchNorm in eval mode (`recalibrate_ranges`),
+    which is exactly how evaluation and export will run. Without QAT the
+    second pass does not happen.
     """
     if n <= 0:
         return
     loader = DataLoader(_Unaugmented(train_ds, n), batch_size=batch, shuffle=False,
                         num_workers=workers, pin_memory=device.startswith("cuda"))
-    update_bn((batch_to(imgs, device) for imgs in loader), model)
+    with ranges_frozen(model):
+        update_bn((batch_to(imgs, device) for imgs in loader), model)
+    recalibrate_ranges(model, (batch_to(imgs, device) for imgs in loader))
 
 
 def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
@@ -384,8 +393,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                "secs": time.perf_counter() - t0,
                **{k: float(v) / len(loader) for k, v in totals.items()}}
         # honest statistics for everything scored or saved below
-        recalibrate_bn(ema.model, train_ds, r.bn_recalibrate,
-                       device=device, workers=min(workers, 4))
+        recalibrate(ema.model, train_ds, r.recalibrate_images,
+                    device=device, workers=min(workers, 4))
         if (epoch + 1) % eval_every == 0 or epoch == r.epochs - 1:
             rec.update(evaluate(ema.model, val_ds, device=device,
                                 batch=r.batch, workers=workers, d=r.decode))
