@@ -47,9 +47,7 @@ class SerializedList(Sequence[T], Generic[T]):
     """List-style accessor backed by a single pickled-bytes buffer.
 
     Implements :class:`collections.abc.Sequence` so it drops in anywhere
-    the data layer asks for a ``Sequence[dict[str, Any]]`` (see
-    :class:`mayaku.cli.train._MappedList` and
-    :class:`mayaku.data.MultiSampleMappedDataset`).
+    a list of per-image records is read (see `mayaku.data.coco.CocoLabels`).
 
     Args:
         items: Any sequence of pickleable items. Pickled eagerly during
