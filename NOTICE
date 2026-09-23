@@ -1,0 +1,37 @@
+mayaku
+Copyright 2026 the mayaku authors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository bundles no third-party source code.
+
+
+Algorithms and where they are implemented from
+----------------------------------------------
+
+Each is written from the paper named here; the docstring where it is
+implemented cites the paper and states any departure from it.
+
+  Model
+  QARepVGG block                 Chu et al. 2022, arXiv 2212.01593
+  Zero-initialised residuals     Goyal et al. 2017, arXiv 1706.02677
+  Feature Pyramid Grid           Chen et al. 2020, arXiv 2004.03580
+  CSP / ELAN dense aggregation   Wang et al. 2019, arXiv 1911.11929;
+                                 Wang et al. 2024, arXiv 2402.13616
+  Decoupled detection head       Ge et al. 2021 (YOLOX), arXiv 2107.08430
+  Dynamic mask kernels           Tian et al. 2020 (CondInst), arXiv 2003.05664;
+                                 Lyu et al. 2022 (RTMDet), arXiv 2212.07784
+  Keypoint heatmaps and snapping Zhou et al. 2019 (CenterNet), arXiv 1904.07850
+
+  Training
+  TOOD task alignment            Feng et al. 2021, arXiv 2108.07755
+  ATSS                           Zhang et al. 2020, arXiv 1912.02424
+  ATSS warmup into TAL           Li et al. 2022 (YOLOv6), arXiv 2209.02976
+  Distribution Focal Loss        Li et al. 2020, arXiv 2006.04388
+  Complete IoU                   Zheng et al. 2020, arXiv 1911.08287
+  Varifocal loss                 Zhang et al. 2020, arXiv 2008.13367
+  Mosaic                         Bochkovskiy et al. 2020, arXiv 2004.10934
+  mixup                          Zhang et al. 2017, arXiv 1710.09412
+  Cosine learning-rate schedule  Loshchilov & Hutter 2016, arXiv 1608.03983
+  Muon orthogonalised update     K. Jordan 2024, public description
+  Object Keypoint Similarity     COCO keypoint evaluation definition
