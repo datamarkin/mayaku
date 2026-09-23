@@ -108,19 +108,10 @@ def assemble(mask_feat, kernels, points, stride, boxes):
     return logits.masked_fill(~inside, float("-inf"))
 
 
-def to_image(logits, meta, imgsz):
-    """(n, H8, W8) crop logits -> (n, h, w) bool masks in the original image:
-    upsample x8 to the letterbox, cut the padding, resize to the source shape,
-    threshold at 0. Bilinear on logits, so the boundary is interpolated rather
-    than blocky."""
-    if len(logits) == 0:
-        h, w = meta["shape"]
-        return torch.zeros(0, h, w, dtype=torch.bool, device=logits.device)
-    up = F.interpolate(logits[:, None].float(), size=(imgsz, imgsz),
-                       mode="bilinear", align_corners=False)
-    left, top = meta["pad"]
-    h, w = meta["shape"]
-    nh, nw = round(h * meta["ratio"]), round(w * meta["ratio"])
-    up = up[:, :, top:top + nh, left:left + nw]
-    up = F.interpolate(up, size=(h, w), mode="bilinear", align_corners=False)
-    return up[:, 0] > 0
+def to_canvas(logits):
+    """(n, H8, W8) crop logits -> (n, 1, H, W) logits over the whole canvas,
+    upsampled x8 bilinearly, so the boundary is interpolated rather than
+    blocky. Undo the letterbox with `mayaku.data.geometry.unletterbox_maps`
+    and threshold at 0 for masks in the original image."""
+    canvas = (logits.shape[-2] * MASK_STRIDE, logits.shape[-1] * MASK_STRIDE)
+    return F.interpolate(logits[:, None].float(), size=canvas, mode="bilinear", align_corners=False)

@@ -23,7 +23,7 @@ import torch
 
 from mayaku.backends.ops.nms import batched_nms
 from mayaku.data.batch import batch_to, collate
-from mayaku.data.geometry import unletterbox
+from mayaku.data.geometry import unletterbox, unletterbox_maps
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
 from mayaku.model.box import decode_head
@@ -196,7 +196,7 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
             if seg:
                 lg = masklib.assemble(grp["mask"][b].float(), kflat[b][ai].float(),
                                       points[ai], stride[ai], box)
-                m = masklib.to_image(lg, meta, dataset.imgsz).cpu()
+                m = (unletterbox_maps(masklib.to_canvas(lg), meta)[:, 0] > 0).cpu()
                 segm += to_coco_segm(det, m, meta, dataset.cat_ids)
             if kpt:
                 heat, off = grp["heat"][b, :kpt].float(), grp["heat"][b, kpt:].float()
@@ -209,9 +209,8 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
     if seg:
         out.update({"segm_" + k: v for k, v in coco_ap(dataset.ann_path, segm, "segm").items()})
     if kpt:
-        kann = getattr(dataset, "kpt_ann_path", None) or dataset.ann_path
         out.update({"kpt_" + k: v
-                    for k, v in coco_ap(kann, kpts, "keypoints", k=kpt).items()})
+                    for k, v in coco_ap(dataset.kpt_ann_path, kpts, "keypoints", k=kpt).items()})
     return out
 
 

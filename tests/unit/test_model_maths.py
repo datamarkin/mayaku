@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from mayaku.data.geometry import unletterbox_maps
 from mayaku.model.aux import KERNEL_PARAMS, MASK_CH
 from mayaku.model.box import (
     anchor_grid,
@@ -22,7 +23,7 @@ from mayaku.model.mask import (
     dyn_conv,
     rel_coords,
     split_kernels,
-    to_image,
+    to_canvas,
 )
 
 # --------------------------------------------------------------------------
@@ -137,7 +138,7 @@ def test_dice_bounds() -> None:
     assert dice(torch.full((1, 5), 20.0), torch.zeros(1, 5)).min() > 0.99
 
 
-def test_assemble_crops_and_to_image() -> None:
+def test_assemble_crops_and_maps_back_to_the_image() -> None:
     torch.manual_seed(0)
     h, w = 10, 12
     k = torch.randn(1, KERNEL_PARAMS)
@@ -145,8 +146,10 @@ def test_assemble_crops_and_to_image() -> None:
                   torch.tensor([[8.0]]), torch.tensor([[8.0, 8.0, 24.0, 24.0]]))
     inside = torch.isfinite(lg[0])
     assert inside.sum() == 4 and inside[1:3, 1:3].all()
-    m = to_image(lg, {"pad": (0, 0), "ratio": 1.0, "shape": (80, 96)}, 96)
-    assert m.shape == (1, 80, 96) and not m[0, :6, :6].any()
+    up = to_canvas(lg)
+    assert up.shape == (1, 1, h * 8, w * 8)
+    m = unletterbox_maps(up, {"pad": (0, 0), "ratio": 1.0, "shape": (72, 96)})[:, 0] > 0
+    assert m.shape == (1, 72, 96) and not m[0, :6, :6].any()
 
 
 # --------------------------------------------------------------------------
