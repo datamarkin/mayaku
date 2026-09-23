@@ -1,318 +1,52 @@
-"""Run a pre-exported artifact end-to-end — "the file is the backend".
+"""Run an exported artifact with its own runtime: `ArtifactPredictor`.
 
-``from_pretrained("model.onnx")`` returns an :class:`ArtifactPredictor` that
-behaves like :class:`mayaku.inference.predictor.Predictor`: call it with an image,
-get :class:`~mayaku.structures.instances.Instances` in original-image coordinates.
-
-The exported graph is only the math core — a *normalised* ``(1, 3, H, W)`` image
-in, ``(boxes, scores, labels)`` in the padded/letterbox frame out (no
-normalisation, no resize, no score threshold, no un-letterbox). This module is
-the host wrapper that reproduces the pre/post the eager model does internally:
-
-    read image → letterbox to the graph's canvas → normalise (pixel mean/std)
-    → run the runtime session → score-threshold → assemble Instances
-    → un-letterbox back to original coordinates
-
-Everything the wrapper needs (config + class names) is read from the sidecar the
-exporter embedded in the artifact (see :mod:`mayaku.inference.export.metadata`),
-so the file loads standalone — no ``.pth``, no config.
-
-Only the ONNX exporter produces a full-detector graph today; CoreML / OpenVINO /
-TensorRT export the backbone+FPN body only, so their artifacts are rejected here
-with a clear message until full-detector export lands for them.
+The artifact carries everything in its embedded sidecar, so no checkpoint or
+config is needed; the graph runs in the runtime and the decode on the host,
+exactly as a deployment would. 3.0 runs ONNX (onnxruntime).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
-from mayaku.config.schemas import MayakuConfig
-from mayaku.data.transforms import LetterboxTransform
-from mayaku.inference.export.full_detector import FULL_DETECTOR_OUTPUTS
 from mayaku.inference.export.metadata import read_sidecar, target_from_suffix
-from mayaku.inference.postprocess import unletterbox_instances
-from mayaku.inference.predictor import ImageInput, _to_uint8_rgb
-from mayaku.structures.boxes import Boxes
-from mayaku.structures.instances import Instances
+from mayaku.inference.runner import Runner
 
 __all__ = ["ArtifactPredictor"]
 
 
-class _RuntimeSession(Protocol):
-    """Minimal contract a per-format runtime wrapper must satisfy."""
+class ArtifactPredictor(Runner):
+    """An exported artifact run by its runtime, called like a `Predictor`."""
 
-    input_hw: tuple[int, int] | None
-    output_names: tuple[str, ...]
-
-    def run(self, x: npt.NDArray[np.float32]) -> dict[str, npt.NDArray[np.float32]]: ...
-
-
-def _check_canvas_agrees(path: Path, session: _RuntimeSession, cfg: MayakuConfig) -> None:
-    """Refuse an artifact whose graph was traced at a size its sidecar disagrees with.
-
-    A static input shape is the size the artifact runs at forever — the sidecar's
-    canvas can't override it — so a disagreement means the export traced the wrong
-    sample and the file would deploy at the wrong geometry with no symptom beyond
-    lost AP.
-
-    Fires only when both sides make a claim. A dynamic graph declares no shape and
-    defers to the config. And ``canvas_hw`` is only pinned by a letterbox training
-    run: when it is ``None`` the model asserts no geometry, and what
-    ``resolve_deploy_canvas`` would return is a ``size_budget`` fallback no data
-    ever validated — rejecting a graph for disagreeing with *that* would break
-    exporting at a deliberate size through :func:`export_detector`, the low-level
-    seam, for no safety gained.
-    """
-    declared = cfg.input.canvas_hw
-    if session.input_hw is None or declared is None or session.input_hw == declared:
-        return
-    raise ValueError(
-        f"{path.name} was exported at {session.input_hw[0]}x{session.input_hw[1]} (HxW) "
-        f"but its model deploys at {declared[0]}x{declared[1]}. The graph's input size "
-        "is baked in and can't be changed at load time, so running it would silently "
-        "use the wrong geometry. Re-export it — the deploy canvas is now the default:\n"
-        f"  mayaku export {target_from_suffix(path)} <weights> --output {path.name}"
-    )
-
-
-class ArtifactPredictor:
-    """Run a self-describing exported artifact on images, returning ``Instances``.
-
-    Construct via :meth:`from_file` (or :func:`mayaku.from_pretrained` with an
-    artifact suffix). The session runs the graph; this class owns the pre/post.
-    """
-
-    def __init__(
-        self,
-        session: _RuntimeSession,
-        cfg: MayakuConfig,
-        class_names: list[str],
-    ) -> None:
-        self._session = session
-        self.cfg = cfg
-        self.class_names = class_names
-        # Canvas the graph runs at: a static input shape is authoritative, since
-        # the graph accepts nothing else. ``from_file`` has already proven it
-        # matches a pinned ``canvas_hw`` (:func:`_check_canvas_agrees`); when the
-        # config pinned none, the graph's own shape is the only claim there is.
-        # A dynamic graph declares no shape and falls back to the config.
-        if session.input_hw is not None:
-            self._canvas: tuple[int, int] = session.input_hw
-        else:
-            from mayaku.tuning.sizing import resolve_deploy_canvas
-
-            self._canvas = resolve_deploy_canvas(cfg.input.canvas_hw, cfg.input.size_budget)
-        self._mean = np.asarray(cfg.model.pixel_mean, dtype=np.float32).reshape(3, 1, 1)
-        self._std = np.asarray(cfg.model.pixel_std, dtype=np.float32).reshape(3, 1, 1)
-        self._score_thresh = float(cfg.model.roi_heads.score_thresh_test)
-
-    # ------------------------------------------------------------------
-    # Loading
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def from_file(cls, source: str | Path, *, device: str = "auto") -> ArtifactPredictor:
-        """Build a predictor from a pre-exported artifact file.
-
-        The artifact must carry the mayaku sidecar (embedded at export time) and
-        be a full-detector graph. Backbone-only artifacts raise.
-        """
-        path = Path(source)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"artifact not found: {path}. Pass a path to an exported "
-                ".onnx/.mlpackage/.xml/.engine file."
-            )
+    def __init__(self, path: str | Path, device: str = "auto"):
+        path = Path(path)
         target = target_from_suffix(path)
-        sidecar = read_sidecar(path, target)
-        if sidecar is None or "config" not in sidecar:
-            raise ValueError(
-                f"{path.name} has no embedded mayaku metadata — re-export it with "
-                "this version so the artifact is self-describing."
-            )
-        cfg = MayakuConfig.model_validate(sidecar["config"])
-        class_names = list(sidecar.get("class_names") or [])
-
-        session = _build_session(path, target, device=device)
-        missing = set(FULL_DETECTOR_OUTPUTS) - set(session.output_names)
-        if missing:
-            raise ValueError(
-                f"{path.name} is a backbone-only graph (outputs {session.output_names}), "
-                "not a full detector, so it can't run end-to-end. Only UniQuery models "
-                "export as runnable artifacts today (ONNX)."
-            )
-        _check_canvas_agrees(path, session, cfg)
-        return cls(session, cfg, class_names)
-
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
-
-    def __call__(self, image: ImageInput) -> Instances:
-        """Run inference on a single image; return :class:`Instances` in original coords."""
-        arr = _to_uint8_rgb(image)
-        h, w = int(arr.shape[0]), int(arr.shape[1])
-
-        # Fixed deploy geometry: letterbox to the graph's canvas, run, un-letterbox.
-        transform = LetterboxTransform(h, w, self._canvas)
-        x = self._normalize(transform.apply_image(arr))
-        out = self._session.run(x)
-
-        boxes = np.asarray(out["boxes"], dtype=np.float32).reshape(-1, 4)
-        scores = np.asarray(out["scores"], dtype=np.float32).reshape(-1)
-        labels = np.asarray(out["labels"]).reshape(-1).astype(np.int64)
-
-        # The graph returns a fixed top-K with no score threshold applied (it's a
-        # non-traceable, variable-length op); apply it host-side, matching eager.
-        # Boolean-mask indexing already yields fresh C-contiguous arrays.
-        keep = scores >= self._score_thresh
-
-        instances = Instances(image_size=self._canvas)
-        instances.pred_boxes = Boxes(torch.from_numpy(boxes[keep]))
-        instances.scores = torch.from_numpy(scores[keep])
-        instances.pred_classes = torch.from_numpy(labels[keep])
-        return unletterbox_instances(instances, transform, h, w)
-
-    def _normalize(self, hwc: npt.NDArray[np.uint8]) -> npt.NDArray[np.float32]:
-        """``(H, W, 3)`` uint8 RGB → normalised ``(1, 3, H, W)`` float32 (mean/std)."""
-        # One pass to a contiguous float32 (C, H, W): astype-on-a-transposed-view
-        # would copy anyway, so fold the contiguity + dtype conversion together.
-        chw = np.ascontiguousarray(hwc.transpose(2, 0, 1), dtype=np.float32)
-        # In place: `(chw - mean) / std` would allocate two more 4.9MB buffers
-        # at 640px. Subtract-then-divide, not `chw * (1 / std)` — the reciprocal
-        # form folds to one pass but rounds differently.
-        np.subtract(chw, self._mean, out=chw)
-        np.divide(chw, self._std, out=chw)
-        return chw[None]
-
-
-# ---------------------------------------------------------------------------
-# Per-format runtime sessions
-# ---------------------------------------------------------------------------
-
-
-def _build_session(path: Path, target: str, *, device: str) -> _RuntimeSession:
-    if target == "onnx":
-        return _ONNXSession(path, device=device)
-    if target == "coreml":
-        return _CoreMLSession(path, device=device)
-    if target == "openvino":
-        return _OpenVINOSession(path)
-    if target == "tensorrt":
-        return _TensorRTSession(path)
-    raise ValueError(f"unknown artifact target {target!r}")
-
-
-def _static_hw(shape: object) -> tuple[int, int] | None:
-    """Extract a static ``(H, W)`` from a ``[N, C, H, W]`` shape, or ``None`` if dynamic."""
-    if not isinstance(shape, (list, tuple)) or len(shape) < 4:
-        return None
-    h, w = shape[-2], shape[-1]
-    if isinstance(h, int) and isinstance(w, int) and h > 0 and w > 0:
-        return (h, w)
-    return None
-
-
-class _ONNXSession:
-    """onnxruntime wrapper — cross-platform, the portable default."""
-
-    def __init__(self, path: Path, *, device: str = "auto") -> None:
+        if target != "onnx":
+            raise NotImplementedError(f"{path}: running {target} artifacts is not available in "
+                                      "this version; export to ONNX, or use the checkpoint")
+        super().__init__(read_sidecar(path, target), str(path))
         import onnxruntime as ort
 
         providers = ["CPUExecutionProvider"]
         if device in ("cuda", "auto") and "CUDAExecutionProvider" in ort.get_available_providers():
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers.insert(0, "CUDAExecutionProvider")
         self._sess = ort.InferenceSession(str(path), providers=providers)
         inp = self._sess.get_inputs()[0]
-        self._input_name = inp.name
-        self.input_hw = _static_hw(inp.shape)
-        self.output_names = tuple(o.name for o in self._sess.get_outputs())
+        if tuple(inp.shape[-2:]) != self.canvas:
+            raise ValueError(f"{path}: graph input {inp.shape} disagrees with the sidecar "
+                             f"canvas {self.canvas}")
+        self._input = inp.name
+        # the graph is traced at a fixed batch size (1 unless exported otherwise)
+        self._step = inp.shape[0] if isinstance(inp.shape[0], int) else None
 
-    def run(self, x: npt.NDArray[np.float32]) -> dict[str, npt.NDArray[np.float32]]:
-        outs = self._sess.run(None, {self._input_name: x})
-        return dict(zip(self.output_names, outs, strict=True))
-
-
-class _CoreMLSession:
-    """coremltools wrapper — macOS only."""
-
-    def __init__(self, path: Path, *, device: str = "auto") -> None:
-        import coremltools as ct
-
-        # Compute units are decided *here*, not by the exporter: nothing about
-        # them is written into the .mlpackage, and MLModel defaults to ALL.
-        #
-        # ALL is the wrong default for a detector. It lets CoreML route to the
-        # Neural Engine, which has to fall back for ops the NE can't take, and
-        # the thrashing costs more than it saves — measured on the UniQuery
-        # 640px graph, fp16 goes 18ms (CPU_AND_GPU) to 33ms (ALL), and on an
-        # R50-FPN body 85ms to 463ms. CPU_AND_GPU is fastest or within noise of
-        # it on every graph measured (docs/export/coreml.md).
-        units = ct.ComputeUnit.CPU_ONLY if device == "cpu" else ct.ComputeUnit.CPU_AND_GPU
-        self._model = ct.models.MLModel(str(path), compute_units=units)
-        spec = self._model.get_spec()
-        inp = spec.description.input[0]
-        self._input_name = inp.name
-        shape = list(inp.type.multiArrayType.shape)
-        self.input_hw = _static_hw([1, *shape]) if len(shape) == 3 else _static_hw(shape)
-        self.output_names = tuple(o.name for o in spec.description.output)
-
-    def run(self, x: npt.NDArray[np.float32]) -> dict[str, npt.NDArray[np.float32]]:
-        out = self._model.predict({self._input_name: x})
-        return {k: np.asarray(v) for k, v in out.items()}
-
-
-class _OpenVINOSession:
-    """OpenVINO runtime wrapper — CPU device (portable, reproducible)."""
-
-    def __init__(self, path: Path) -> None:
-        import openvino as ov
-
-        core = ov.Core()
-        model = core.read_model(str(path))
-        self._compiled = core.compile_model(model, "CPU")
-        self._input = self._compiled.inputs[0]
-        ps = self._input.get_partial_shape()
-        if len(ps) >= 4 and ps[2].is_static and ps[3].is_static:
-            self.input_hw: tuple[int, int] | None = (
-                int(ps[2].get_length()),
-                int(ps[3].get_length()),
-            )
-        else:
-            self.input_hw = None
-        self._outputs = list(self._compiled.outputs)
-        self.output_names = tuple(o.get_any_name() for o in self._outputs)
-
-    def run(self, x: npt.NDArray[np.float32]) -> dict[str, npt.NDArray[np.float32]]:
-        res = self._compiled({self._input: x})
-        return {o.get_any_name(): np.asarray(res[o]) for o in self._outputs}
-
-
-class _TensorRTSession:
-    """TensorRT engine wrapper — CUDA host only.
-
-    Not wired for execution yet: full-detector engine export and a CUDA host are
-    both required, neither available where this was authored. Loading raises with
-    a precise message rather than shipping unverified GPU code.
-    """
-
-    input_hw: tuple[int, int] | None = None
-    output_names: tuple[str, ...] = ()
-
-    def __init__(self, path: Path) -> None:
-        raise NotImplementedError(
-            "Running a .engine artifact end-to-end is not wired yet: it needs a "
-            "full-detector TensorRT engine (the exporter currently builds the "
-            "backbone+FPN body only) and a CUDA host. Use the .onnx artifact, or "
-            "run the engine with TensorRT's native runtime."
-        )
-
-    def run(
-        self, x: npt.NDArray[np.float32]
-    ) -> dict[str, npt.NDArray[np.float32]]:  # pragma: no cover
-        raise NotImplementedError
+    def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        x = x.numpy().astype(np.float32)
+        x /= 255
+        step = self._step or len(x)
+        names = self.sidecar["outputs"]
+        runs = [self._sess.run(names, {self._input: x[i:i + step]}) for i in range(0, len(x), step)]
+        maps = runs[0] if len(runs) == 1 else [np.concatenate(m) for m in zip(*runs, strict=True)]
+        return [torch.from_numpy(m) for m in maps]

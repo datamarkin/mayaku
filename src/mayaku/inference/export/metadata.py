@@ -26,11 +26,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-__all__ = ["SIDECAR_KEY", "embed_sidecar", "read_sidecar", "target_from_suffix"]
+__all__ = ["SIDECAR_KEY", "SUFFIX_TO_TARGET", "embed_sidecar", "read_sidecar", "target_from_suffix"]
 
 from mayaku.utils.checkpoint import SIDECAR_KEY
 
-_SUFFIX_TO_TARGET: dict[str, str] = {
+SUFFIX_TO_TARGET: dict[str, str] = {
     ".onnx": "onnx",
     ".mlpackage": "coreml",
     ".xml": "openvino",
@@ -41,10 +41,10 @@ _SUFFIX_TO_TARGET: dict[str, str] = {
 def target_from_suffix(path: str | Path) -> str:
     """Map an artifact path's suffix to its export target name."""
     suffix = Path(path).suffix.lower()
-    target = _SUFFIX_TO_TARGET.get(suffix)
+    target = SUFFIX_TO_TARGET.get(suffix)
     if target is None:
         raise ValueError(
-            f"unrecognised artifact suffix {suffix!r}; expected one of {sorted(_SUFFIX_TO_TARGET)}"
+            f"unrecognised artifact suffix {suffix!r}; expected one of {sorted(SUFFIX_TO_TARGET)}"
         )
     return target
 
