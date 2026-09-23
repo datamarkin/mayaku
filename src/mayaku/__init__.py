@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import os
 
-# PYTORCH_ENABLE_MPS_FALLBACK must be set BEFORE PyTorch's MPS backend
-# initialises, otherwise ops without an MPS implementation raise
-# NotImplementedError instead of falling back to CPU. Setting it later
-# (inside ``mayaku.cli.train.run_train``) is too late — by then
-# ``import torch`` has already snapshotted the env. We use ``setdefault``
-# so a user-set value (including the explicit ``"0"`` opt-out) wins.
-# The variable is harmless on non-MPS hosts, so unconditional set is fine.
+# PYTORCH_ENABLE_MPS_FALLBACK must be set before PyTorch's MPS backend
+# initialises, or an op without an MPS kernel raises instead of falling back
+# to the CPU; torch snapshots the environment at import, so it is set here,
+# first. ``setdefault`` lets a user-set value (including an explicit "0")
+# win, and the variable is harmless on hosts without MPS.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 # The single source of truth for the version. `pyproject.toml` declares

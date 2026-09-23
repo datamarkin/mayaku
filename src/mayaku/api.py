@@ -1,89 +1,54 @@
-"""High-level train-and-eval orchestrator.
+"""The Python entry points: `mayaku.train` and `mayaku.evaluate`.
 
-``mayaku.api.train`` is the single entry point for "load config, train,
-pick best checkpoint, eval, return result". It exists so user scripts
-don't have to re-implement the orchestration each time — see
-``tools/train_mayaku.py`` and ``benchmarks/training_validation/tier3.py``
-for the two callers (each ~20-45 lines).
+`train` does what a training script would: resolve the config, read the
+data, let auto-config fill what the user left unset, build the model,
+warm-start it, train, and score the result the way it will be deployed.
 
-The minimum call:
+    >>> import mayaku
+    >>> result = mayaku.train(                              # doctest: +SKIP
+    ...     weights="mayaku-n",
+    ...     train_annotations="data/train/_annotations.coco.json",
+    ...     train_images="data/train",
+    ...     val_annotations="data/valid/_annotations.coco.json",
+    ...     val_images="data/valid",
+    ... )
+    >>> result["final_weights"]                            # doctest: +SKIP
+    PosixPath('runs/mayaku-n/train/best.pt')
 
->>> from pathlib import Path
->>> from mayaku.api import train
->>> result = train(
-...     config="configs/detection/faster_rcnn_R_50_FPN_1x.yaml",
-...     train_annotations=Path("/data/coco/annotations/instances_train2017.json"),
-...     train_images=Path("/data/coco/train2017"),
-... )                                                # doctest: +SKIP
-
-Behaviour:
-
-* ``config`` accepts a YAML path, a string path, or a ready
-  :class:`MayakuConfig`. Paths are loaded once; objects pass through.
-* ``output_dir`` defaults to ``./runs/<config_stem>/`` when the config
-  came from a path, else ``./runs/mayaku_run/``.
-* ``val_annotations`` / ``val_images`` are optional and must be provided
-  together. Final eval runs iff both are set. To enable mid-training
-  eval, also set ``overrides={"test": {"eval_period": N}}`` (N in
-  epochs); without the val paths, any non-zero ``eval_period`` from the
-  YAML is silently zeroed with a warning so a forgotten val path doesn't
-  make training look "fine" while emitting no metrics.
-* ``overrides`` is passed straight to :func:`merge_overrides`, so the
-  shape is the schema's natural shape (e.g. ``{"solver":
-  {"base_lr": 1e-3}}`` or ``{"test": {"eval_period": 1}}``).
-  Invalid keys raise pydantic's standard "Extra inputs are not
-  permitted" error.
-* ``num_gpus`` (default ``1``) spawns ``num_gpus`` DDP workers via
-  :func:`mayaku.engine.launch` when ``> 1``. NCCL on CUDA/ROCm, gloo
-  elsewhere. Auto-config scales ``solver.base_lr`` for the cross-rank
-  effective batch (sqrt for AdamW, linear for SGD); pin ``base_lr`` via
-  ``overrides`` to opt out. MPS is single-device only and rejects
-  ``num_gpus > 1``.
-* The backbone is architecture-only (random init) unless a mayaku
-  checkpoint is supplied via ``weights=`` (or the config's
-  ``model.weights``) — the library never fetches external weights.
-* The final checkpoint comes from
-  :func:`mayaku.utils.select_final_weights` (EMA shadow > live final >
-  latest periodic) — same logic both bundled scripts used.
-
-Return value (dict):
-
-* ``final_box_ap`` / ``final_box_ap50`` / ``final_box_ap75``: floats,
-  or ``None`` when eval was skipped
-* ``final_weights``: ``Path`` to the chosen checkpoint
-* ``output_dir``: resolved ``Path`` (useful when the caller passed
-  ``None`` and let the API derive it)
-* ``train_seconds`` / ``eval_seconds``: wall-clock floats;
-  ``eval_seconds`` is ``None`` when eval was skipped
-* ``metadata``: full dict written to ``<output_dir>/train/metadata.json``
+A run directory holds, under ``train/``, the resolved ``config.yaml``, the
+engine's ``recipe.json`` / ``tier.json`` / ``log.jsonl``, the self-describing
+``best.pt`` and ``last.pt``, the resumable ``state.pt`` and ``metadata.json``;
+the final evaluation goes to ``eval/metrics.json``.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 import torch
 
-from mayaku.cli._weights import resolve_weights
-from mayaku.cli.eval import run_eval
-from mayaku.cli.train import run_train, run_train_worker
-from mayaku.config import (
-    DataLoaderConfig,
-    MayakuConfig,
-    SolverConfig,
-    TestConfig,
-    load_yaml,
-    merge_overrides,
-)
-from mayaku.config.schemas import DeviceSetting, UniQueryHeadConfig
-from mayaku.engine import launch, resolve_ddp_device
+from mayaku.backends.device import Device
+from mayaku.config import MayakuConfig, dump_yaml, merge_overrides, read_yaml
+from mayaku.data import CocoDetection
+from mayaku.data.coco import load_coco
+from mayaku.engine.evaluation import evaluate_runner
+from mayaku.engine.trainer import load_state
+from mayaku.engine.trainer import train as run
 from mayaku.inference import from_pretrained
-from mayaku.tuning import FINETUNE_GRAD_ACCUM_STEPS, FINETUNE_IMS_PER_BATCH, collect_set_paths
-from mayaku.utils import config_from_checkpoint, git_hash, select_final_weights
+from mayaku.model import load_pretrained
+from mayaku.tuning import apply_auto_config, collect_set_paths
+from mayaku.utils.checkpoint import (
+    SIDECAR_KEY,
+    build_sidecar,
+    git_hash,
+    read_deploy_checkpoint,
+    select_final_weights,
+)
+from mayaku.utils.download import resolve_weights
 
 __all__ = ["evaluate", "train"]
 
@@ -92,284 +57,160 @@ def train(
     config: str | Path | MayakuConfig | None = None,
     *,
     weights: str | Path | None = None,
-    train_annotations: Path | None = None,
-    train_images: Path | None = None,
-    val_annotations: Path | None = None,
-    val_images: Path | None = None,
-    output_dir: Path | None = None,
+    train_annotations: str | Path | None = None,
+    train_images: str | Path | None = None,
+    val_annotations: str | Path | None = None,
+    val_images: str | Path | None = None,
+    output_dir: str | Path | None = None,
     size_budget: int | None = None,
     num_epochs: int | None = None,
     overrides: Mapping[str, Any] | None = None,
-    device: DeviceSetting = "auto",
+    device: str = "auto",
     num_gpus: int = 1,
     resume: str | Path | None = None,
+    log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Train, pick the best checkpoint, optionally run final eval.
+    """Train a detector on a COCO split; returns a result dict.
 
-    Define the model with either ``config`` or ``weights`` (at least one):
+    The model comes from ``config``, ``weights``, or both:
 
-    * ``config`` — a YAML path, a bundled config name (e.g.
-      ``"faster_rcnn_R_50_FPN_3x"``), or a ready :class:`MayakuConfig`.
-      The escape hatch for hand-built or overridden architectures.
-    * ``weights`` — a bundled model name (its architecture config is
-      looked up and its pretrained ``.pth`` fetched) or a trained ``.pth``
-      (its embedded config, written by Task 3, defines the architecture).
-      The weights also seed training; the class-specific head re-inits
-      when the dataset's class count differs. ``config`` wins when both
-      are given. Deriving a config from a ``.pth`` needs a checkpoint
-      produced by this version or later — older ones raise, asking for
-      ``config``. Only full bundled names resolve (no short aliases).
+    * ``config``: a YAML path or a `MayakuConfig`. Without ``weights`` the
+      model trains from scratch.
+    * ``weights``: a checkpoint path or a hosted model name. It warm-starts
+      training (the classifier re-initialises when the class count differs)
+      and, without ``config``, also defines the architecture: its tier,
+      heads and QAT setting, with everything else derived afresh.
 
-    Point the dataset at the explicit split paths:
+    Auto-config (`mayaku.tuning.apply_auto_config`) fills the fields the user
+    did not set -- the class count, the canvas, and when warm-starting the
+    fine-tune schedule -- from the training annotations. What counts as set:
+    the keys written in a YAML config, the fields set on a `MayakuConfig`,
+    everything in ``overrides`` (a nested mapping, e.g.
+    ``{"train": {"lr": 0.005}}``), ``size_budget`` (``input.size_budget``)
+    and ``num_epochs`` (``train.epochs``).
 
-    * ``train_annotations`` (a COCO JSON) + ``train_images`` (its image
-      directory) are required. ``val_annotations`` + ``val_images`` are
-      optional and, when given, drive final eval. Class names come from
-      the COCO ``categories``.
+    With ``val_annotations`` and ``val_images`` the run evaluates every
+    epoch, keeps the best EMA model as ``best.pt``, and scores that
+    checkpoint through the deploy path (`evaluate`) at the end. Without
+    them it trains blind and ``last.pt`` is the result.
 
-    ``size_budget`` is the first-class form of the compute-budget dial: the
-    letterbox canvas is the largest 128-aligned ``(H, W)`` under
-    ``size_budget²`` at the data's native aspect (raise it for more resolution,
-    lower it for speed). It's equivalent to
-    ``overrides={"input": {"size_budget": ...}}`` and wins over both the config
-    and ``overrides``.
+    ``resume`` continues an interrupted run from its ``state.pt`` (or the
+    run's ``train/`` directory). The config comes from the state, so
+    ``config``, ``weights``, ``size_budget``, ``num_epochs`` and
+    ``overrides`` must be left unset; pass the same dataset paths.
 
-    ``num_epochs`` is the training-length dial — the number of passes over the
-    dataset (the engine resolves it to an iteration count from the dataset size
-    and batch). Equivalent to ``overrides={"solver": {"num_epochs": ...}}`` and
-    wins over the config and auto-config. Leave it unset to let auto-config pick
-    a dataset-adaptive value (or fall back to the schema default of 16).
-
-    **Auto-config vs. manual recipe.** When you pass a ``config`` (YAML path,
-    bundled name, or :class:`MayakuConfig`), it is used *verbatim* — auto-config
-    is off, so the recipe you wrote is never silently re-tuned. With no
-    ``config`` (the ``weights`` fine-tune path), the recipe is derived from
-    your dataset (schedule, LR, anchors, num_classes, augmentation). In both
-    cases anything you pass via ``overrides`` or ``size_budget`` is applied last
-    and always wins — auto-config never overwrites a field you set explicitly.
-
-    See the module docstring for full parameter semantics and the
-    auto-detection rules (pretrained-backbone derivation, no-val
-    short-circuit, output-dir defaulting). Returns a result dict.
-
-    Final eval runs iff both ``val_annotations`` and ``val_images`` are
-    set. For mid-training eval, pass
-    ``overrides={"test": {"eval_period": N}}``.
+    Result keys: ``final_weights``, ``output_dir``, ``metrics`` (the final
+    evaluation, None without a val split), ``best`` (the trainer's best
+    epoch metrics), ``train_seconds``, ``eval_seconds`` and ``metadata``.
     """
-    # --- Validate the dataset paths ---------------------------------------
     if train_annotations is None or train_images is None:
-        raise ValueError(
-            "Provide train_annotations (a COCO JSON) and train_images (its image directory)."
-        )
-    if not train_annotations.exists():
-        raise FileNotFoundError(f"train_annotations not found: {train_annotations}")
-    if not train_images.is_dir():
-        raise NotADirectoryError(f"train_images is not a directory: {train_images}")
+        raise ValueError("train_annotations (a COCO JSON) and train_images (its image "
+                         "directory) are required")
+    train_annotations, train_images = Path(train_annotations), Path(train_images)
+    _check_split(train_annotations, train_images)
     if (val_annotations is None) != (val_images is None):
-        raise ValueError(
-            "val_annotations and val_images must both be provided, or both omitted; "
-            f"got val_annotations={val_annotations!r}, val_images={val_images!r}"
-        )
-    if num_gpus < 1:
-        raise ValueError(f"num_gpus must be >= 1; got {num_gpus}")
+        raise ValueError("val_annotations and val_images go together")
+    has_val = val_annotations is not None
+    if has_val:
+        val_annotations, val_images = Path(val_annotations), Path(val_images)
+        _check_split(val_annotations, val_images)
+    if num_gpus != 1:
+        raise NotImplementedError("multi-GPU training is not available yet; use num_gpus=1")
+    device = Device.resolve(device)
 
-    # --- Resolve the model source (config and/or weights) -----------------
-    # ``config`` wins; otherwise the architecture comes from ``weights``
-    # (a bundled name or a trained .pth's embedded config). ``detector_weights``
-    # is the checkpoint to load when ``weights`` was given, else None.
-    cfg, config_stem, detector_weights = _resolve_model_source(config, weights)
-
-    # --- Apply user overrides + record which fields the user pinned --------
-    # Everything the user passes here is an explicit choice that must survive
-    # auto-config. The values are merged into ``cfg`` now; their dotted paths
-    # go into ``pinned_paths`` so the dataset-derived recipe (which runs inside
-    # run_train on the no-config path) skips them and the user's value wins.
-    pinned_paths: set[str] = set()
-    if overrides:
-        cfg = merge_overrides(cfg, overrides)
-        pinned_paths |= collect_set_paths(overrides)
-    # size_budget is the first-class form of the most common knob; applied last
-    # so the explicit arg wins over the config and overrides. Schema validation
-    # (positive, stride-32 multiple) runs inside merge_overrides.
-    if size_budget is not None:
-        cfg = merge_overrides(cfg, {"input": {"size_budget": size_budget}})
-        pinned_paths.add("input.size_budget")
-    # num_epochs is the first-class training-length knob (passes over the
-    # dataset). Like size_budget, an explicit value wins over the config and
-    # auto-config.
-    if num_epochs is not None:
-        cfg = merge_overrides(cfg, {"solver": {"num_epochs": num_epochs}})
-        pinned_paths.add("solver.num_epochs")
-
-    # LR↔batch coupling now lives in the recipe (tuning/recipe.py), which
-    # emits the batch-scaled fine-tune base_lr; nothing to do here.
-
-    # A config (YAML path, bundled name, or MayakuConfig) means "train exactly
-    # this recipe": auto-config is turned off so the config is used verbatim and
-    # never silently re-tuned. Without a config (the weights= fine-tune path),
-    # the recipe is derived from THIS dataset, so auto-config is forced on — the
-    # architecture still comes from the checkpoint sidecar, but its baked-in
-    # auto_config flag (set at the model's original training time) must not
-    # disable re-tuning for the new dataset. Either way ``pinned_paths`` is
-    # never overwritten.
-    cfg = merge_overrides(cfg, {"auto_config": {"enabled": config is None}})
-
-    # --- No-val short-circuit (after overrides, so eval_period is final) --
-    eval_after = val_annotations is not None
-    if not eval_after and cfg.test.eval_period > 0:
-        # Eval every epoch is the default; with no val set, skip it (info, not a
-        # warning — a no-val fine-tune is a normal, expected use, not a misconfig).
-        print(
-            "[mayaku.train] no val_annotations/val_images provided — training "
-            "without periodic eval.",
-            flush=True,
-        )
-        cfg = merge_overrides(cfg, {"test": {"eval_period": 0}})
-
-    # --- Resolve output_dir -----------------------------------------------
-    resolved_output_dir = output_dir if output_dir is not None else Path("./runs") / config_stem
-    train_dir = resolved_output_dir / "train"
-    train_dir.mkdir(parents=True, exist_ok=True)
-
-    # ``weights=`` (resolved above) wins; else fall back to the config's
-    # own ``model.weights`` for the YAML-driven fine-tune path.
-    if detector_weights is None and cfg.model.weights is not None:
-        detector_weights = Path(cfg.model.weights)
-
-    # Resume restores the full training state from a checkpoint, so it
-    # supersedes any weight init — drop the warm-start source to satisfy
-    # run_train's mutual-exclusivity check.
-    resume_path = Path(resume) if resume is not None else None
-    if resume_path is not None:
-        detector_weights = None
-
-    print(f"[mayaku.train] {config_stem} -> {resolved_output_dir}")
-
-    # --- Train -----------------------------------------------------------
-    # run_train persists the resolved config to train_dir/config.yaml
-    # internally, so re-running eval / export against the run's
-    # artefacts uses the exact same config that produced them.
-    # Only forward val paths to run_train when mid-training eval is
-    # enabled; otherwise run_train warns about "val supplied but
-    # eval_period=0". Final eval below uses the val paths regardless.
-    forward_val = cfg.test.eval_period > 0
-    train_start = time.time()
-    if num_gpus == 1:
-        run_train(
-            cfg,
-            coco_gt_json=train_annotations,
-            image_root=train_images,
-            output_dir=train_dir,
-            weights=detector_weights,
-            device=device,
-            val_json=val_annotations if forward_val else None,
-            val_image_root=val_images if forward_val else None,
-            resume=resume_path,
-            user_set_paths=pinned_paths,
-        )
+    state = None
+    if resume is not None:
+        if overrides or (config, weights, size_budget, num_epochs) != (None,) * 4:
+            raise ValueError("resume restores the run's own config; leave config, weights, "
+                             "size_budget, num_epochs and overrides unset")
+        state = load_state(resume)
+        resumed = state[SIDECAR_KEY]
+        cfg, stem = MayakuConfig.model_validate(resumed["config"]), "resume"
+        train_dir = Path(resume) if Path(resume).is_dir() else Path(resume).parent
+        run_dir = train_dir.parent if output_dir is None else Path(output_dir)
+        pretrained = None
     else:
-        # Multi-GPU DDP: spawn ``num_gpus`` workers via :func:`launch`.
-        # Each worker calls ``run_train`` and brings up its own slice of
-        # the process group; we don't run any GPU work in the parent.
-        # Post-train (select_final_weights, final eval, metadata) stays
-        # on the parent so the return value comes back from a single
-        # well-defined caller, not N racy workers.
-        dev = resolve_ddp_device(device, num_gpus)
-        launch(
-            run_train_worker,
-            num_gpus,
-            device=dev,
-            args=(
-                cfg,
-                train_annotations,
-                train_images,
-                train_dir,
-                detector_weights,  # weights
-                device,
-                None,  # num_epochs (cfg already carries it)
-                20,  # log_period default
-                val_annotations if forward_val else None,
-                val_images if forward_val else None,
-                resume_path,
-                pinned_paths,
-            ),
-        )
-    train_seconds = time.time() - train_start
-    print(f"[mayaku.train] training done in {train_seconds:.0f}s ({train_seconds / 3600:.2f}h)")
+        cfg, stem, pinned, pretrained = _resolve_model(config, weights)
+        extra: dict[str, Any] = {}
+        if size_budget is not None:
+            extra["input"] = {"size_budget": size_budget}
+        if num_epochs is not None:
+            extra["train"] = {"epochs": num_epochs}
+        for ov in (overrides, extra):
+            if ov:
+                cfg = merge_overrides(cfg, ov)
+                pinned |= collect_set_paths(ov)
+        run_dir = Path(output_dir) if output_dir is not None else Path("runs") / stem
 
-    # --- Pick the canonical "final" checkpoint ----------------------------
+    kp = cfg.model.keypoints
+    labels = dict(masks=cfg.model.seg, kpt=kp.num if kp else 0)
+    coco = load_coco(str(train_images), str(train_annotations), **labels)
+    if state is None:
+        cfg, changes = apply_auto_config(cfg, coco, pinned, finetune=pretrained is not None)
+        for path, old, new in changes:
+            log(f"[mayaku.train] auto-config {path}: {old} -> {new}")
+    elif resumed["class_names"] != coco.class_names:
+        raise ValueError(f"{train_annotations} is not the dataset this run was training on")
+
+    canvas = cfg.input.canvas_hw
+    train_ds = CocoDetection(str(train_images), str(train_annotations), canvas,
+                             aug=cfg.train.aug, seed=cfg.train.seed, coco=coco, **labels)
+    val_ds = (CocoDetection(str(val_images), str(val_annotations), canvas, **labels)
+              if has_val else None)
+    model = cfg.model.build(canvas)
+    if pretrained is not None:
+        info = load_pretrained(model, pretrained)
+        if info["reinitialised"]:
+            log(f"[mayaku.train] classifier re-initialised for {model.nc} classes")
+
+    train_dir = run_dir / "train"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    dump_yaml(cfg, train_dir / "config.yaml")
+    sidecar = build_sidecar(cfg, coco.class_names, model)
+    log(f"[mayaku.train] tier {cfg.model.tier}, {model.nc} classes, canvas {canvas[0]}x"
+        f"{canvas[1]}, {cfg.train.epochs} epochs on {device} -> {train_dir}")
+
+    t0 = time.time()
+    best, _, _ = run(model, train_ds, val_ds, cfg.train, device=device, out=str(train_dir),
+                     workers=cfg.dataloader.num_workers, log=log, sidecar=sidecar, resume=state)
+    train_seconds = time.time() - t0
     final_weights = select_final_weights(train_dir)
-    print(f"[mayaku.train] final weights: {final_weights}")
+    log(f"[mayaku.train] done in {train_seconds / 3600:.2f}h; final weights {final_weights}")
 
-    # --- Optional final eval ----------------------------------------------
-    # The architecture comes from the checkpoint's embedded sidecar (the
-    # resolved config run_train wrote into it — auto-config adjustments and
-    # all), so eval needs only the weights.
-    bbox: dict[str, Any] = {}
-    eval_seconds: float | None = None
-    if eval_after:
-        assert val_annotations is not None and val_images is not None
-        eval_start = time.time()
-        # Final eval goes through the public `evaluate` — the one eval path,
-        # shared with standalone eval and the CLI (handles "auto" device itself).
-        metrics = evaluate(
-            final_weights,
-            annotations=val_annotations,
-            images=val_images,
-            output_dir=resolved_output_dir / "eval",
-            device=device,
-        )
-        eval_seconds = time.time() - eval_start
-        raw_bbox = metrics.get("bbox") if isinstance(metrics, dict) else None
-        if isinstance(raw_bbox, dict):
-            bbox = raw_bbox
+    metrics, eval_seconds = None, None
+    if has_val:
+        t0 = time.time()
+        metrics = evaluate(final_weights, annotations=val_annotations, images=val_images,
+                           output_dir=run_dir / "eval", device=device)
+        eval_seconds = time.time() - t0
+        log(f"[mayaku.train] box AP {metrics['AP']:.4f}")
 
-    final_box_ap = float(bbox["AP"]) if "AP" in bbox else None
-    final_box_ap50 = float(bbox["AP50"]) if "AP50" in bbox else None
-    final_box_ap75 = float(bbox["AP75"]) if "AP75" in bbox else None
-    if final_box_ap is not None:
-        print(f"[mayaku.train] box AP: {final_box_ap:.4f} ({final_box_ap * 100:.2f})")
-
-    # --- Metadata ---------------------------------------------------------
-    # Record CUDA info only when CUDA was actually usable for this run.
-    # `torch.version.cuda` is non-None whenever the torch build supports
-    # CUDA — even on CPU-only hosts — so reporting it unconditionally is
-    # misleading. Gate on the runtime decision so the file accurately
-    # describes where training ran.
-    used_cuda = device in ("cuda", "auto") and torch.cuda.is_available()
-    metadata: dict[str, Any] = {
-        "config_stem": config_stem,
-        "backbone": cfg.model.backbone.name,
-        "num_classes": cfg.model.roi_heads.num_classes,
-        "num_gpus": num_gpus,
-        "num_epochs": cfg.solver.num_epochs,
-        "ims_per_batch": cfg.solver.ims_per_batch,
-        "grad_accum_steps": cfg.solver.grad_accum_steps,
-        # Single-rank effective batch (ims_per_batch × grad_accum_steps); the
-        # cross-rank total is this × num_gpus. Auto-config scales base_lr against
-        # that cross-rank value, so the recipe already reflects the GPU count.
-        "effective_batch_size": cfg.solver.effective_batch(),
-        "base_lr": cfg.solver.base_lr,
-        "ema_enabled": cfg.solver.ema_enabled,
+    cuda = device.startswith("cuda")
+    metadata = {
+        "config_stem": stem,
+        "tier": cfg.model.tier,
+        "num_classes": cfg.model.num_classes,
+        "canvas_hw": list(canvas),
+        "qat": cfg.model.qat_enabled,
+        "epochs": cfg.train.epochs,
+        "batch": cfg.train.batch,
+        "lr": cfg.train.lr,
         "final_weights": str(final_weights),
-        "final_box_ap": final_box_ap,
-        "final_box_ap50": final_box_ap50,
-        "final_box_ap75": final_box_ap75,
+        "best": best,
+        "metrics": metrics,
         "train_seconds": train_seconds,
         "eval_seconds": eval_seconds,
         "git_hash": git_hash(),
         "torch_version": torch.__version__,
-        "cuda_version": torch.version.cuda if used_cuda else None,
-        "device_name": torch.cuda.get_device_name(0) if used_cuda else None,
+        "device": device,
+        "device_name": torch.cuda.get_device_name(device) if cuda else None,
     }
     (train_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
-
     return {
-        "final_box_ap": final_box_ap,
-        "final_box_ap50": final_box_ap50,
-        "final_box_ap75": final_box_ap75,
         "final_weights": final_weights,
-        "output_dir": resolved_output_dir,
+        "output_dir": run_dir,
+        "metrics": metrics,
+        "best": best,
         "train_seconds": train_seconds,
         "eval_seconds": eval_seconds,
         "metadata": metadata,
@@ -379,160 +220,51 @@ def train(
 def evaluate(
     weights: str | Path,
     *,
-    annotations: Path,
-    images: Path,
-    output_dir: Path | None = None,
-    device: DeviceSetting = "auto",
+    annotations: str | Path,
+    images: str | Path,
+    output_dir: str | Path | None = None,
+    device: str = "auto",
+    log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Evaluate a trained model or exported artifact on a COCO split.
-
-    The eval counterpart of :func:`train`. ``weights`` is loaded via
-    :func:`from_pretrained`, so a ``.pth`` / bundled name and an exported
-    ``.onnx`` / ``.mlpackage`` / ``.xml`` / ``.engine`` all score through the one
-    :func:`~mayaku.cli.eval.run_eval` loop — each with its own as-deployed
-    preprocessing and precision. ``annotations`` + ``images`` are the eval split
-    (the pair used by :func:`train` / :func:`health_check`); ``device`` is
-    forwarded to :func:`from_pretrained` (``"auto"`` picks the best device).
-
-    Returns the per-task metrics dict (e.g. ``{"bbox": {"AP": ...}}``), also
-    written to ``<output_dir>/metrics.json`` when ``output_dir`` is set.
-    """
-    if not annotations.exists():
-        raise FileNotFoundError(f"annotations not found: {annotations}")
-    if not images.is_dir():
-        raise NotADirectoryError(f"images is not a directory: {images}")
-
-    predictor = from_pretrained(weights, device=device)
-    return run_eval(
-        predictor,
-        coco_gt_json=annotations,
-        image_root=images,
-        output_dir=output_dir,
-    )
+    """COCO metrics of a trained model on a split, measured the way it
+    deploys: ``weights`` is anything `mayaku.from_pretrained` loads -- a
+    checkpoint, a hosted model name, or an exported artifact, which then runs
+    in its own runtime. Returns the flat metrics dict (``AP``, ``AP50``, ...,
+    with ``segm_*`` and ``kpt_*`` for models with those heads), also written
+    to ``<output_dir>/metrics.json`` when ``output_dir`` is set."""
+    annotations, images = Path(annotations), Path(images)
+    _check_split(annotations, images)
+    runner = from_pretrained(weights, device=device)
+    metrics = evaluate_runner(runner, images, annotations, log=log)
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    return metrics
 
 
-# ---------------------------------------------------------------------------
-# Model-source resolution (config and/or weights)
-# ---------------------------------------------------------------------------
-
-
-def _resolve_model_source(
-    config: str | Path | MayakuConfig | None,
-    weights: str | Path | None,
-) -> tuple[MayakuConfig, str, Path | None]:
-    """Resolve ``(cfg, config_stem, detector_weights)`` from the inputs.
-
-    ``config`` wins when present; otherwise the architecture is derived
-    from ``weights``. ``detector_weights`` is the checkpoint to load when
-    ``weights`` was given (a bundled name's fetched ``.pth`` or the passed
-    ``.pth``), else ``None`` — the caller may still read
-    ``cfg.model.weights``.
-    """
-    if config is not None:
-        cfg, stem = _load_config(config)
-        return cfg, stem, resolve_weights(weights) if weights is not None else None
+def _resolve_model(config, weights):
+    """``(cfg, run name, user-set paths, pretrained state or None)`` from the
+    model source(s); see `train`."""
+    pretrained, ckpt_cfg, stem = None, None, "mayaku_run"
     if weights is not None:
-        weights_path = resolve_weights(weights)
-        assert weights_path is not None  # weights is not None on this path
-        cfg, _ = config_from_checkpoint(weights_path)
-        cfg = _strip_operational_for_finetune(cfg)
-        return cfg, weights_path.stem, weights_path
-    raise ValueError(
-        "Provide config= (a YAML path or MayakuConfig) or "
-        "weights= (a bundled model name or a trained .pth) so the model "
-        "architecture is defined."
-    )
-
-
-# Head knobs that select the LOSS rather than describe the model. None of them
-# appears in the inference graph: the only parameter any of them adds is
-# ``head.dn_query_feat`` (one hidden_dim embedding, 128 floats at the nano tier)
-# and DN queries are not generated at inference, so export and deployment are
-# unaffected. A *new* training run should therefore get the current recommended
-# recipe rather than inheriting whatever the pretrain happened to use — the
-# bundled detection checkpoints were pretrained before this program and pin
-# ``denoising=False, dn_groups=5``, which would otherwise silently override the
-# schema defaults for every user fine-tuning from them.
-#
-# Deliberately NOT included, and the distinction is the point:
-#   * ``mal_gamma``/``mal_alpha``/``cls_loss_weight``/``dn_box_noise_scale``/
-#     ``dn_loss_weight`` — tuning *of* an objective, which the checkpoint owns
-#     (see the loss-weight rule in ``mayaku.tuning.recipe``);
-#   * ``fpn_p6p7``/``qgn_min_stride``/``num_stages``/``num_proposals`` — real
-#     architecture; resetting those would not match the loaded weights.
-TRAINING_ONLY_HEAD_FIELDS: Final = frozenset(
-    {"cls_loss_type", "denoising", "dn_groups", "dn_max_gt"}
-)
-
-
-def _strip_operational_for_finetune(cfg: MayakuConfig) -> MayakuConfig:
-    """Reset host/run-cadence fields on a checkpoint-derived fine-tune config.
-
-    The warm-start path (``weights=`` with no ``config=``) inherits its base
-    config from the pretrain checkpoint's sidecar, which embeds the *entire*
-    config the pretrain ran with. Only the model architecture and the recipe
-    regime (optimizer, geometry, LLRD, EMA, augmentation) should survive into a
-    fresh fine-tune; the operational knobs must not — otherwise the pretrain's
-    epoch-sized ``eval_period`` / ``checkpoint_period`` silently disable periodic
-    eval and checkpointing, and its ``num_workers`` / ``detections_per_image`` /
-    batch layout leak in.
-
-    ``test`` and ``dataloader`` are wholly operational, so reset wholesale to
-    schema defaults; only the operational subset of ``solver`` is reset, and
-    only :data:`TRAINING_ONLY_HEAD_FIELDS` of ``model.uniquery_head`` (the loss
-    selection, which the checkpoint should not dictate for a fresh run). Batch
-    layout and AMP take fine-tune defaults rather than the schema's
-    D2-replication values (``FINETUNE_*`` micro-batch, and ``amp_enabled/bf16``
-    which ``Device.resolve_amp_dtype`` clamps to the live hardware). ``model``
-    is kept verbatim apart from those head fields, and ``input`` entirely so. Read-side and train-only; deployment reads
-    the full checkpoint config via ``load_detector``.
-    """
-    defaults = SolverConfig()  # schema defaults for the reset-to-default fields
-    solver = cfg.solver.model_copy(
-        update={
-            "checkpoint_period": defaults.checkpoint_period,
-            "grad_norm_log_enabled": defaults.grad_norm_log_enabled,
-            "ims_per_batch": FINETUNE_IMS_PER_BATCH,
-            "grad_accum_steps": FINETUNE_GRAD_ACCUM_STEPS,
-            "amp_enabled": True,
-            "amp_dtype": "bf16",
-        }
-    )
-    update: dict[str, object] = {
-        "test": TestConfig(),
-        "dataloader": DataLoaderConfig(),
-        "solver": solver,
-    }
-    head = cfg.model.uniquery_head
-    if head is not None:
-        head_defaults = UniQueryHeadConfig()
-        update["model"] = cfg.model.model_copy(
-            update={
-                "uniquery_head": head.model_copy(
-                    update={
-                        name: getattr(head_defaults, name) for name in TRAINING_ONLY_HEAD_FIELDS
-                    }
-                )
-            }
-        )
-    return cfg.model_copy(update=update)
-
-
-def _load_config(config: str | Path | MayakuConfig) -> tuple[MayakuConfig, str]:
-    """Load an explicit ``config``: a ``MayakuConfig`` object or a YAML file path.
-
-    ``config`` is a maintainer escape hatch for defining/training a new
-    architecture; end-user flows use ``weights=`` and never pass it. Bundled
-    config *names* are no longer resolved — configs are maintainer references
-    under ``configs/`` and are passed by path.
-    """
+        path = resolve_weights(weights)
+        _, ckpt_cfg, pretrained = read_deploy_checkpoint(path)
+        stem = path.stem
     if isinstance(config, MayakuConfig):
-        return config, "mayaku_run"
-    path = Path(config)
-    if path.exists():
-        return load_yaml(path), path.stem
-    raise FileNotFoundError(
-        f"config file not found: {config}. Pass a .yaml path or a MayakuConfig — "
-        "bundled config names are no longer resolved (configs are maintainer "
-        "references under configs/)."
-    )
+        # the fields set on it are the user's; a recipe given whole is all set
+        return config, stem, collect_set_paths(config.model_dump(exclude_unset=True)), pretrained
+    if config is not None:
+        raw, cfg = read_yaml(config)
+        return cfg, Path(config).stem, collect_set_paths(raw), pretrained
+    if ckpt_cfg is None:
+        return MayakuConfig(), stem, set(), None
+    # The checkpoint defines the network; the data and this run define the rest.
+    return MayakuConfig(model=ckpt_cfg.model.architecture()), stem, set(), pretrained
+
+
+def _check_split(annotations: Path, images: Path) -> None:
+    if not annotations.is_file():
+        raise FileNotFoundError(f"annotation file not found: {annotations}")
+    if not images.is_dir():
+        raise NotADirectoryError(f"image directory not found: {images}")
+

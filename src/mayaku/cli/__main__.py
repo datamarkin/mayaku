@@ -1,333 +1,195 @@
-"""Typer entry point for the ``mayaku`` console script.
+"""The ``mayaku`` command line: argument plumbing over the Python API.
 
-The console-script entry in ``pyproject.toml`` (`mayaku =
-"mayaku.cli.__main__:app"`) imports the :data:`app` symbol below.
-Each subcommand is a thin wrapper around the corresponding
-``cli/<name>.py`` ``run_*`` function so the implementation stays
-testable in-process via direct calls (and the Typer layer is just
-argument plumbing).
+    mayaku train [CONFIG] [--weights W] --annotations A --images I
+                 [--val-annotations VA --val-images VI] [--output DIR]
+                 [--epochs N] [--size-budget S] [--set key=value ...]
+                 [--device D] [--resume STATE]
+    mayaku eval WEIGHTS --annotations A --images I [--output DIR] [--device D]
+    mayaku predict WEIGHTS IMAGE [--conf C] [--output FILE] [--device D]
+    mayaku export TARGET WEIGHTS [--output FILE]
+    mayaku download [NAME] [--list] [--all]
 
-Subcommands:
-
-* ``mayaku train [CONFIG] [--weights] --annotations --images [--val-annotations --val-images] [--output] [--device] [--epochs] [--num-gpus]``
-* ``mayaku eval WEIGHTS --annotations --images [--output] [--device]``
-* ``mayaku predict CONFIG IMAGE [--weights] [--output] [--device]``
-* ``mayaku export TARGET CONFIG --weights --output``
-  (TARGET ∈ ``onnx`` | ``coreml`` | ``openvino`` | ``tensorrt``)
+``--set`` takes any config field by its dotted path, e.g.
+``--set train.lr=0.005 --set model.tier=s``; the value is read as YAML.
+WEIGHTS is a checkpoint, a hosted model name, or (eval, predict) an exported
+artifact.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import Any
 
+import pydantic
 import typer
 
-from mayaku.backends.mps import track_mps_fallbacks
-from mayaku.cli.download import render_index, run_download
-from mayaku.cli.export import run_export
-from mayaku.cli.predict import run_predict
-from mayaku.config.schemas import DeviceSetting
-from mayaku.utils.download import DEFAULT_MANIFEST_URL
+from mayaku.api import evaluate, train
+from mayaku.config import parse_assignments
+from mayaku.engine.evaluation import rle
+from mayaku.inference import Predictor, from_pretrained
+from mayaku.inference.export import TARGETS
+from mayaku.utils.download import (
+    DEFAULT_MANIFEST_URL,
+    download_model,
+    list_models,
+    resolve_weights,
+)
 
 app = typer.Typer(
     name="mayaku",
-    help="Backend-portable detection / segmentation / keypoint CLI.",
+    help="Train, evaluate, run and export mayaku detectors.",
     no_args_is_help=True,
     add_completion=False,
 )
 
+_WEIGHTS_HELP = "A checkpoint, a hosted model name, or an exported artifact."
+_JSON = {"exists": True, "dir_okay": False}
+_DIR = {"exists": True, "file_okay": False}
+
 
 @app.command("train")
 def _train(
-    config: str | None = typer.Argument(
-        None,
-        help="YAML path or bundled config name. Omit when --weights defines the architecture.",
-    ),
+    config: Path | None = typer.Argument(
+        None, exists=True, dir_okay=False,
+        help="YAML config. Optional with --weights, which then defines the architecture."),
     weights: str | None = typer.Option(
-        None,
-        "--weights",
-        help=(
-            "Bundled model name or a .pth path. Defines the architecture when "
-            "CONFIG is omitted, and seeds training (the class-specific head "
-            "re-initialises when the dataset's class count differs)."
-        ),
-    ),
-    annotations: Path | None = typer.Option(
-        None,
-        "--annotations",
-        exists=True,
-        dir_okay=False,
-        help="Train COCO annotation JSON (with --images).",
-    ),
-    images: Path | None = typer.Option(
-        None,
-        "--images",
-        exists=True,
-        file_okay=False,
-        help="Train image directory (with --annotations).",
-    ),
+        None, "--weights", help="Checkpoint or hosted model name to warm-start from."),
+    annotations: Path = typer.Option(
+        ..., "--annotations", **_JSON, help="Train COCO annotation JSON."),
+    images: Path = typer.Option(..., "--images", **_DIR, help="Train image directory."),
     val_annotations: Path | None = typer.Option(
-        None,
-        "--val-annotations",
-        exists=True,
-        dir_okay=False,
-        help="Val COCO annotation JSON for final eval.",
-    ),
+        None, "--val-annotations", **_JSON,
+        help="Validation COCO JSON; enables per-epoch evaluation."),
     val_images: Path | None = typer.Option(
-        None, "--val-images", exists=True, file_okay=False, help="Val image directory."
-    ),
+        None, "--val-images", **_DIR, help="Validation images."),
     output: Path | None = typer.Option(
-        None, "--output", file_okay=False, help="Run directory. Default ./runs/<config_stem>/."
-    ),
-    device: str = typer.Option("auto", "--device", help="cpu/mps/cuda; default = auto"),
-    epochs: int | None = typer.Option(
-        None, "--epochs", help="Number of passes over the dataset (overrides the recipe)."
-    ),
-    num_gpus: int = typer.Option(
-        1,
-        "--num-gpus",
-        min=1,
-        help=(
-            "Number of GPUs to train on (DDP). Default 1. Multiply "
-            "`solver.base_lr` by --num-gpus (linear scaling rule) when scaling "
-            "up. MPS is single-device only."
-        ),
-    ),
+        None, "--output", file_okay=False, help="Run directory; default ./runs/<name>."),
+    epochs: int | None = typer.Option(None, "--epochs", min=1, help="Sets train.epochs."),
+    size_budget: int | None = typer.Option(
+        None, "--size-budget", help="Sets input.size_budget: the canvas's square-equivalent side."),
+    assignments: list[str] = typer.Option(
+        [], "--set", help="Set a config field: --set train.lr=0.005 (repeatable)."),
+    device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
+    num_gpus: int = typer.Option(1, "--num-gpus", min=1, help="GPUs to train on."),
     resume: Path | None = typer.Option(
-        None,
-        "--resume",
-        exists=True,
-        dir_okay=False,
-        readable=True,
-        help=(
-            "Resume training from a `model_iter_*.pth` checkpoint: restores "
-            "weights + optimizer + LR-schedule position (+ EMA shadow) and "
-            "continues at the checkpoint's iteration. Use the same CONFIG the "
-            "checkpoint was trained with. Mutually exclusive with --weights."
-        ),
-    ),
+        None, "--resume", exists=True,
+        help="Continue a run from its state.pt (or its train/ directory)."),
 ) -> None:
-    """Train a detector — the CLI mirror of :func:`mayaku.train`.
-
-    Define the model with ``CONFIG`` (YAML path or bundled name) or
-    ``--weights`` (bundled name or trained .pth). Point at the dataset
-    with ``--annotations`` (a COCO JSON) and ``--images`` (its image
-    directory). Picks the best checkpoint, runs final eval when a val
-    split is present, and writes ``metadata.json``.
-    """
-    # Deferred: `mayaku.api` imports from `mayaku.cli` (resolve_weights, run_train),
-    # so importing it at module load would create a cycle (api → cli → __main__ → api).
-    # `train` is only needed when this command runs, so import it here.
-    from mayaku.api import train
-
-    # Install the MPS op-fallback tracker at the shell-CLI boundary only;
-    # library callers (``mayaku.train`` from Python) manage it themselves.
-    with track_mps_fallbacks(label="train"):
-        try:
-            result = train(
-                config=config,
-                weights=weights,
-                train_annotations=annotations,
-                train_images=images,
-                val_annotations=val_annotations,
-                val_images=val_images,
-                output_dir=output,
-                num_epochs=epochs,
-                device=cast(DeviceSetting, device),
-                num_gpus=num_gpus,
-                resume=resume,
-            )
-        except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
-            raise typer.BadParameter(str(exc)) from exc
-
-    ap = result["final_box_ap"]
-    if ap is not None:
-        typer.echo(f"box AP: {ap * 100:.2f}")
+    """Train a detector; the command-line form of `mayaku.train`."""
+    try:
+        overrides = parse_assignments(assignments)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--set") from exc
+    try:
+        result = train(
+            config, weights=weights,
+            train_annotations=annotations, train_images=images,
+            val_annotations=val_annotations, val_images=val_images,
+            output_dir=output, size_budget=size_budget, num_epochs=epochs,
+            overrides=overrides, device=device, num_gpus=num_gpus, resume=resume,
+        )
+    except pydantic.ValidationError as exc:     # a config value the schema rejects
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"final weights: {result['final_weights']}")
 
 
 @app.command("eval")
 def _eval(
-    weights: str = typer.Argument(
-        ...,
-        help=(
-            "Trained model: a .pth checkpoint (its embedded sidecar defines the "
-            "architecture), OR a bare model name from `mayaku download --list` "
-            "(e.g. `faster_rcnn_R_50_FPN_3x`) — names auto-fetch from the hosted "
-            "manifest on first use."
-        ),
-    ),
-    annotations: Path = typer.Option(..., "--annotations", exists=True, dir_okay=False),
-    images: Path = typer.Option(..., "--images", exists=True, file_okay=False),
-    output: Path | None = typer.Option(None, "--output", file_okay=False),
-    device: str = typer.Option("auto", "--device", help="cpu/mps/cuda; default = auto"),
+    weights: str = typer.Argument(..., help=_WEIGHTS_HELP),
+    annotations: Path = typer.Option(..., "--annotations", **_JSON, help="COCO annotation JSON."),
+    images: Path = typer.Option(..., "--images", **_DIR, help="Image directory."),
+    output: Path | None = typer.Option(
+        None, "--output", file_okay=False, help="Directory to write metrics.json to."),
+    device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
 ) -> None:
-    """Run COCO evaluation — the CLI mirror of :func:`mayaku.evaluate`.
-
-    Prints the per-task metrics dict.
-    """
-    # Deferred import: `mayaku.api` imports from `mayaku.cli`, so importing it at
-    # module load would create a cycle (same reason as the train command).
-    from mayaku.api import evaluate
-
-    with track_mps_fallbacks(label="eval"):
-        metrics = evaluate(
-            weights,
-            annotations=annotations,
-            images=images,
-            output_dir=output,
-            device=cast(DeviceSetting, device),
-        )
+    """COCO metrics on a split; the command-line form of `mayaku.evaluate`."""
+    metrics = evaluate(weights, annotations=annotations, images=images,
+                       output_dir=output, device=device)
     typer.echo(json.dumps(metrics, indent=2))
 
 
 @app.command("predict")
 def _predict(
-    weights: str = typer.Argument(
-        ...,
-        help=(
-            "Trained model: a .pth checkpoint (its embedded sidecar defines the "
-            "architecture), OR a bare model name from `mayaku download --list` — "
-            "names auto-fetch from the manifest."
-        ),
-    ),
+    weights: str = typer.Argument(..., help=_WEIGHTS_HELP),
     image: Path = typer.Argument(..., exists=True, dir_okay=False),
-    output: Path | None = typer.Option(None, "--output", file_okay=True),
-    device: str | None = typer.Option(None, "--device"),
+    conf: float | None = typer.Option(
+        None, "--conf", help="Score threshold; default the model's recorded one."),
+    output: Path | None = typer.Option(None, "--output", help="Write the JSON here."),
+    device: str = typer.Option("auto", "--device", help="cuda, mps or cpu; default auto."),
 ) -> None:
-    """Run inference on a single image; print or save the detections."""
-    payload = run_predict(weights, image, output=output, device=device)
+    """Detect objects in one image and print (or write) them as JSON."""
+    runner = from_pretrained(weights, device=device)
+    dets = runner(image, conf)
+    payload = {"image": str(image), "detections": _to_json(dets, runner.class_names)}
+    text = json.dumps(payload, indent=2)
     if output is None:
-        typer.echo(json.dumps(payload, indent=2))
+        typer.echo(text)
+    else:
+        output.write_text(text)
 
 
 @app.command("export")
 def _export(
-    target: str = typer.Argument(..., help="onnx / coreml / openvino / tensorrt"),
-    weights: str = typer.Argument(
-        ...,
-        help=(
-            "Trained model: a .pth checkpoint (its embedded sidecar defines the "
-            "architecture to export), OR a bare model name from "
-            "`mayaku download --list`."
-        ),
-    ),
-    output: Path = typer.Option(..., "--output"),
-    sample_height: int | None = typer.Option(
-        None,
-        "--sample-height",
-        help=(
-            "Tracing input height. Defaults to the checkpoint's deploy canvas "
-            "(the geometry it was trained at) — pass this only to trace at a "
-            "different size."
-        ),
-    ),
-    sample_width: int | None = typer.Option(
-        None,
-        "--sample-width",
-        help="Tracing input width. Defaults to the checkpoint's deploy canvas.",
-    ),
-    coreml_precision: str = typer.Option(
-        "fp32",
-        "--coreml-precision",
-        help=(
-            "fp32 / fp16. CoreML target only. Default fp32 keeps "
-            "single-image parity_check tight; pass fp16 to enable "
-            "Apple Silicon Neural Engine execution at deployment."
-        ),
-    ),
-    onnx_dynamic_input_shape: bool = typer.Option(
-        True,
-        "--onnx-dynamic-shapes/--no-onnx-dynamic-shapes",
-        help=(
-            "ONNX target only. When --onnx-dynamic-shapes (default), "
-            "the exported graph supports any (N, 3, H, W) input. When "
-            "--no-onnx-dynamic-shapes, the graph is exported at the "
-            "literal --sample-height/--sample-width and any other "
-            "input shape is rejected. Use --no-onnx-dynamic-shapes "
-            "when targeting TensorRT — TRT throughput on R-CNN graphs "
-            "degrades dramatically with dynamic shapes (see ADR 005)."
-        ),
-    ),
+    target: str = typer.Argument(..., help="Deployment target: onnx."),
+    weights: str = typer.Argument(..., help="A checkpoint or a hosted model name."),
+    output: Path | None = typer.Option(None, "--output", help="Artifact path."),
 ) -> None:
-    """Export a trained model to a deployment target.
-
-    ONNX is the required target; CoreML / OpenVINO / TensorRT are
-    best-effort. All four are live — see ``docs/export/<target>.md``
-    for what's in each exported graph and how to run the resulting
-    artefact.
-    """
-    result = run_export(
-        target,
-        weights,
-        output=output,
-        sample_height=sample_height,
-        sample_width=sample_width,
-        coreml_precision=coreml_precision,
-        onnx_dynamic_input_shape=onnx_dynamic_input_shape,
-    )
-    typer.echo(
-        json.dumps(
-            {
-                "target": result.target,
-                "path": str(result.path),
-                "opset": result.opset,
-                "input_names": list(result.input_names),
-                "output_names": list(result.output_names),
-            },
-            indent=2,
-        )
-    )
+    """Export a trained model to a deployment target, sidecar embedded."""
+    if target not in TARGETS:
+        raise typer.BadParameter(f"unknown target {target!r}; available: {', '.join(TARGETS)}")
+    path = resolve_weights(weights)
+    predictor = Predictor.from_checkpoint(path, device="cpu")
+    typer.echo(str(predictor.export(target, output or path.with_suffix(TARGETS[target]))))
 
 
 @app.command("download")
 def _download(
-    name: str | None = typer.Argument(
-        None,
-        help=(
-            "Model name from the hosted manifest (e.g. faster_rcnn_R_50_FPN_3x). "
-            "Omit and pass --list / --all instead."
-        ),
-    ),
+    name: str | None = typer.Argument(None, help="Model name from the hosted manifest."),
     cache_dir: Path | None = typer.Option(
-        None,
-        "--cache-dir",
-        help="Override the download directory (default: the current directory).",
-    ),
+        None, "--cache-dir", help="Download directory; default the current directory."),
     manifest_url: str = typer.Option(
-        DEFAULT_MANIFEST_URL,
-        "--manifest-url",
-        help="Override the manifest URL — useful for self-hosted mirrors.",
-    ),
-    list_models: bool = typer.Option(
-        False, "--list", help="Print every model name in the manifest, grouped by task."
-    ),
-    download_all: bool = typer.Option(
-        False, "--all", help="Fetch every model's checkpoint. Used for fresh-deploy setup."
-    ),
-    no_verify: bool = typer.Option(
-        False, "--no-verify", help="Skip the SHA256 verification step (not recommended)."
-    ),
+        DEFAULT_MANIFEST_URL, "--manifest-url", help="Manifest URL, for a mirror."),
+    list_models_: bool = typer.Option(False, "--list", help="List the hosted models."),
+    download_all: bool = typer.Option(False, "--all", help="Fetch every hosted model."),
+    no_verify: bool = typer.Option(False, "--no-verify", help="Skip the SHA256 check."),
 ) -> None:
-    """Fetch hosted Mayaku model checkpoints from the manifest."""
-    payload = run_download(
-        name=name,
-        cache_dir=cache_dir,
-        manifest_url=manifest_url,
-        do_list=list_models,
-        do_all=download_all,
-        verify_sha256=not no_verify,
-    )
-    if "models" in payload:
-        typer.echo(render_index(payload["models"]))
+    """Fetch hosted model checkpoints: one by name, or --all; --list shows them."""
+    if list_models_ or download_all:
+        index = list_models(manifest_url=manifest_url)
+        if list_models_:
+            for task in sorted(index):
+                typer.echo(f"{task}:\n" + "".join(f"  {n}\n" for n in index[task]))
+            return
+        names = [n for task in index.values() for n in task]
+    elif name is not None:
+        names = [name]
     else:
-        typer.echo(json.dumps(payload, indent=2, default=str))
+        raise typer.BadParameter("pass a model name, --list or --all")
+    for n in names:
+        path = download_model(n, cache_dir=cache_dir, manifest_url=manifest_url,
+                              verify_sha256=not no_verify)
+        typer.echo(f"{n}: {path}")
+
+
+def _to_json(dets, class_names: list[str]) -> list[dict[str, Any]]:
+    """`Detections` as one JSON object per detection: an xyxy box in the
+    image's pixels, keypoints as (x, y, visibility), a mask as COCO RLE."""
+    out = []
+    for k in range(len(dets)):
+        c = int(dets.labels[k])
+        d: dict[str, Any] = {"class_id": c, "class": class_names[c],
+                             "score": round(float(dets.scores[k]), 4),
+                             "box_xyxy": [round(v, 2) for v in dets.boxes[k].tolist()]}
+        if dets.keypoints is not None:
+            d["keypoints"] = [[round(v, 2) for v in p] for p in dets.keypoints[k].tolist()]
+        if dets.masks is not None:
+            d["segmentation"] = rle(dets.masks[k])
+        out.append(d)
+    return out
 
 
 def main() -> None:
-    """Console-script entry point — equivalent to ``app()``."""
     app()
 
 
