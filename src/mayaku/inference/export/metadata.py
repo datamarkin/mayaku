@@ -1,11 +1,9 @@
 """Embed / read the mayaku sidecar inside exported artifacts.
 
-The ``.pth`` checkpoint is self-describing: ``build_sidecar`` writes
-``{config, class_names, ...}`` under a ``"mayaku"`` key and
-``config_from_checkpoint`` reads it back. This module gives every export format
-the same property — each has a metadata slot we write the same JSON into, so
-``from_pretrained("model.onnx")`` reconstructs the architecture + class names
-from the file alone (no sidecar file, no config).
+A checkpoint is self-describing: `mayaku.utils.checkpoint.build_sidecar`
+writes the sidecar under a ``"mayaku"`` key. This module gives every export
+format the same property -- each has a metadata slot the same JSON goes into,
+so ``from_pretrained("model.onnx")`` runs the artifact from the file alone.
 
 Per-format slot:
 
@@ -14,7 +12,7 @@ Per-format slot:
 * OpenVINO  — model ``rt_info``
 * TensorRT  — the ``.engine`` is opaque binary with no metadata slot, so the
   JSON is length-prefixed in front of the engine bytes (``<4-byte LE len><json>
-  <engine>``); :class:`mayaku.inference.artifact` strips it before deserialising.
+  <engine>``); `strip_tensorrt_header` removes it before deserialising.
 
 The JSON is written compact (no spaces) so it survives OpenVINO ``rt_info``
 (which historically splits string values on whitespace).
@@ -50,12 +48,9 @@ def target_from_suffix(path: str | Path) -> str:
 
 
 def sidecar_blob(sidecar: dict[str, Any]) -> str:
-    """Serialise the sidecar to the compact JSON stored in every artifact slot.
-
-    No spaces so it survives OpenVINO ``rt_info`` (which historically splits
-    string values on whitespace). Shared by the post-hoc embedders here and the
-    CoreML/OpenVINO exporters that embed inline at write time.
-    """
+    """The sidecar as the compact JSON every artifact slot stores: no spaces,
+    so it survives OpenVINO ``rt_info`` (which historically splits string
+    values on whitespace)."""
     return json.dumps(sidecar, separators=(",", ":"))
 
 
@@ -80,7 +75,8 @@ def embed_sidecar(path: Path, target: str, sidecar: dict[str, Any]) -> None:
 
 
 def read_sidecar(path: Path, target: str) -> dict[str, Any] | None:
-    """Read the sidecar dict from ``path``, or ``None`` if it carries none."""
+    """Read the sidecar dict from ``path``, or ``None`` if it carries none.
+    One written before exports recorded their precision gets fp32."""
     if target == "onnx":
         blob = _read_onnx(path)
     elif target == "coreml":
@@ -94,6 +90,7 @@ def read_sidecar(path: Path, target: str) -> dict[str, Any] | None:
     if not blob:
         return None
     parsed: dict[str, Any] = json.loads(blob)
+    parsed.setdefault("export", {"target": target, "precision": "fp32"})
     return parsed
 
 
@@ -163,29 +160,21 @@ def _embed_tensorrt(path: Path, blob: str) -> None:
 
 
 def _read_tensorrt(path: Path) -> str | None:
-    data = path.read_bytes()
-    if len(data) < _TRT_LEN_BYTES:
+    with open(path, "rb") as f:                 # the header only, not the engine
+        head = f.read(_TRT_LEN_BYTES)
+        if len(head) < _TRT_LEN_BYTES:
+            return None
+        blob = f.read(int.from_bytes(head, "little"))
+    try:
+        return blob.decode("utf-8") if blob.startswith(b"{") else None
+    except UnicodeDecodeError:
         return None
-    n = int.from_bytes(data[:_TRT_LEN_BYTES], "little")
-    start = _TRT_LEN_BYTES
-    end = start + n
-    if end > len(data):
-        return None
-    return data[start:end].decode("utf-8")
 
 
 def strip_tensorrt_header(path: Path) -> bytes:
-    """Return the raw engine bytes from a ``.engine`` that may carry a sidecar header.
-
-    :func:`_embed_tensorrt` prepends ``<len><json>`` in front of the engine. The
-    TensorRT session calls this to recover the deserialisable engine bytes. Files
-    without a header (no ``read_sidecar`` value) are returned unchanged.
-    """
+    """The raw engine bytes of a ``.engine`` that may carry a sidecar header
+    (``<len><json>`` in front, from `_embed_tensorrt`); a file without one is
+    returned whole."""
     data = path.read_bytes()
-    if len(data) < _TRT_LEN_BYTES:
-        return data
-    n = int.from_bytes(data[:_TRT_LEN_BYTES], "little")
-    end = _TRT_LEN_BYTES + n
-    if end > len(data):
-        return data  # not our header
-    return data[end:]
+    blob = _read_tensorrt(path)
+    return data[_TRT_LEN_BYTES + len(blob.encode("utf-8")):] if blob else data

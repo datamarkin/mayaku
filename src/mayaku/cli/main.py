@@ -129,16 +129,25 @@ def _predict(
 
 @app.command("export")
 def _export(
-    target: str = typer.Argument(..., help="Deployment target: onnx."),
+    target: str = typer.Argument(..., help="onnx, coreml, openvino or tensorrt."),
     weights: str = typer.Argument(..., help="A checkpoint or a hosted model name."),
     output: Path | None = typer.Option(None, "--output", help="Artifact path."),
+    precision: str | None = typer.Option(
+        None, "--precision",
+        help="fp32, fp16 or int8 (int8: quantization-aware models); default per target."),
 ) -> None:
-    """Export a trained model to a deployment target, sidecar embedded."""
+    """Export a trained model to a deployment target, sidecar embedded; the
+    artifact's outputs are checked against the model before it is kept."""
     if target not in TARGETS:
         raise typer.BadParameter(f"unknown target {target!r}; available: {', '.join(TARGETS)}")
     path = resolve_weights(weights)
     predictor = Predictor.from_checkpoint(path, device="cpu")
-    typer.echo(str(predictor.export(target, output or path.with_suffix(TARGETS[target]))))
+    try:
+        out = predictor.export(target, output or path.with_suffix(TARGETS[target].suffix),
+                               precision)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(str(out))
 
 
 @app.command("download")

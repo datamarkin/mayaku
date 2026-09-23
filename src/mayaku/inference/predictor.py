@@ -42,14 +42,16 @@ class Predictor(Runner):
     def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         return cast(list[torch.Tensor], self.model(batch_to(x, self.device)))
 
-    def export(self, target: str = "onnx", output: str | Path | None = None) -> Path:
+    def export(self, target: str = "onnx", output: str | Path | None = None,
+               precision: str | None = None) -> Path:
         """Write a deployable artifact with this model's sidecar embedded;
-        see `mayaku.inference.export.export`."""
+        `precision` defaults to the target's first. See
+        `mayaku.inference.export.export`."""
         from mayaku.inference.export import TARGETS, export
 
-        return export(self.model, self.sidecar, target,
-                      output or Path("model").with_suffix(TARGETS.get(target, "")))
-
+        if output is None and target in TARGETS:
+            output = Path("model").with_suffix(TARGETS[target].suffix)
+        return export(self.model, self.sidecar, target, output or "model", precision)
 
 def from_pretrained(source: str | Path, device: str = "auto") -> Runner:
     """Load a deployable detector: a checkpoint path or model name gives a
