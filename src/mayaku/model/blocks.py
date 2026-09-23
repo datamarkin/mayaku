@@ -19,6 +19,8 @@ Deploy op set, and nothing else ever appears:
     MaxPool 3x3 stride 1
 """
 
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -95,12 +97,13 @@ def identity_3x3(channels, device, dtype):
 
 
 def conv_from(weight, bias, ref):
-    """A biased convolution carrying `ref`'s geometry and these weights."""
-    c = nn.Conv2d(ref.in_channels, ref.out_channels, ref.kernel_size,
-                  ref.stride, ref.padding, bias=True)
-    with torch.no_grad():
-        c.weight.copy_(weight)
-        c.bias.copy_(bias)
+    """`ref` with these weights and a bias. A copy, as torch's own conv-BN
+    fusion makes, so whatever `ref` carries survives fusion -- a
+    quantization-aware conv keeps its observer: the fused kernel reads the
+    same input, so it keeps the same int8 range."""
+    c = copy.deepcopy(ref)
+    c.weight = nn.Parameter(weight.detach().clone())
+    c.bias = nn.Parameter(bias.detach().clone())
     return c
 
 
