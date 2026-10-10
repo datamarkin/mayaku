@@ -33,9 +33,9 @@ pytestmark = pytest.mark.slow
 def scene(seg=False):
     """One image, three objects at three scales, each painted in its own
     channel so the network can key on it. With `seg` every object's mask is
-    its filled box: the target table gains a has_mask column and the stride-8
-    instance raster comes back too, painted by the dataset's own
-    `Polys.raster`."""
+    its filled box: the target table gains a has_mask column and the
+    full-resolution instance map comes back too, painted by the dataset's own
+    `Polys.paint`."""
     x = torch.zeros(1, 3, SIZE, SIZE)
     for i, (x1, y1, x2, y2) in enumerate(BOXES.long().tolist()):
         x[0, i % 3, y1:y2, x1:x2] = 1.0
@@ -44,8 +44,8 @@ def scene(seg=False):
         return x, targets, None
     polys = Polys.from_coco([[[x1, y1, x2, y1, x2, y2, x1, y2]]
                              for x1, y1, x2, y2 in BOXES.tolist()])
-    raster, _ = polys.raster(targets[:, 1:].numpy(), (SIZE, SIZE))
-    return x, torch.cat((targets, torch.ones(3, 1)), 1), torch.from_numpy(raster)[None]
+    inst, _ = polys.paint(targets[:, 1:].numpy(), (SIZE, SIZE))
+    return x, torch.cat((targets, torch.ones(3, 1)), 1), torch.from_numpy(inst)[None]
 
 
 def overfit(tier=TINY, cls_loss="bce", warmup=3, qat=True, targets=None, steps=STEPS):
@@ -104,16 +104,18 @@ def test_mask_branch_learns() -> None:
     _, (_, parts), preds = overfit(tier)
     assert min(best_ious(preds, tier)) > 0.70
     assert parts["seg"] < 0.5, "mask loss did not fall"
-    raster = scene(seg=True)[2][0]
+    inst = scene(seg=True)[2]
     grp = split_outputs(preds, seg=True)
+    s = masklib.stride_of(grp["mask"], grp["head"][0])
     cls, _, boxes, points, stride, _ = decode_head(grp["head"], NC, tier.reg_max)
     ker = masklib.flatten_ker(grp["ker"])[0]
     for c in range(3):
         a = cls[0, :, c].argmax()
         lg = masklib.assemble(grp["mask"][0], ker[a][None], points[a][None],
-                              stride[a][None], boxes[0, a][None])[0]
+                              stride[a][None], boxes[0, a][None], s)[0]
         m = torch.isfinite(lg) & (lg > 0)
-        gt = raster == c + 1
+        gt = masklib.coverage(inst, torch.zeros(1, dtype=torch.long), torch.tensor([c + 1]),
+                              s).view(lg.shape) >= 0.5
         assert ((m & gt).sum() / (m | gt).sum().clamp(min=1)).item() > 0.5, c
 
 

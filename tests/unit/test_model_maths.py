@@ -123,7 +123,7 @@ def test_dyn_conv_matches_hand_computation() -> None:
     feat = torch.randn(p, MASK_CH, h * w)
     pts = torch.tensor([[12.0, 20.0], [44.0, 36.0], [80.0, 8.0]])
     st = torch.tensor([[8.0], [16.0], [8.0]])
-    coords = rel_coords(pts, st, h, w)
+    coords = rel_coords(pts, st, h, w, 8)
     j, i = int(pts[0, 0] // 8), int(pts[0, 1] // 8)
     assert coords[0, :, i * w + j].abs().max() < 0.5 / (COORD_SCALE * 8) * 8 + 1e-6
     out = dyn_conv(feat, coords, k)
@@ -143,10 +143,10 @@ def test_assemble_crops_and_maps_back_to_the_image() -> None:
     h, w = 10, 12
     k = torch.randn(1, KERNEL_PARAMS)
     lg = assemble(torch.randn(MASK_CH, h, w), k, torch.tensor([[12.0, 20.0]]),
-                  torch.tensor([[8.0]]), torch.tensor([[8.0, 8.0, 24.0, 24.0]]))
+                  torch.tensor([[8.0]]), torch.tensor([[8.0, 8.0, 24.0, 24.0]]), 8)
     inside = torch.isfinite(lg[0])
     assert inside.sum() == 4 and inside[1:3, 1:3].all()
-    up = to_canvas(lg)
+    up = to_canvas(lg, 8)
     assert up.shape == (1, 1, h * 8, w * 8)
     m = unletterbox_maps(up, {"pad": (0, 0), "ratio": 1.0, "shape": (72, 96)})[:, 0] > 0
     assert m.shape == (1, 72, 96) and not m[0, :6, :6].any()

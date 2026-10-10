@@ -70,19 +70,22 @@ def pad_targets(targets, batch):
 class SegLoss(nn.Module):
     """Dice on every box positive's mask, through the dynamic kernels.
 
-    As in RTMDet-Ins: the loss is computed on the full stride-8 map, not a box
+    As in RTMDet-Ins: the loss is computed on the full mask map, not a box
     crop, so the kernels also learn to say "not me" around the object; all
     task-aligned positives feed it; at most `cap` positives per batch are
     kept (at random) so a crowded batch cannot blow the step's memory (the
-    gathered features are P x 8 x H8*W8). Instances without a mask
-    (`has_mask` 0: crowd RLE, box-only data) are left out.
+    gathered features are P x 8 x Q). The target of a cell is the share of it
+    the instance covers (`mayaku.model.mask.coverage`); Dice is minimised
+    exactly at that share, and the host's bilinear upsample then puts the
+    boundary inside the cell. Instances without a mask (`has_mask` 0: crowd
+    RLE, box-only data) are left out.
     """
 
     def __init__(self, cap=250):
         super().__init__()
         self.cap = cap
 
-    def forward(self, mask_feat, kers, a, points, stride, masks, has_mask):
+    def forward(self, mask_feat, kers, a, points, stride, masks, has_mask, mask_stride):
         _, c, h, w = mask_feat.shape
         kflat = masklib.flatten_ker(kers)
         owner = a.owner
@@ -95,10 +98,13 @@ class SegLoss(nn.Module):
             return mask_feat.sum() * 0, 0
         k = kflat[bi, ni]                                        # (P, 169)
         feat = mask_feat[bi].reshape(len(bi), c, -1)             # (P, 8, Q)
-        coords = masklib.rel_coords(points[ni], stride[ni], h, w, dtype=feat.dtype)
+        coords = masklib.rel_coords(points[ni], stride[ni], h, w, mask_stride, dtype=feat.dtype)
         logits = masklib.dyn_conv(feat, coords, k)               # (P, Q)
-        slot = owner[bi, ni]
-        gt = masks[bi].reshape(len(bi), -1) == (slot + 1)[:, None]
+        # soft targets: the share of each mask cell the instance covers, from
+        # the full-resolution map; once per instance, though several of its
+        # positives (up to the assigner's top-k) are in the batch
+        key, inv = torch.unique(bi * 256 + owner[bi, ni] + 1, return_inverse=True)
+        gt = masklib.coverage(masks, key // 256, key % 256, mask_stride)[inv]
         return masklib.dice(logits, gt).mean(), len(bi)
 
 
@@ -211,8 +217,8 @@ class DetectionLoss(nn.Module):
     def forward(self, preds, targets, epoch=0, masks=None):
         """preds: the model's tensors, head first. targets: (n, 6 + E) rows of
         [image, class, x1, y1, x2, y2, has_mask?, keypoints...] in pixels.
-        masks: (B, H/8, W/8) uint8 instance index map (row + 1) when the model
-        has a mask branch. Returns (total, parts)."""
+        masks: (B, H, W) uint8 full-resolution instance index map (row + 1)
+        when the model has a mask branch. Returns (total, parts)."""
         pd_cls, pd_dist, pd_boxes, points, stride, shapes = decode_head(
             preds, self.nc, self.reg_max)
         b = pd_cls.shape[0]
@@ -272,7 +278,8 @@ class DetectionLoss(nn.Module):
         has_mask, gt_kpts = split_extras(extras, self.seg is not None, self.k)
         if self.seg is not None and masks is not None and has_mask is not None:
             seg, n = self.seg(grp["mask"], grp["ker"], a, points, stride,
-                              masks.to(device, non_blocking=True), has_mask)
+                              masks.to(device, non_blocking=True), has_mask,
+                              masklib.stride_of(grp["mask"], grp["head"][0]))
             aux = aux + self.seg_gain * seg
             parts["seg"], parts["mask_pos"] = seg.detach(), n
         if self.kpt is not None and gt_kpts is not None:

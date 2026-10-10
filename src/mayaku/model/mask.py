@@ -1,21 +1,23 @@
 """The per-instance mask head, owned once.
 
-The graph emits an 8-channel stride-8 mask feature and, per anchor, 169
+The graph emits an 8-channel mask feature at stride s (8, or 4 with
+`Tier.mask_stride`; `stride_of` reads it off the tensors) and, per anchor, 169
 numbers that are the weights and biases of a three-layer 1x1 network
 (8+2 -> 8 -> 8 -> 1, ReLU between). The host prepends two relative-coordinate
 channels and runs that network over the detection's box. Nothing here is in
 the deploy graph; this file is what the loss, the evaluator and any host
 decoder must agree on.
 
-Coordinates: cell (i, j) of the stride-8 map covers image pixels
-[8j, 8j+8) x [8i, 8i+8) and its centre is the stride-8 anchor point, the same
-convention as `mayaku.model.box.anchor_grid`.
+Coordinates: cell (i, j) of the stride-s map covers image pixels
+[sj, sj+s) x [si, si+s) and its centre is at ((j + .5) s, (i + .5) s), the
+same convention as `mayaku.model.box.anchor_grid`.
 """
 
 import torch
 import torch.nn.functional as F
 
-from mayaku.model.aux import KERNEL_LAYOUT, KERNEL_PARAMS, MASK_CH, MASK_STRIDE
+from mayaku.model.aux import KERNEL_LAYOUT, KERNEL_PARAMS, MASK_CH
+from mayaku.model.blocks import STRIDES
 from mayaku.model.box import anchor_grid, flatten_levels
 
 # Relative coordinates are scaled by this many strides of the anchor's level,
@@ -42,11 +44,17 @@ def split_kernels(k):
     return out
 
 
-def rel_coords(points, stride, h, w, dtype=None):
+def stride_of(mask_feat, head0):
+    """The mask feature's stride, from its size and the finest head map's."""
+    return head0.shape[-2] * STRIDES[0] // mask_feat.shape[-2]
+
+
+def rel_coords(points, stride, h, w, mask_stride, dtype=None):
     """(P, 2) anchor points, (P, 1) strides -> (P, 2, h*w) relative coordinates
-    of every stride-8 cell centre, in units of COORD_SCALE * stride."""
+    of every cell centre of the stride-`mask_stride` map, in units of
+    COORD_SCALE * stride."""
     dtype = dtype or points.dtype
-    grid = anchor_grid([(h, w)], [MASK_STRIDE], device=points.device, dtype=dtype)[0].T  # (2, Q)
+    grid = anchor_grid([(h, w)], [mask_stride], device=points.device, dtype=dtype)[0].T  # (2, Q)
     scale = (COORD_SCALE * stride).to(dtype)                       # (P, 1)
     return (grid[None] - points.to(dtype)[:, :, None]) / scale[:, :, None]
 
@@ -68,39 +76,58 @@ def dyn_conv(feat, coords, kernels):
 
 
 def dice(logits, target, eps=5e-6):
-    """Per-instance Dice loss on logits, in fp32. (P, Q) -> (P,)."""
+    """Per-instance Dice loss on logits against hard or soft targets, in
+    fp32; zero exactly when sigmoid(logits) equals the target. (P, Q) -> (P,)."""
     p = logits.float().sigmoid()
     t = target.float()
     inter = (p * t).sum(1)
     return 1 - (2 * inter + eps) / ((p * p).sum(1) + (t * t).sum(1) + eps)
 
 
-def crop_cells(boxes, h, w):
-    """xyxy pixel boxes -> inclusive-exclusive cell rectangles on the stride-8
-    map, as (x0, y0, x1, y1) long tensors clamped to the map."""
-    x0 = (boxes[:, 0] / MASK_STRIDE).floor().long().clamp(0, w - 1)
-    y0 = (boxes[:, 1] / MASK_STRIDE).floor().long().clamp(0, h - 1)
-    x1 = torch.maximum((boxes[:, 2] / MASK_STRIDE).ceil().long(), x0 + 1).clamp(max=w)
-    y1 = torch.maximum((boxes[:, 3] / MASK_STRIDE).ceil().long(), y0 + 1).clamp(max=h)
+def coverage(inst, img, ids, stride, chunk=64):
+    """Each instance's exact share of every mask cell: its soft target.
+
+    inst (B, H, W) uint8 full-resolution instance map (row + 1, from
+    `mayaku.data.polygons.Polys.paint`), img (P,) image index, ids (P,) the
+    instance's value in that image -> (P, H/s * W/s) float in [0, 1]. Two
+    instances sharing a cell each get their own fraction. Chunked: a chunk
+    holds `chunk` full-resolution boolean maps.
+    """
+    _, h, w = inst.shape
+    assert h % stride == 0 and w % stride == 0, (inst.shape, stride)
+    out = [F.avg_pool2d((inst[img[c:c + chunk]] == ids[c:c + chunk, None, None].to(inst.dtype))
+                        [:, None].float(), stride).flatten(1)
+           for c in range(0, len(img), chunk)]
+    return torch.cat(out) if out else inst.new_zeros(0, (h // stride) * (w // stride), dtype=torch.float)
+
+
+def crop_cells(boxes, h, w, mask_stride):
+    """xyxy pixel boxes -> inclusive-exclusive cell rectangles on the
+    stride-`mask_stride` map, as (x0, y0, x1, y1) long tensors clamped to it."""
+    s = mask_stride
+    x0 = (boxes[:, 0] / s).floor().long().clamp(0, w - 1)
+    y0 = (boxes[:, 1] / s).floor().long().clamp(0, h - 1)
+    x1 = torch.maximum((boxes[:, 2] / s).ceil().long(), x0 + 1).clamp(max=w)
+    y1 = torch.maximum((boxes[:, 3] / s).ceil().long(), y0 + 1).clamp(max=h)
     return x0, y0, x1, y1
 
 
 @torch.no_grad()
-def assemble(mask_feat, kernels, points, stride, boxes):
+def assemble(mask_feat, kernels, points, stride, boxes, mask_stride):
     """Full-map logits per detection, -inf outside the detection's box
     (cropped at cell granularity), so a threshold at 0 never fires there.
 
-    mask_feat (8, H8, W8), kernels (n, 169), points (n, 2), stride (n, 1),
-    boxes (n, 4) xyxy letterbox pixels -> logits (n, H8, W8).
+    mask_feat (8, Hs, Ws), kernels (n, 169), points (n, 2), stride (n, 1),
+    boxes (n, 4) xyxy letterbox pixels -> logits (n, Hs, Ws).
     """
     n = len(kernels)
     _, h, w = mask_feat.shape
     if n == 0:
         return mask_feat.new_zeros(0, h, w)
-    coords = rel_coords(points, stride, h, w, dtype=mask_feat.dtype)
+    coords = rel_coords(points, stride, h, w, mask_stride, dtype=mask_feat.dtype)
     logits = dyn_conv(mask_feat[None].expand(n, -1, -1, -1).reshape(n, MASK_CH, -1),
                       coords, kernels).view(n, h, w)
-    x0, y0, x1, y1 = crop_cells(boxes, h, w)
+    x0, y0, x1, y1 = crop_cells(boxes, h, w, mask_stride)
     ys = torch.arange(h, device=logits.device)[None, :, None]
     xs = torch.arange(w, device=logits.device)[None, None, :]
     inside = ((ys >= y0[:, None, None]) & (ys < y1[:, None, None])
@@ -108,10 +135,10 @@ def assemble(mask_feat, kernels, points, stride, boxes):
     return logits.masked_fill(~inside, float("-inf"))
 
 
-def to_canvas(logits):
-    """(n, H8, W8) crop logits -> (n, 1, H, W) logits over the whole canvas,
-    upsampled x8 bilinearly, so the boundary is interpolated rather than
+def to_canvas(logits, mask_stride):
+    """(n, Hs, Ws) crop logits -> (n, 1, H, W) logits over the whole canvas,
+    upsampled bilinearly, so the boundary is interpolated rather than
     blocky. Undo the letterbox with `mayaku.data.geometry.unletterbox_maps`
     and threshold at 0 for masks in the original image."""
-    canvas = (logits.shape[-2] * MASK_STRIDE, logits.shape[-1] * MASK_STRIDE)
+    canvas = (logits.shape[-2] * mask_stride, logits.shape[-1] * mask_stride)
     return F.interpolate(logits[:, None].float(), size=canvas, mode="bilinear", align_corners=False)

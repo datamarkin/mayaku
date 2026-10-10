@@ -19,7 +19,6 @@ from mayaku.backends.ops.nms import batched_nms
 from mayaku.data.geometry import unletterbox, unletterbox_maps
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
-from mayaku.model.aux import MASK_STRIDE
 from mayaku.model.box import decode_head
 from mayaku.model.detector import split_outputs
 
@@ -121,6 +120,7 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=No
     grp = split_outputs(preds, seg=seg, kpt=kpt)
     # flatten the aux maps once for the whole batch, not per image
     kflat = masklib.flatten_ker(grp["ker"]) if seg else None
+    ms = masklib.stride_of(grp["mask"], grp["head"][0]) if seg else None
     kpflat = kptlib.flatten_kpt(grp["kpt"], kpt) if kpt else None
     out = []
     for b, meta in enumerate(metas):
@@ -132,14 +132,14 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=No
         if seg:
             h, w = meta["shape"]
             # the larger of the canvas and the original frame bounds a chunk
-            canvas_px = grp["mask"][b][0].numel() * MASK_STRIDE ** 2
+            canvas_px = grp["mask"][b][0].numel() * ms ** 2
             step = max(1, MASK_BUDGET // max(h * w, canvas_px))
             parts = []
             for c in range(0, len(det), step):
                 k = ai[c:c + step]
                 lg = masklib.assemble(grp["mask"][b].float(), kflat[b][k].float(),
-                                      points[k], stride[k], box[c:c + step])
-                m = unletterbox_maps(masklib.to_canvas(lg), meta)[:, 0] > 0
+                                      points[k], stride[k], box[c:c + step], ms)
+                m = unletterbox_maps(masklib.to_canvas(lg, ms), meta)[:, 0] > 0
                 parts += encode_mask(m) if encode_mask else [m.cpu()]
             if encode_mask:
                 r.masks = parts

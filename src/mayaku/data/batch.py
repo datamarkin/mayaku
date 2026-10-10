@@ -10,8 +10,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from mayaku.model.aux import MASK_STRIDE
-
 
 def split_extras(extras, seg, k):
     """(..., E) tail columns -> (has_mask (...) or None, keypoints (..., 3k)
@@ -56,8 +54,9 @@ def collate(batch):
     """-> images (B, 3, H, W) uint8, targets (n, 6 + E), metas, masks.
 
     The target rows are exactly what the loss takes, so nothing between here
-    and the loss reshapes labels. `masks` is the (B, H/8, W/8) uint8 instance
-    raster when the dataset carries masks, else None.
+    and the loss reshapes labels. `masks` is the (B, H, W) uint8 instance map
+    (`mayaku.data.polygons.Polys.paint`) when the dataset carries masks, else
+    None.
     """
     rows = [torch.cat((torch.full((len(b["labels"]), 1), float(i)), b["labels"]), 1)
             for i, b in enumerate(batch) if len(b["labels"])]
@@ -75,8 +74,10 @@ def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
     The dataset renders at the operating point, the maximum; this downscales
     the batch, so there is only ever one resize and it never invents detail.
     Box and keypoint x / y scale by the same per-axis ratios as the image, and
-    the stride-8 instance raster resizes nearest so its integer indices
-    survive. Coordinates stay in pixels of the resized batch.
+    the full-resolution instance map resizes nearest so its integer indices
+    survive -- "nearest-exact", the pixel-centre rule; plain "nearest" floors
+    and drifts the map up-left. Coordinates stay in pixels of the resized
+    batch.
     """
     h, w = size
     H, W = imgs.shape[-2:]
@@ -94,7 +95,5 @@ def rescale_batch(imgs, targets, masks, size, seg=False, kpt=0):
             xyv[..., 0] *= rx
             xyv[..., 1] *= ry
     if masks is not None:
-        masks = F.interpolate(masks[:, None].float(),
-                              size=(h // MASK_STRIDE, w // MASK_STRIDE),
-                              mode="nearest")[:, 0].to(masks.dtype)
+        masks = F.interpolate(masks[:, None], size=(h, w), mode="nearest-exact")[:, 0]
     return imgs, targets, masks

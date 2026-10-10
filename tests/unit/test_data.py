@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import dataclasses
 
-import cv2
 import numpy as np
 import pytest
 import torch
@@ -14,7 +13,7 @@ from mayaku.data import CLEAN_AUG, DEFAULT_AUG, Augment, CocoDetection, batch_to
 from mayaku.data.batch import rescale_batch, to_tensor
 from mayaku.data.coco import COCO_FLIP_PAIRS, flip_pairs
 from mayaku.data.geometry import keep, letterbox, unletterbox
-from mayaku.data.polygons import Polys
+from mayaku.data.polygons import Polys, fill_spans
 
 from ._coco_fixture import SYNTH_KPT, fixture, synthetic_coco
 
@@ -111,19 +110,19 @@ def test_masks_and_keypoints_follow_their_boxes(coco, canvas, aug) -> None:
     for i in range(32):
         s = ds[i % len(ds)]
         t, m = s["labels"].numpy(), s["masks"].numpy()
-        assert t.shape[1] == 6 + 3 * SYNTH_KPT and m.shape == (h // 8, w // 8)
+        assert t.shape[1] == 6 + 3 * SYNTH_KPT and m.shape == (h, w)
         for row in range(len(t)):
             if not t[row, 5]:
                 continue
             x1, y1, x2, y2 = t[row, 1:5]
             box = np.zeros_like(m)
             corners = np.float32([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
-            cv2.fillPoly(box, [np.round(corners).astype(np.int32)], 1, shift=3)
+            fill_spans(box, corners, np.int32([0, 4]), 1)
             inst = m == row + 1
             covered = box.astype(bool) & ((m == 0) | inst)   # minus nearer instances
             union = (inst | covered).sum()
             if union == 0:
-                continue                                      # a sub-cell sliver
+                continue                                      # a sub-pixel sliver
             worst_iou = min(worst_iou, (inst & covered).sum() / union)
             kp = t[row, 6:].reshape(SYNTH_KPT, 3)
             vis = kp[:, 2] > 0
@@ -139,17 +138,17 @@ def test_masks_and_keypoints_follow_their_boxes(coco, canvas, aug) -> None:
 
 
 @pytest.mark.parametrize("canvas", CANVASES)
-def test_rescale_batch_moves_boxes_keypoints_and_raster(coco, canvas) -> None:
+def test_rescale_batch_moves_boxes_keypoints_and_instance_map(coco, canvas) -> None:
     ds = _dataset(coco, canvas=canvas, aug=DEFAULT_AUG, seed=2, masks=True, kpt=SYNTH_KPT)
     imgs, t, _, m = collate([ds[i] for i in range(4)])
     h, w = ds.canvas
-    # [image, class, box, has_mask, 3K keypoints] rows; a uint8 stride-8 raster
-    assert imgs.dtype == m.dtype == torch.uint8 and m.shape == (4, h // 8, w // 8)
+    # [image, class, box, has_mask, 3K keypoints] rows; a full-resolution uint8 map
+    assert imgs.dtype == m.dtype == torch.uint8 and m.shape == (4, h, w)
     assert t.shape[1] == 7 + 3 * SYNTH_KPT
     imgs = imgs.float() / 255
     size = (h // 2, w // 2)
     ri, rt, rm = rescale_batch(imgs, t.clone(), m.clone(), size, seg=True, kpt=SYNTH_KPT)
-    assert ri.shape == (4, 3, *size) and rm.shape == (4, size[0] // 8, size[1] // 8)
+    assert ri.shape == (4, 3, *size) and rm.shape == (4, *size) and rm.dtype == torch.uint8
     rx, ry = size[1] / w, size[0] / h
     assert torch.allclose(rt[:, [2, 4]], t[:, [2, 4]] * rx, atol=1e-3)
     assert torch.allclose(rt[:, [3, 5]], t[:, [3, 5]] * ry, atol=1e-3)
@@ -181,8 +180,9 @@ def test_rle_segmentation_becomes_a_polygon() -> None:
     p = Polys.from_coco([rle, None])
     assert list(p.has) == [True, False]
     xy = p.parts(0)[0]
-    assert xy[:, 0].min() == 20 and xy[:, 0].max() == 49
-    assert xy[:, 1].min() == 10 and xy[:, 1].max() == 29
+    # around the mask's pixels, in continuous coordinates: [20, 50) x [10, 30)
+    assert xy[:, 0].min() == 20 and xy[:, 0].max() == 50
+    assert xy[:, 1].min() == 10 and xy[:, 1].max() == 30
 
 
 def test_unreadable_images_are_skipped_in_training(tmp_path) -> None:

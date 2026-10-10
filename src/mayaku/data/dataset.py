@@ -175,17 +175,17 @@ class CocoDetection(Dataset):
         return img, self._table(boxes, polys, kp)
 
     def _table(self, boxes, polys, kp):
-        """The sample's label table and its stride-8 instance raster: columns
-        [class, x1, y1, x2, y2] then, when carried, has_mask and the 3K
-        keypoint values (`mayaku.data.batch.split_extras` order). The
-        raster's value at a cell is row + 1."""
-        cols, raster = [boxes], None
+        """The sample's label table and its full-resolution instance map:
+        columns [class, x1, y1, x2, y2] then, when carried, has_mask and the
+        3K keypoint values (`mayaku.data.batch.split_extras` order). The
+        map's value at a pixel is row + 1 (`Polys.paint`)."""
+        cols, inst = [boxes], None
         if self.masks:
-            raster, has = polys.raster(boxes, self.canvas)
+            inst, has = polys.paint(boxes, self.canvas)
             cols.append(has[:, None].astype(np.float32))
         if self.kpt:
             cols.append(kp)
-        return (np.concatenate(cols, 1) if len(cols) > 1 else boxes), raster
+        return (np.concatenate(cols, 1) if len(cols) > 1 else boxes), inst
 
     def __getitem__(self, i):
         if self.aug is None:
@@ -195,11 +195,11 @@ class CocoDetection(Dataset):
             assert img is not None, "eval image missing: %s" % self.coco.files[i]
             meta = {"id": self.coco.ids[i], "ratio": r, "pad": pad,
                     "shape": tuple(int(v) for v in self.coco.shapes[i])}
-            boxes, raster = self._table(*self.labels_at(i, r, pad))
+            boxes, inst = self._table(*self.labels_at(i, r, pad))
         else:
-            img, (boxes, raster) = self.train_item(i)
+            img, (boxes, inst) = self.train_item(i)
             meta = None
         out = {"img": to_tensor(img), "labels": torch.from_numpy(boxes), "meta": meta}
-        if raster is not None:
-            out["masks"] = torch.from_numpy(raster)
+        if inst is not None:
+            out["masks"] = torch.from_numpy(inst)
         return out

@@ -449,6 +449,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
             it = epoch * len(loader) + i
             lr = set_lr(opt, r, epoch, it, warmup_iters)
             imgs = batch_to(imgs, device)
+            if masks is not None:               # still pinned: an async copy
+                masks = masks.to(device, non_blocking=True)
             if ms_sizes:                        # multi-scale: one size per batch
                 s = ms_sizes[torch.randint(len(ms_sizes), (1,)).item()]
                 imgs, targets, masks = rescale_batch(
