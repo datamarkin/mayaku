@@ -101,3 +101,44 @@ def test_evaluate_with_masks_and_keypoints(tmp_path, canvas) -> None:
     m = Detector(dataclasses.replace(TINY, seg=True, kpt=3), ev.nc).eval()
     out = evaluate(m, ev, batch=4)
     assert "segm_AP" in out and "kpt_AP" in out
+
+
+def test_mask_decode_is_chunk_invariant(monkeypatch) -> None:
+    """Masks upsampled a few detections at a time, and RLE-encoded per chunk,
+    match the masks decoded all at once."""
+    import mayaku.inference.decode as dec
+    from mayaku.engine.evaluation import rle, rle_batch
+
+    torch.manual_seed(0)
+    model = Detector(dataclasses.replace(TINY, seg=True), 3, (64, 96)).eval()
+    with torch.no_grad():
+        preds = model(torch.rand(2, 3, 64, 96))
+    metas = [{"ratio": 1.0, "pad": (0, 0), "shape": (64, 96)},
+             {"ratio": 0.5, "pad": (0, 8), "shape": (96, 192)}]
+    whole = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True)
+    assert all(len(d) > 3 for d in whole)
+    monkeypatch.setattr(dec, "MASK_BUDGET", 1)          # one detection per chunk
+    chunked = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True)
+    encoded = dec.decode(preds, metas, 3, model.cfg.reg_max, seg=True, encode_mask=rle_batch)
+    for w, c, e in zip(whole, chunked, encoded, strict=True):
+        assert torch.equal(w.masks, c.masks)
+        assert [rle(m) for m in w.masks] == e.masks
+
+
+def test_rle_batch_equals_pycocotools() -> None:
+    """Edge cases for the device-side run lengths: empty, full, masks that
+    start or end on a set pixel, single pixels, random blobs."""
+    from mayaku.engine.evaluation import rle, rle_batch
+
+    g = torch.Generator().manual_seed(0)
+    h, w = 7, 5
+    m = torch.zeros(8, h, w, dtype=torch.bool)
+    m[1] = True
+    m[2, 0, 0] = True
+    m[3, -1, -1] = True
+    m[4, :, 0] = True
+    m[5, 2:5, 1:3] = True
+    m[6:] = torch.rand(2, h, w, generator=g) > 0.5
+    assert rle_batch(m) == [rle(x) for x in m]
+    big = torch.rand(3, 61, 47, generator=g) > 0.7
+    assert rle_batch(big) == [rle(x) for x in big]

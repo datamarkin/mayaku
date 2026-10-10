@@ -19,6 +19,7 @@ from mayaku.backends.ops.nms import batched_nms
 from mayaku.data.geometry import unletterbox, unletterbox_maps
 from mayaku.model import kpt as kptlib
 from mayaku.model import mask as masklib
+from mayaku.model.aux import MASK_STRIDE
 from mayaku.model.box import decode_head
 from mayaku.model.detector import split_outputs
 
@@ -51,13 +52,20 @@ class Decode:
 
 DEPLOY = Decode()
 
+# Masks are upsampled to the original image a chunk of detections at a time,
+# each chunk's float maps held to this many elements (512 MB): one large
+# image (Objects365 has 42-megapixel ones) times 300 detections would
+# otherwise ask for tens of GB at once.
+MASK_BUDGET = 1 << 27
+
 
 @dataclasses.dataclass
 class Detections:
     """One image's detections in its original pixels, on the CPU.
 
     boxes (n, 4) xyxy float32, scores (n,), labels (n,) int64 class indices;
-    masks (n, h, w) bool when the model segments; keypoints (n, K, 3) as
+    masks (n, h, w) bool when the model segments (or, when `decode` got an
+    `encode_mask`, a list of its encoding of each mask); keypoints (n, K, 3) as
     (x, y, visibility probability) when it has keypoints.
     """
 
@@ -100,11 +108,14 @@ def postprocess(preds, nc, reg_max, d=DEPLOY):
 
 
 @torch.no_grad()
-def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY):
+def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY, encode_mask=None):
     """The model's flat output list for a batch -> one `Detections` per image.
 
     `metas` are the letterbox metas ({"ratio", "pad", "shape"}) of the batch's
     images; everything returned is mapped back to those original frames.
+    `encode_mask`, given, turns each chunk of (n, h, w) bool masks, still on
+    the device, into a list of what `masks` holds (the evaluator's RLE), so
+    full-resolution masks never all exist at once, or cross to the host.
     """
     dets, idxs, points, stride = postprocess(preds, nc, reg_max, d)
     grp = split_outputs(preds, seg=seg, kpt=kpt)
@@ -120,12 +131,20 @@ def decode(preds, metas, nc, reg_max, seg=False, kpt=0, d=DEPLOY):
         ai = idxs[b]
         if seg:
             h, w = meta["shape"]
-            if len(det):
-                lg = masklib.assemble(grp["mask"][b].float(), kflat[b][ai].float(),
-                                      points[ai], stride[ai], box)
-                r.masks = (unletterbox_maps(masklib.to_canvas(lg), meta)[:, 0] > 0).cpu()
+            # the larger of the canvas and the original frame bounds a chunk
+            canvas_px = grp["mask"][b][0].numel() * MASK_STRIDE ** 2
+            step = max(1, MASK_BUDGET // max(h * w, canvas_px))
+            parts = []
+            for c in range(0, len(det), step):
+                k = ai[c:c + step]
+                lg = masklib.assemble(grp["mask"][b].float(), kflat[b][k].float(),
+                                      points[k], stride[k], box[c:c + step])
+                m = unletterbox_maps(masklib.to_canvas(lg), meta)[:, 0] > 0
+                parts += encode_mask(m) if encode_mask else [m.cpu()]
+            if encode_mask:
+                r.masks = parts
             else:
-                r.masks = torch.zeros(0, h, w, dtype=torch.bool)
+                r.masks = torch.cat(parts) if parts else torch.zeros(0, h, w, dtype=torch.bool)
         if kpt:
             if len(det):
                 heat, off = grp["heat"][b, :kpt].float(), grp["heat"][b, kpt:].float()

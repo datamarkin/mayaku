@@ -44,10 +44,37 @@ def rle(mask):
     return r
 
 
+def rle_batch(masks):
+    """(n, h, w) bool masks on any device -> their COCO RLEs, equal to `rle`
+    of each. The run boundaries are found where the masks live, in COCO's
+    column-major order, so only the change points cross to the host; the
+    full-resolution transpose and copy were most of a segmenting model's
+    evaluation time."""
+    from pycocotools import mask as maskutil
+    n, h, w = masks.shape
+    flat = masks.transpose(1, 2).reshape(n, h * w)
+    # a run starts at pixel p when it differs from pixel p - 1, and at pixel
+    # 0 when that is set (runs alternate from 0s); sorted by mask, then pixel
+    row, pos = (flat[:, 1:] != flat[:, :-1]).nonzero(as_tuple=True)
+    first = flat[:, 0].nonzero()[:, 0]
+    key = torch.cat((row * (h * w) + pos + 1, first * (h * w))).sort().values
+    row, pos = (key // (h * w)).cpu().numpy(), (key % (h * w)).cpu().numpy()
+    ends = np.searchsorted(row, np.arange(n + 1))
+    out = []
+    for k in range(n):
+        p = pos[ends[k]:ends[k + 1]]
+        counts = np.diff(np.concatenate(([0], p, [h * w]))).tolist()
+        r = maskutil.frPyObjects({"size": [h, w], "counts": counts}, h, w)
+        r["counts"] = r["counts"].decode("ascii")
+        out.append(r)
+    return out
+
+
 def to_coco_segm(det, image_id, cat_ids):
     """One image's `Detections` with masks -> COCO segm result records (RLE)."""
     return [{"image_id": image_id, "category_id": cat_ids[int(det.labels[k])],
-             "segmentation": rle(det.masks[k]), "score": float(det.scores[k])}
+             "segmentation": m if isinstance(m := det.masks[k], dict) else rle(m),
+             "score": float(det.scores[k])}
             for k in range(len(det))]
 
 
@@ -133,7 +160,9 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
     def detections():
         for imgs, _, metas, _ in loader:
             preds = model(batch_to(imgs, device))
-            dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d)
+            # masks RLE-encoded chunk by chunk: never a whole image's at once
+            dets = decode(preds, metas, model.nc, model.cfg.reg_max, seg, kpt, d,
+                          encode_mask=rle_batch if seg else None)
             yield from ((meta["id"], det) for meta, det in zip(metas, dets, strict=True))
 
     try:
