@@ -15,7 +15,7 @@ its centre at ((j + 0.5) * 8, (i + 0.5) * 8).
 
 import torch
 
-from mayaku.model.aux import MASK_STRIDE
+from mayaku.model.aux import AUX_STRIDE
 from mayaku.model.box import flatten_levels
 
 # COCO's per-keypoint falloff constants (nose ... ankles). Any other K gets a
@@ -56,7 +56,7 @@ def encode(xy, points, stride):
 def cells(xy):
     """Pixel points -> (col, row) of the stride-8 cell holding them, and the
     sub-cell offset in [-0.5, 0.5) from that cell's centre."""
-    c = xy / MASK_STRIDE - 0.5
+    c = xy / AUX_STRIDE - 0.5
     idx = c.round()
     return idx.long(), c - idx
 
@@ -84,12 +84,12 @@ def gaussian_targets(xy, vis, boxes, k, h, w):
     bw = boxes[b, m]                                                    # (n, 4)
     side = ((bw[:, 2] - bw[:, 0]) * (bw[:, 3] - bw[:, 1])).clamp(min=1).sqrt()
     # spread in cells: a tenth of the object's side, at least most of a cell
-    sig = (0.1 * side / MASK_STRIDE).clamp(0.75, 3.0)                   # (n,)
+    sig = (0.1 * side / AUX_STRIDE).clamp(0.75, 3.0)                   # (n,)
     # The Gaussian is negligible past ~3 sigma and sigma <= 3 cells, so paint
     # it in a fixed (2R+1) window around each keypoint's cell rather than over
     # the whole map (CenterNet's radius trick).
     R = HEAT_RADIUS
-    cx, cy = (p[:, 0] / MASK_STRIDE - 0.5), (p[:, 1] / MASK_STRIDE - 0.5)
+    cx, cy = (p[:, 0] / AUX_STRIDE - 0.5), (p[:, 1] / AUX_STRIDE - 0.5)
     d = torch.arange(-R, R + 1, device=device, dtype=torch.float32)
     wy, wx = torch.meshgrid(d, d, indexing="ij")                       # (W, W)
     ax = idx[:, 0, None, None] + wx                                    # (n, W, W)
@@ -152,8 +152,8 @@ def snap(xy, vis, heat, off, boxes, radius=2, tau=0.1):
     best = vals.argmax(-1, keepdim=True)
     bx, by = wx.gather(-1, best)[..., 0], wy.gather(-1, best)[..., 0]
     pk = vals.gather(-1, best)[..., 0]
-    px = (bx.float() + 0.5 + off[0, by, bx]) * MASK_STRIDE
-    py = (by.float() + 0.5 + off[1, by, bx]) * MASK_STRIDE
+    px = (bx.float() + 0.5 + off[0, by, bx]) * AUX_STRIDE
+    py = (by.float() + 0.5 + off[1, by, bx]) * AUX_STRIDE
     inside = ((px >= boxes[:, None, 0]) & (px <= boxes[:, None, 2])
               & (py >= boxes[:, None, 1]) & (py <= boxes[:, None, 3]))
     use = (pk > tau) & inside

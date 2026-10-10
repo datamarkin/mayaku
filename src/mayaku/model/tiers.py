@@ -24,6 +24,7 @@ class Tier:
     kpt: int = 0                    # keypoints per instance (0 = none)
     aux_arm: str = "box_tower"      # per-anchor aux outputs read from: "box_tower" | "tower"
     aux_width: int = 64             # trunk width of the aux branch (and of its own towers)
+    mask_stride: int = 8            # stride of the mask feature: 8 (the trunk's) or 4
 
     def __post_init__(self):
         n = len(STRIDES)
@@ -34,6 +35,7 @@ class Tier:
         assert self.head_width >= 0 and self.head_conv >= 1
         assert self.aux_arm in ("box_tower", "tower"), self.aux_arm
         assert self.kpt >= 0 and self.aux_width >= 8
+        assert self.mask_stride in (4, 8), self.mask_stride
 
 
 # Widths are multiples of 32. Depth and width are pushed toward the coarse

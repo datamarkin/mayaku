@@ -1,7 +1,9 @@
 """Mask targets: the exact pixel-centre painter, the RLE round trip, soft
-coverage and multi-scale alignment."""
+coverage, multi-scale alignment, and the stride-4 mask feature."""
 
 from __future__ import annotations
+
+import dataclasses
 
 import numpy as np
 import torch
@@ -9,7 +11,11 @@ from pycocotools import mask as mask_util
 
 from mayaku.data.batch import rescale_batch
 from mayaku.data.polygons import Polys, fill_spans, rle_to_polygons
-from mayaku.model.mask import coverage
+from mayaku.model.aux import MASK_KEYS
+from mayaku.model.contract import check_parity
+from mayaku.model.detector import Detector, load_pretrained
+from mayaku.model.mask import coverage, stride_of
+from mayaku.model.tiers import TINY
 
 
 def _inside(h, w, parts):
@@ -125,3 +131,19 @@ def test_multi_scale_resize_keeps_the_map_centred() -> None:
         errs.append((cen[0] - cen[1]).abs().max().item())
     assert max(errs) < 0.05
 
+
+def test_stride4_mask_feature_is_in_contract_and_warm_starts_from_stride8() -> None:
+    s8 = Detector(dataclasses.replace(TINY, seg=True), 3, (64, 96)).eval()
+    s4 = Detector(dataclasses.replace(TINY, seg=True, mask_stride=4), 3, (64, 96)).eval()
+    with torch.no_grad():
+        x = torch.rand(1, 3, 64, 96)
+        g8, g4 = s8.split(s8(x)), s4.split(s4(x))
+    assert g8["mask"].shape[-2:] == (8, 12) and g4["mask"].shape[-2:] == (16, 24)
+    assert stride_of(g8["mask"], g8["head"][0]) == 8 and stride_of(g4["mask"], g4["head"][0]) == 4
+    assert s4.deploy_spec()["mask"]["stride"] == 4
+    info = load_pretrained(s4, s8.state_dict())
+    assert info["missing"] and all(k.startswith(MASK_KEYS) and k not in s8.state_dict()
+                                   for k in info["missing"])
+    assert sorted(info["unexpected"]) == ["aux.mask.bias", "aux.mask.weight"]
+    _, _, inv = check_parity(s4, (64, 96))
+    assert set(inv) <= {"Conv", "Relu", "Add", "Resize", "MaxPool"}

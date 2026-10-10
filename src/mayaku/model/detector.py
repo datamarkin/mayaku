@@ -31,7 +31,8 @@ class Detector(nn.Module):
         if cfg.seg or cfg.kpt:
             self.aux = AuxBranch(per_level(cfg.neck, len(STRIDES)), self.head.widths,
                                  seg=cfg.seg, kpt=cfg.kpt,
-                                 arm=cfg.aux_arm, width=cfg.aux_width)
+                                 arm=cfg.aux_arm, width=cfg.aux_width,
+                                 mask_stride=cfg.mask_stride, stem=cfg.stem)
 
     def split(self, preds):
         """`forward`'s flat list -> named groups."""
@@ -48,11 +49,12 @@ class Detector(nn.Module):
         return r + (self.aux.readouts() if self.aux else [])
 
     def forward(self, x):
-        feats = self.neck(self.backbone(x))
+        stem, feats = self.backbone(x)
+        feats = self.neck(feats)
         cb = self.head.towers(feats)
         out = self.head.readout(cb)
         if self.aux is not None:
-            out = out + self.aux(feats, [b for _, b in cb])
+            out = out + self.aux(feats, [b for _, b in cb], stem)
         return out
 
     def fuse(self):
@@ -73,7 +75,7 @@ class Detector(nn.Module):
         plain JSON: their names in order, the strides and DFL bins the box
         decode uses, the mask and keypoint decode constants when those heads
         exist, and whether the weights were trained quantization-aware."""
-        from mayaku.model.aux import KERNEL_LAYOUT, MASK_CH, MASK_STRIDE
+        from mayaku.model.aux import KERNEL_LAYOUT, MASK_CH
         from mayaku.model.kpt import sigma_values
         from mayaku.model.mask import COORD_SCALE
         from mayaku.model.quant import is_qat
@@ -83,7 +85,7 @@ class Detector(nn.Module):
             "strides": list(STRIDES),
             "reg_max": self.cfg.reg_max,
             "qat": is_qat(self),
-            "mask": {"stride": MASK_STRIDE, "channels": MASK_CH, "coord_scale": COORD_SCALE,
+            "mask": {"stride": self.cfg.mask_stride, "channels": MASK_CH, "coord_scale": COORD_SCALE,
                      "kernel_layout": [list(layer) for layer in KERNEL_LAYOUT]} if self.cfg.seg else None,
             "keypoints": {"num": self.cfg.kpt, "sigmas": list(sigma_values(self.cfg.kpt))}
                          if self.cfg.kpt else None,

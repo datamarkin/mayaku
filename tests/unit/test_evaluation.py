@@ -103,14 +103,15 @@ def test_evaluate_with_masks_and_keypoints(tmp_path, canvas) -> None:
     assert "segm_AP" in out and "kpt_AP" in out
 
 
-def test_mask_decode_is_chunk_invariant(monkeypatch) -> None:
+@pytest.mark.parametrize("mask_stride", [8, 4])
+def test_mask_decode_is_chunk_invariant(monkeypatch, mask_stride) -> None:
     """Masks upsampled a few detections at a time, and RLE-encoded per chunk,
     match the masks decoded all at once."""
     import mayaku.inference.decode as dec
     from mayaku.engine.evaluation import rle, rle_batch
 
     torch.manual_seed(0)
-    model = Detector(dataclasses.replace(TINY, seg=True), 3, (64, 96)).eval()
+    model = Detector(dataclasses.replace(TINY, seg=True, mask_stride=mask_stride), 3, (64, 96)).eval()
     with torch.no_grad():
         preds = model(torch.rand(2, 3, 64, 96))
     metas = [{"ratio": 1.0, "pad": (0, 0), "shape": (64, 96)},

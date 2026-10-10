@@ -6,8 +6,9 @@ from mayaku.model.blocks import Bottleneck, RepConv3x3, SPPFAdd, Stem
 
 
 class Backbone(nn.Module):
-    """Returns the three stage outputs, fine to coarse; the coarsest passes
-    through the concat-free spatial pyramid pooling."""
+    """Returns the stride-4 stem output (the stride-4 mask feature reads it)
+    and the three stage outputs, fine to coarse; the coarsest passes through
+    the concat-free spatial pyramid pooling."""
 
     def __init__(self, cfg):
         super().__init__()
@@ -21,10 +22,10 @@ class Backbone(nn.Module):
         self.sppf = SPPFAdd(cfg.width[-1])
 
     def forward(self, x):
-        x = self.stem(x)
+        x = stem = self.stem(x)
         outs = []
         for down, stage in zip(self.down, self.stages, strict=True):
             x = stage(down(x))
             outs.append(x)
         outs[-1] = self.sppf(outs[-1])
-        return outs
+        return stem, outs

@@ -79,6 +79,7 @@ class ModelConfig(_BaseModel):
     seg: bool = False
     keypoints: KeypointConfig | None = None
     aux_arm: Literal["box_tower", "tower"] = "box_tower"
+    mask_stride: Literal[4, 8] = 8
     qat: bool | None = None
 
     @property
@@ -96,7 +97,7 @@ class ModelConfig(_BaseModel):
         """The `mayaku.model.tiers.Tier` this config builds."""
         return dataclasses.replace(TIERS[self.tier], seg=self.seg,
                                    kpt=self.keypoints.num if self.keypoints else 0,
-                                   aux_arm=self.aux_arm)
+                                   aux_arm=self.aux_arm, mask_stride=self.mask_stride)
 
     def build(self, canvas: int | tuple[int, int], num_classes: int | None = None) -> Detector:
         """The detector this config describes, quantization-aware when
