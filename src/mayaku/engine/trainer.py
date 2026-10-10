@@ -403,6 +403,9 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
                                      drop_last=True)
 
     def make_loader():
+        # one OpenCV thread per data worker (default: one per core each, which
+        # costs ~6% loader speed on 2 x 8 workers); workers read it at fork
+        os.environ.setdefault("OPENCV_FOR_THREADS_NUM", "1")
         return DataLoader(train_ds, batch_size=r.batch // world, shuffle=sampler is None,
                           sampler=sampler, num_workers=workers, collate_fn=collate,
                           drop_last=True, pin_memory=device.startswith("cuda"),
