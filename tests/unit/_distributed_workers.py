@@ -83,6 +83,9 @@ def ddp_grad_parity(out_dir: str, kind: str) -> None:
     on the whole batch."""
     rank, world = get_rank(), get_world_size()
     device = local_device(kind)
+    # cuDNN convolutions default to TF32, ~1e-2 off the fp32 CPU reference;
+    # the parity is of the reduction, so both sides compute in fp32
+    torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = False
     net = parity_model(device)
     model = DistributedDataParallel(net, device_ids=[torch.device(device).index]
                                     if kind == "cuda" else None)
