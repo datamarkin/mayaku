@@ -87,7 +87,7 @@ def test_warm_start_takes_the_architecture_from_the_checkpoint(run, data, tmp_pa
     assert out["metrics"] is None and out["final_weights"].name == "last.pt"
     _, cfg, _ = read_deploy_checkpoint(out["final_weights"])
     # the checkpoint's qat=False carried over; the fine-tune recipe was applied
-    assert cfg.model.qat is False and cfg.train.lr == 2e-3
+    assert cfg.model.qat is False and cfg.train.assigner_warmup == 0
 
 
 @pytest.mark.slow

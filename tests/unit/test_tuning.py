@@ -9,7 +9,7 @@ from mayaku.config import KeypointConfig, MayakuConfig, ModelConfig
 from mayaku.data.coco import load_coco
 from mayaku.health import health_check
 from mayaku.tuning import AUTO_PATHS, analyze_dataset, apply_auto_config, collect_set_paths
-from mayaku.tuning.recipe import MAX_FINETUNE_EPOCHS, MIN_FINETUNE_EPOCHS, _finetune_epochs
+from mayaku.tuning.recipe import FINETUNE_EPOCHS
 
 from ._coco_fixture import synthetic_coco
 
@@ -29,17 +29,14 @@ def test_stats_measure_boxes_on_the_canvas(coco) -> None:
     assert raw.class_imbalance >= 1.0 and raw.num_degenerate_boxes == 0
 
 
-def test_epoch_taper() -> None:
-    assert _finetune_epochs(100) == MAX_FINETUNE_EPOCHS
-    assert _finetune_epochs(100_000) == MIN_FINETUNE_EPOCHS
-    assert MIN_FINETUNE_EPOCHS < _finetune_epochs(5_000) < MAX_FINETUNE_EPOCHS
-
-
 def test_auto_config_fills_structure_and_the_finetune_recipe(coco) -> None:
     cfg, _ = apply_auto_config(MayakuConfig(), coco)
     assert cfg.model.num_classes == 4 and cfg.input.canvas_hw is not None
-    assert cfg.train.epochs == MAX_FINETUNE_EPOCHS and cfg.train.final_epochs == 6
+    assert cfg.train.epochs == FINETUNE_EPOCHS and cfg.train.final_epochs == 20
     assert cfg.train.assigner_warmup == 0
+    # the learning rate and warmup stay the recipe's own
+    assert cfg.train.lr == MayakuConfig().train.lr
+    assert cfg.train.warmup_epochs == MayakuConfig().train.warmup_epochs
 
 
 @pytest.mark.parametrize("model", [ModelConfig(), ModelConfig(keypoints=KeypointConfig(num=3))],
@@ -77,7 +74,7 @@ def test_user_values_always_win(coco) -> None:
 def test_a_pinned_clean_stage_survives_a_derived_run_length(coco) -> None:
     raw = {"train": {"final_frac": 0.5}}
     cfg, _ = apply_auto_config(MayakuConfig.model_validate(raw), coco, collect_set_paths(raw))
-    assert cfg.train.epochs == MAX_FINETUNE_EPOCHS and cfg.train.final_epochs == 15
+    assert cfg.train.epochs == FINETUNE_EPOCHS and cfg.train.final_epochs == 50
 
 
 def test_disabled_fills_only_what_a_model_needs(coco) -> None:

@@ -50,7 +50,7 @@ almost 2 hours.
 
 - **Fine-tunes fast.** Highest mean AP on RF100-VL's 100 custom datasets, reaching the
   other libraries' accuracy in a fraction of their training time — see above. `auto_config`
-  adapts the recipe (schedule, LR, augmentation) to your dataset size automatically.
+  adapts the recipe (schedule, augmentation) to your dataset size automatically.
 - **Objects365-pretrained.** Base models are pretrained on a large, detection-native dataset
   (365 classes), a broad starting point for transfer.
 - **UniQuery head.** Anchor-free, NMS-free, with image-conditioned query generation (QGN)

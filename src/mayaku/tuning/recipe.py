@@ -8,8 +8,10 @@ Two kinds of override, both skipped for any field the user set explicitly:
   annotations define.
 * **The fine-tune recipe**, applied only when training starts from pretrained
   weights and the dataset has at least `MIN_IMAGES_FOR_AUTO_CONFIG` images:
-  run length, the clean final stage, augmentation strength, learning rate and
-  warmup, keyed on dataset size. A from-scratch run keeps its recipe.
+  run length, the clean final stage, the assigner and, on small datasets,
+  mosaic strength. Everything else, the learning rate and warmup included,
+  stays the recipe's own (`mayaku.engine.trainer.Recipe`). A from-scratch run
+  keeps its recipe.
 
 With ``auto_config.enabled`` False nothing is tuned, but a model cannot be
 built without a class count and a canvas: left unset, they are filled plainly
@@ -20,13 +22,12 @@ Auto-config adapts the run to the data; it never changes the model or its
 loss. The only fields it may set are listed in `AUTO_PATHS`, and a test holds
 every override to that list.
 
-The fine-tune numbers below are starting points carried over from mayaku 2.x
-and are to be re-tuned on RF100-VL for this detector.
+The fine-tune numbers below follow babasu's measured recipe. The mosaic
+strength on small datasets is carried over from mayaku 2.x and still open.
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Collection, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Final
 
@@ -48,48 +49,31 @@ AUTO_PATHS: Final = frozenset({
     "input.canvas_hw",
     "train.epochs",
     "train.final_frac",
-    "train.lr",
-    "train.warmup_epochs",
     "train.assigner_warmup",
     "train.aug.mosaic",
-    "train.aug.mixup",
 })
 
 #: Below this image count there is too little signal to pick a fine-tune
 #: schedule; only the structural facts are applied.
 MIN_IMAGES_FOR_AUTO_CONFIG: Final = 10
 
-# Fine-tune run length: a log taper from MAX epochs on small sets to MIN on
-# large ones, so total training work still grows with the data.
-MIN_FINETUNE_EPOCHS: Final = 16
-MAX_FINETUNE_EPOCHS: Final = 30
-_EPOCH_TAPER_IMG_LO: Final = 1_000
-_EPOCH_TAPER_IMG_HI: Final = 20_000
-
-# Fine-tune learning rate at the recipe's `lr_ref_batch`, and a one-epoch
-# warmup. Starting from pretrained weights the predictions already mean
-# something, so the task-aligned assigner runs from the first epoch.
-FINETUNE_LR: Final = 2.0e-3
-FINETUNE_WARMUP_EPOCHS: Final = 1.0
+# Fine-tune run length, at any dataset size (babasu, YOLO and RF-DETR all
+# fine-tune for 100 epochs).
+FINETUNE_EPOCHS: Final = 100
 
 # The share of the run, at the end, trained on clean (mosaic-free) images.
+# Starting from pretrained weights the predictions already mean something, so
+# the task-aligned assigner runs from the first epoch. Both measured better
+# than the from-scratch values (0.16, 5 ATSS epochs) for warm starts.
 FINETUNE_FINAL_FRAC: Final = 0.2
 
-# (upper exclusive image count, mosaic probability, mixup probability)
-_AUG_BY_SIZE: Final = (
-    (500, 0.1, 0.0),
-    (2_000, 0.2, 0.0),
-    (5_000, 0.3, 0.0),
-    (math.inf, 0.5, 0.1),
+# (upper exclusive image count, mosaic probability) for small datasets, carried
+# over from mayaku 2.x; larger ones keep the recipe's own augmentation.
+_MOSAIC_BY_SIZE: Final = (
+    (500, 0.1),
+    (2_000, 0.2),
+    (5_000, 0.3),
 )
-
-
-def _finetune_epochs(num_images: int) -> int:
-    """MAX epochs up to 1,000 images, MIN from 20,000, log-linear between."""
-    t = (math.log(max(1, num_images)) - math.log(_EPOCH_TAPER_IMG_LO)) / (
-        math.log(_EPOCH_TAPER_IMG_HI) - math.log(_EPOCH_TAPER_IMG_LO))
-    t = min(1.0, max(0.0, t))
-    return round(MAX_FINETUNE_EPOCHS - t * (MAX_FINETUNE_EPOCHS - MIN_FINETUNE_EPOCHS))
 
 
 def _structural(coco: CocoLabels, cfg: MayakuConfig) -> dict[str, Any]:
@@ -124,15 +108,12 @@ def _finetune(num_images: int) -> dict[str, Any]:
     `MIN_IMAGES_FOR_AUTO_CONFIG`."""
     if num_images < MIN_IMAGES_FOR_AUTO_CONFIG:
         return {}
-    mosaic, mixup = next((m, x) for upper, m, x in _AUG_BY_SIZE if num_images < upper)
-    return {"train": {
-        "epochs": _finetune_epochs(num_images),
-        "final_frac": FINETUNE_FINAL_FRAC,
-        "lr": FINETUNE_LR,
-        "warmup_epochs": FINETUNE_WARMUP_EPOCHS,
-        "assigner_warmup": 0,
-        "aug": {"mosaic": mosaic, "mixup": mixup},
-    }}
+    train: dict[str, Any] = {"epochs": FINETUNE_EPOCHS, "final_frac": FINETUNE_FINAL_FRAC,
+                             "assigner_warmup": 0}
+    mosaic = next((m for upper, m in _MOSAIC_BY_SIZE if num_images < upper), None)
+    if mosaic is not None:
+        train["aug"] = {"mosaic": mosaic}
+    return {"train": train}
 
 
 def apply_auto_config(cfg: MayakuConfig, coco: CocoLabels, user_set_paths: Collection[str] = (),
