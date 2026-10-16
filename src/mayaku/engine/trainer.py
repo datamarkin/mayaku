@@ -100,7 +100,9 @@ class Recipe:
     # maximum) and downscaled to a random rung of
     # `mayaku.data.canvas.multi_scale_canvases`: the canvas aspect, long side
     # stepping by 32 from `multiscale` up. Eval always runs at the canvas.
-    multiscale: int = 0
+    # On by default: 640 to 800 on the default budget, so a model holds up
+    # when deployed below the canvas it was trained at.
+    multiscale: int = 640
     # auxiliary heads: the Dice loss weight and the positive cap for masks.
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
     seg_gain: float = 2.0
@@ -414,8 +416,11 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
 
     loader = make_loader()
     # multi-scale training downscales each batch from the rendered canvas
-    # (the maximum) to a random rung of the ladder; empty = fixed
+    # (the maximum) to a random rung of the ladder; empty = fixed, as on a
+    # canvas no larger than `multiscale` (the ladder is the canvas alone)
     ms_sizes = multi_scale_canvases(canvas, r.multiscale) if r.multiscale else []
+    if len(ms_sizes) < 2:
+        ms_sizes = []
     if ms_sizes and out:
         log("multi-scale training over %s" % ms_sizes)
     warmup_iters = max(round(r.warmup_epochs * len(loader)), r.warmup_iters_min)
