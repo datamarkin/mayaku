@@ -2,4 +2,6 @@
 
 from mayaku.cli.main import main
 
-main()
+# guarded: multi-GPU training spawns processes that re-import the main module
+if __name__ == "__main__":
+    main()
