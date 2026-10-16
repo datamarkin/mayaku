@@ -3,7 +3,7 @@
 Each test overfits one synthetic image. That is a weak test of accuracy and a
 strong test of wiring: if the anchor ordering, the distance encoding, the
 assignment and the loss terms disagree anywhere, a single image will not fit.
-The detection runs train quantization-aware, the path the small tiers ship.
+The detection runs train quantization-aware, the default every tier ships.
 """
 
 from __future__ import annotations

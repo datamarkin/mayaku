@@ -32,19 +32,20 @@ def test_defaults() -> None:
     assert c.auto_config.enabled
 
 
-@pytest.mark.parametrize(("tier", "qat"), [("n", True), ("s", True), ("m", False), ("l", False)])
-def test_qat_defaults_per_tier_and_explicit_wins(tier, qat) -> None:
-    assert ModelConfig(tier=tier).qat_enabled is qat
-    assert ModelConfig(tier=tier, qat=not qat).qat_enabled is (not qat)
+@pytest.mark.parametrize("tier", ["n", "s", "m", "l"])
+def test_qat_is_on_by_default_on_every_tier_and_explicit_wins(tier) -> None:
+    assert ModelConfig(tier=tier).qat is True
+    assert ModelConfig(tier=tier, qat=None).qat is True       # older configs say null
+    assert ModelConfig(tier=tier, qat=False).qat is False
 
 
 @pytest.mark.parametrize(("tier", "qat"), [("n", True), ("m", False)])
 def test_build_makes_the_described_detector(tier, qat) -> None:
-    m = ModelConfig(tier=tier, num_classes=3).build(640)
+    m = ModelConfig(tier=tier, num_classes=3, qat=qat).build(640)
     assert m.cfg == TIERS[tier] and m.nc == 3 and is_qat(m) is qat
-    assert ModelConfig(tier=tier).build(640, num_classes=5).nc == 5
+    assert ModelConfig(tier=tier, qat=qat).build(640, num_classes=5).nc == 5
     with pytest.raises(ValueError, match="num_classes"):
-        ModelConfig(tier=tier).build(640)
+        ModelConfig(tier=tier, qat=qat).build(640)
 
 
 def test_to_tier_carries_the_heads() -> None:

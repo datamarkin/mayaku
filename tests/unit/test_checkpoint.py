@@ -42,19 +42,19 @@ def test_sidecar_describes_the_deploy_contract() -> None:
     assert s["decode"]["strides"] == [8, 16, 32] and s["decode"]["reg_max"] == 16
     assert s["preprocess"]["pad_value"] == 114 and s["preprocess"]["channels"] == "RGB"
     assert s["mask"] is None and s["keypoints"] is None
-    assert s["quant"]["qat"] is True                     # tier n builds quantization-aware
+    assert s["quant"]["qat"] is True                     # every tier builds quantization-aware
     assert s["provenance"]["run"] == "unit" and "mayaku_version" in s["provenance"]
     json.dumps(s)                                        # every value is plain JSON
 
 
 def test_sidecar_carries_mask_and_keypoint_decode_constants() -> None:
     kp = KeypointConfig(num=3, names=("left_a", "right_a", "c"), flip_pairs=((0, 1),))
-    s = _sidecar(_cfg(tier="m", seg=True, keypoints=kp))
+    s = _sidecar(_cfg(tier="m", seg=True, keypoints=kp, qat=False))
     assert s["outputs"] == output_names(seg=True, kpt=3)
     assert s["mask"]["kernel_layout"] == [[10, 8], [8, 8], [8, 1]] and s["mask"]["stride"] == 8
     assert s["keypoints"] == {"num": 3, "sigmas": [0.05] * 3,
                               "names": ["left_a", "right_a", "c"], "flip_pairs": [[0, 1]]}
-    assert s["quant"]["qat"] is False                    # tier m builds fp32
+    assert s["quant"]["qat"] is False                    # qat=False builds fp32
 
 
 def test_sidecar_reports_the_model_not_the_config() -> None:

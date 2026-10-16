@@ -218,7 +218,7 @@ def train(
         "tier": cfg.model.tier,
         "num_classes": cfg.model.num_classes,
         "canvas_hw": list(canvas),
-        "qat": cfg.model.qat_enabled,
+        "qat": cfg.model.qat,
         "epochs": cfg.train.epochs,
         "batch": cfg.train.batch,
         "world_size": world,

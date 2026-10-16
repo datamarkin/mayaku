@@ -57,7 +57,7 @@ def test_train_writes_a_complete_run(run) -> None:
     meta = json.loads((train_dir / "metadata.json").read_text())
     assert meta["canvas_hw"][0] <= 96 and meta["num_classes"] == 4 and meta["epochs"] == 2
     sidecar, cfg, _ = read_deploy_checkpoint(run["final_weights"])
-    assert sidecar["class_names"] == ["c0", "c1", "c2", "c3"] and not cfg.model.qat_enabled
+    assert sidecar["class_names"] == ["c0", "c1", "c2", "c3"] and not cfg.model.qat
     # user values survive auto-config
     assert cfg.input.size_budget == 96 and cfg.train.epochs == 2 and cfg.train.batch == 4
 
@@ -86,9 +86,9 @@ def test_warm_start_takes_the_architecture_from_the_checkpoint(run, data, tmp_pa
                        device="cpu", log=lambda *_: None)
     assert out["metrics"] is None and out["final_weights"].name == "last.pt"
     _, cfg, _ = read_deploy_checkpoint(out["final_weights"])
-    # a float base (qat=False) still fine-tunes at the tier's QAT default;
+    # a float base (qat=False) still fine-tunes quantization-aware;
     # the fine-tune recipe was applied
-    assert cfg.model.qat is None and cfg.model.qat_enabled
+    assert cfg.model.qat is True
     assert cfg.train.assigner_warmup == 0
 
 

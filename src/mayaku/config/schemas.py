@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mayaku.engine.trainer import Recipe
 from mayaku.model import Detector, enable_qat
 from mayaku.model.blocks import as_canvas
-from mayaku.model.tiers import QAT_TIERS, TIERS, Tier
+from mayaku.model.tiers import TIERS, Tier
 
 __all__ = [
     "AutoConfig",
@@ -69,9 +69,8 @@ class ModelConfig(_BaseModel):
     """Which network: a tier of the family, its heads, and its classes.
 
     `num_classes` None means "take it from the training annotations".
-    `qat` None means the tier's default: quantization-aware for the small
-    tiers (`mayaku.model.tiers.QAT_TIERS`, whose targets are int8-only
-    accelerators), fp32 training for fp16 deployment otherwise.
+    `qat` trains quantization-aware, on every tier by default, so each model
+    deploys in int8 as well as float; False trains float only.
     """
 
     tier: TierName = "n"
@@ -80,17 +79,19 @@ class ModelConfig(_BaseModel):
     keypoints: KeypointConfig | None = None
     aux_arm: Literal["box_tower", "tower"] = "box_tower"
     mask_stride: Literal[4, 8] = 8
-    qat: bool | None = None
+    qat: bool = True
 
-    @property
-    def qat_enabled(self) -> bool:
-        return self.qat if self.qat is not None else self.tier in QAT_TIERS
+    @field_validator("qat", mode="before")
+    @classmethod
+    def _qat_default(cls, v: bool | None) -> bool:
+        # configs written before QAT was the default on every tier say null
+        return True if v is None else v
 
     def architecture(self) -> ModelConfig:
         """Only the network's structure, which a warm start keeps; everything
         else -- what the training data decided (class count, keypoint names)
         and how it was trained (`qat`) -- starts from the defaults, so a base
-        pretrained in float still fine-tunes at the tier's QAT default."""
+        pretrained in float still fine-tunes int8-aware."""
         kp = self.keypoints
         return ModelConfig(tier=self.tier, seg=self.seg, aux_arm=self.aux_arm,
                            mask_stride=self.mask_stride,
@@ -104,13 +105,13 @@ class ModelConfig(_BaseModel):
 
     def build(self, canvas: int | tuple[int, int], num_classes: int | None = None) -> Detector:
         """The detector this config describes, quantization-aware when
-        `qat_enabled`: QAT changes the graph (and the checkpoint's keys), so
+        `qat`: QAT changes the graph (and the checkpoint's keys), so
         a model is built with it before training or loading weights."""
         nc = num_classes if num_classes is not None else self.num_classes
         if nc is None:
             raise ValueError("model.num_classes is unset; pass num_classes")
         model = Detector(self.to_tier(), nc, canvas)
-        return enable_qat(model) if self.qat_enabled else model
+        return enable_qat(model) if self.qat else model
 
 
 class InputConfig(_BaseModel):
