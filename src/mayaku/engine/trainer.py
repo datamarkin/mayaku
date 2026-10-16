@@ -95,13 +95,13 @@ class Recipe:
     # Lower values let lower-IoU small positives rank.
     tal_beta: float = 6.0
     loc_weight_floor: float = 0.0   # floor the box/DFL loss weight (0 = off)
-    # Multi-scale training: the smallest long side, 0 = off. When set, every
-    # batch is rendered at the dataset's canvas (the operating point, the
-    # maximum) and downscaled to a random rung of
-    # `mayaku.data.canvas.multi_scale_canvases`: the canvas aspect, long side
-    # stepping by 32 from `multiscale` up. Eval always runs at the canvas.
-    # On by default: 640 to 800 on the default budget, so a model holds up
-    # when deployed below the canvas it was trained at.
+    # Multi-scale training: the smallest size budget, 0 = off. When set,
+    # every batch is rendered at the dataset's canvas (the operating point,
+    # the maximum) and downscaled to a random rung of
+    # `mayaku.data.canvas.multi_scale_canvases`: the canvas each budget from
+    # `multiscale` up to the canvas's gives at the canvas aspect. Eval always
+    # runs at the canvas. On by default: budgets 640 to 800 on the default
+    # budget, so a model holds up when deployed below its training canvas.
     multiscale: int = 640
     # auxiliary heads: the Dice loss weight and the positive cap for masks.
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
@@ -417,7 +417,8 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
     loader = make_loader()
     # multi-scale training downscales each batch from the rendered canvas
     # (the maximum) to a random rung of the ladder; empty = fixed, as on a
-    # canvas no larger than `multiscale` (the ladder is the canvas alone)
+    # canvas no larger than a `multiscale` budget gives (the ladder is the
+    # canvas alone)
     ms_sizes = multi_scale_canvases(canvas, r.multiscale) if r.multiscale else []
     if len(ms_sizes) < 2:
         ms_sizes = []

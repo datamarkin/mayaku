@@ -64,7 +64,9 @@ def test_square_ladder_steps_the_side_by_32() -> None:
 def test_rectangular_ladder_keeps_the_aspect_and_ends_on_the_canvas() -> None:
     deploy = (576, 1024)
     ladder = multi_scale_canvases(deploy, 512)
-    assert ladder[-1] == deploy and ladder[0] == (288, 512)
+    assert ladder[-1] == deploy and ladder[0] == snap_max_content(512 * 512, 16 / 9)
+    # the bottom rung is the canvas a 640 budget gives this data
+    assert multi_scale_canvases(deploy, 640)[0] == (480, 832)
     areas = [h * w for h, w in ladder]
     assert areas == sorted(areas) and len(set(ladder)) == len(ladder)
     assert all(h % 32 == 0 and w % 32 == 0 and h * w <= 576 * 1024 for h, w in ladder)

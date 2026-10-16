@@ -111,22 +111,27 @@ def canvas_for_data(shapes: Shapes, size_budget: int) -> tuple[int, int]:
     return snap_max_content(size_budget * size_budget, aspect if uniform else 1.0)
 
 
-def multi_scale_canvases(deploy_canvas: tuple[int, int], min_long: int) -> list[tuple[int, int]]:
+def multi_scale_canvases(deploy_canvas: tuple[int, int], min_budget: int) -> list[tuple[int, int]]:
     """Training canvases for multi-scale, anchored on the deploy canvas.
 
-    The long edge steps by ``CANVAS_ALIGN`` from ``min_long`` (floored to the grid)
-    up to the deploy canvas's; each rung is the max-content canvas at the
-    deploy aspect with the area that long edge implies, and the top rung is
-    exactly ``deploy_canvas``, so train geometry equals deploy geometry at
-    full scale. On a square canvas the rungs are the squares
-    ``min_long, min_long + 32, ..., side``. Ascending, de-duplicated.
+    ``min_budget`` is a size budget like ``size_budget``: each rung is the
+    canvas :func:`snap_max_content` resolves at the deploy aspect for a budget
+    stepping by ``CANVAS_ALIGN`` from ``min_budget`` up, so a 16:9 deploy
+    canvas of 576x1024 (budget 800) starts at 480x832 for 640, the canvas a
+    640 budget gives that data. Rungs stop below the deploy canvas's area,
+    and the top rung is exactly ``deploy_canvas``, so train geometry equals
+    deploy geometry at full scale. On a square canvas the rungs are the
+    squares ``min_budget, min_budget + 32, ..., side``. Ascending,
+    de-duplicated.
     """
     h, w = deploy_canvas
-    long_edge = max(h, w)
     area, aspect = h * w, w / h
-    lo = max(CANVAS_ALIGN, (min_long // CANVAS_ALIGN) * CANVAS_ALIGN)
     canvases = {(h, w)}
-    for side in range(lo, long_edge, CANVAS_ALIGN):
-        frac = side / long_edge
-        canvases.add(snap_max_content(max(CANVAS_ALIGN ** 2, int(area * frac * frac)), aspect))
+    budget = max(CANVAS_ALIGN, min_budget)
+    while True:
+        rung = snap_max_content(budget * budget, aspect)
+        if rung[0] * rung[1] >= area:
+            break
+        canvases.add(rung)
+        budget += CANVAS_ALIGN
     return sorted(canvases, key=lambda c: c[0] * c[1])
