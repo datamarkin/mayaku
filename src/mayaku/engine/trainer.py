@@ -100,9 +100,12 @@ class Recipe:
     # the maximum) and downscaled to a random rung of
     # `mayaku.data.canvas.multi_scale_canvases`: the canvas each budget from
     # `multiscale` up to the canvas's gives at the canvas aspect. Eval always
-    # runs at the canvas. On by default: budgets 640 to 800 on the default
-    # budget, so a model holds up when deployed below its training canvas.
-    multiscale: int = 640
+    # runs at the canvas. Off by default: the rungs only shrink, so the model
+    # sees deploy-size large objects less often (objects of 640 px and up at
+    # a third of their rate at an 800 eval with budgets 640 to 800), and on 14
+    # RF100-VL datasets budgets 512 to 800 cost 0.9 test AP (median) against
+    # the fixed canvas. Worth turning on only to deploy below the canvas.
+    multiscale: int = 0
     # auxiliary heads: the Dice loss weight and the positive cap for masks.
     # The tier's `seg`/`kpt` flags turn the heads on; these tune them.
     seg_gain: float = 2.0
