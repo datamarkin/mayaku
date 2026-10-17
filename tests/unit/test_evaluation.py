@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from mayaku.data.geometry import unletterbox
-from mayaku.engine.evaluation import coco_ap, evaluate, to_coco, to_coco_segm
+from mayaku.engine.evaluation import coco_ap, evaluate, score, to_coco, to_coco_segm
 from mayaku.inference.decode import DEPLOY, Detections, postprocess
 from mayaku.model import STRIDES, TINY, Detector
 
@@ -88,6 +88,16 @@ def test_postprocess_decodes_a_planted_object(multi_label, hw, cell) -> None:
     dets, idxs, _, _ = postprocess(preds, nc, reg_max, d)
     assert len(dets[0]) == 1 and idxs[0].tolist() == [cell[0] * (hw[1] // 8) + cell[1]]
     assert (dets[0][0] - want).abs().max().item() < 0.05
+
+
+def test_subset_scoring_counts_only_the_images_run(ds) -> None:
+    """Perfect detections on the first images, scored as a subset, are AP 1:
+    the images that were not run must not count as misses."""
+    n = len(ds) // 2
+    pairs = [(ds.ids[i], _as_detections(torch.from_numpy(ds.labels[i]))) for i in range(n)]
+    sub = score(ds.ann_path, pairs, ds.cat_ids, image_ids=ds.ids[:n])
+    full = score(ds.ann_path, pairs, ds.cat_ids)
+    assert sub["AP"] > 0.99 and full["AP"] < 0.9
 
 
 def test_evaluate_runs_end_to_end(ds) -> None:

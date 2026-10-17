@@ -11,8 +11,11 @@ int8 one (`qdq_export`: the trained ranges as quantize / dequantize ops);
 `deploy_mode` picks between them.
 
 The observed ranges are statistics of the weights they were observed with,
-like BatchNorm's running statistics, so whenever those weights change without
-the observers seeing it (an EMA copy) they are recomputed with
+like BatchNorm's running statistics. A trained model keeps its trained
+ranges: the network learned to work within them, and min / max over clean
+images can be set by a single outlier channel (see
+`mayaku.engine.trainer.recalibrate`). Only layers that never trained with
+ranges (a freshly attached head) get them from data, with
 `recalibrate_ranges`, after BatchNorm is recalibrated.
 """
 
@@ -82,9 +85,15 @@ class ActFakeQuant(nn.Module):
                 self.mn.mul_(self.momentum).add_((1 - self.momentum) * cmn)
                 self.mx.mul_(self.momentum).add_((1 - self.momentum) * cmx)
         scale, zp = self.qparams()
-        xq = torch.clamp(torch.round(x / scale) + zp, self.qmin, self.qmax)
-        xdq = (xq - zp) * scale
-        return x + (xdq - x).detach()
+        # One fused kernel whose gradient is straight-through inside the range
+        # and zero outside it: the int8 output of a clipped value does not
+        # move with it, so neither may its gradient. An identity STE through
+        # the clamp keeps pushing a clipped value the loss wants larger while
+        # the forward never improves, and the float activation runs away (one
+        # COCO P5 channel: 92 -> 4205 over 34 epochs). Clipped STE as in Yin
+        # et al. 2019, arXiv 1903.05662.
+        return torch.fake_quantize_per_tensor_affine(
+            x, scale.reshape(1), zp.reshape(1).int(), self.qmin, self.qmax)
 
     def qparams(self):
         """(scale, zero point) of the int8 grid over the observed range, as
@@ -223,11 +232,11 @@ def ranges_frozen(model):
 
 @torch.no_grad()
 def recalibrate_ranges(model, batches):
-    """Recompute every activation range for the model's own weights.
+    """Compute every activation range from data, for layers that never
+    trained with ranges (a freshly attached head). A trained model keeps
+    its trained ranges instead (module docstring).
 
-    The counterpart of BatchNorm recalibration: an EMA of the weights, or any
-    model whose weights moved since its ranges were observed, carries ranges
-    that describe other weights. Every observer is reset and its range
+    Every observer is reset and its range
     recomputed as the cumulative mean of per-batch min / max over `batches`,
     with BatchNorm in eval mode, so the ranges describe exactly the
     activations that evaluation and export will see. Recalibrate BatchNorm

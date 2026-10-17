@@ -6,8 +6,11 @@ import copy
 
 import torch
 
+from mayaku.engine.trainer import recalibrate
 from mayaku.model import TINY, Detector, enable_qat
 from mayaku.model.quant import ActFakeQuant, ranges_frozen, recalibrate_ranges
+
+from ._coco_fixture import fixture
 
 
 def _qat_model() -> Detector:
@@ -78,6 +81,17 @@ def test_ranges_frozen_keeps_ranges_but_not_batchnorm() -> None:
     assert all(o.observe for o in m.modules() if isinstance(o, ActFakeQuant))
 
 
+def test_trainer_recalibration_keeps_the_trained_ranges(tmp_path) -> None:
+    """The trainer's per-epoch recalibration recomputes BatchNorm and leaves
+    the int8 ranges the network trained with."""
+    m = _qat_model()
+    recalibrate_ranges(m, _batches())
+    ranges, bn = _ranges(m), _bn_stats(m)
+    recalibrate(m, fixture(tmp_path, n=8, canvas=64), 8, batch=4)
+    assert all(torch.equal(a, b) for a, b in zip(ranges, _ranges(m), strict=True))
+    assert not all(torch.equal(a, b) for a, b in zip(bn, _bn_stats(m), strict=True))
+
+
 def test_loaded_ranges_are_continued_not_overwritten() -> None:
     trained = _qat_model()
     recalibrate_ranges(trained, _batches())
@@ -98,3 +112,17 @@ def test_no_qat_means_no_range_pass() -> None:
         yield
 
     recalibrate_ranges(Detector(TINY, 4), never())
+
+
+def test_gradient_passes_inside_the_range_and_stops_outside() -> None:
+    """Clipped straight-through: a value the int8 grid clips gets no gradient,
+    so training cannot keep inflating an activation the forward never shows."""
+    q = ActFakeQuant()
+    q.mn.fill_(0.0)
+    q.mx.fill_(2.55)
+    q.observe = False
+    x = torch.tensor([-1.0, 0.5, 2.0, 2.55, 3.0, 40.0], requires_grad=True)
+    y = q(x)
+    y.sum().backward()
+    assert torch.equal(x.grad, torch.tensor([0.0, 1.0, 1.0, 1.0, 0.0, 0.0]))
+    assert torch.allclose(y.detach(), torch.tensor([0.0, 0.5, 2.0, 2.55, 2.55, 2.55]))

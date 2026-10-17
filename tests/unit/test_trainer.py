@@ -8,7 +8,15 @@ import pytest
 import torch
 
 from mayaku.data import DEFAULT_AUG
-from mayaku.engine.trainer import BASE, EMA, build_optimizer, cosine, param_groups, set_lr, train
+from mayaku.engine.trainer import (
+    BASE,
+    EMA,
+    build_optimizer,
+    cosine,
+    param_groups,
+    set_lr,
+    train,
+)
 from mayaku.model import TINY, Detector, enable_qat
 
 from ._coco_fixture import fixture
@@ -73,3 +81,5 @@ def test_tiny_run_learns(tmp_path, qat) -> None:
     assert records[-1]["cls"] < records[0]["cls"] / 1.5
     assert records[-1]["box"] < records[0]["box"] / 1.5
     assert (tmp_path / "run" / "best.pt").exists()
+    # the int8 check is logged with QAT and only then
+    assert ("int8_gap" in records[-1]) == qat

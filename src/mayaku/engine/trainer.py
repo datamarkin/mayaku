@@ -45,7 +45,7 @@ from mayaku.engine.distributed import all_reduce_dict, get_rank, get_world_size,
 from mayaku.engine.evaluation import STATS, evaluate, summary
 from mayaku.engine.loss import DetectionLoss
 from mayaku.inference.decode import DEPLOY, Decode
-from mayaku.model.quant import is_qat, ranges_frozen, recalibrate_ranges
+from mayaku.model.quant import fake_quant_disabled, is_qat, ranges_frozen
 from mayaku.utils.checkpoint import SIDECAR_KEY, check_sidecar, save_checkpoint
 
 STATE = "state.pt"   # the resumable training state `train` writes to `out`
@@ -87,10 +87,14 @@ class Recipe:
     cls_loss: str = "bce"           # bce | vfl
     ema_decay: float = 0.9999
     ema_tau: float = 2000.0
-    # Unaugmented training images the EMA's BatchNorm statistics (and, with
-    # QAT, its int8 activation ranges) are recomputed over before every
-    # evaluation and every checkpoint. 0 disables it. See `recalibrate`.
+    # Unaugmented training images the EMA's BatchNorm statistics are
+    # recomputed over before every evaluation and every checkpoint. 0
+    # disables it. See `recalibrate`.
     recalibrate_images: int = 640
+    # QAT only: every evaluation also scores the first this many val images
+    # with the int8 simulation on and off and logs float AP minus int8 AP
+    # (`int8_gap`), warning past INT8_GAP_WARN. 0 disables it.
+    int8_check_images: int = 500
     # TaskAligned alignment exponent beta in s^alpha * u^beta (TOOD's 6.0).
     # Lower values let lower-IoU small positives rank.
     tal_beta: float = 6.0
@@ -282,10 +286,24 @@ class _Unaugmented(Dataset):
         return to_tensor(img)
 
 
+# float AP minus int8 AP on the check images above which training warns
+INT8_GAP_WARN = 0.01
+
+
+def int8_gap(model, val_ds, n, **kw):
+    """Float AP minus int8 AP of a QAT model on the first `n` val images:
+    the same weights, BatchNorm and ranges, the int8 simulation off and on.
+    Watches what the scored and exported number costs against the float
+    network, so a range that collapses a level shows the epoch it happens."""
+    q = evaluate(model, val_ds, limit=n, **kw)["AP"]
+    with fake_quant_disabled(model):
+        f = evaluate(model, val_ds, limit=n, **kw)["AP"]
+    return f - q
+
+
 @torch.no_grad()
 def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
-    """Recompute BatchNorm running statistics, then int8 activation ranges,
-    for the model's own weights.
+    """Recompute BatchNorm running statistics for the model's own weights.
 
     The EMA averages weights over the last ~tau steps, but its BatchNorm
     buffers describe the live model's current weights; at a high learning
@@ -300,11 +318,17 @@ def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
     checkpoint, so the best checkpoint is chosen on honest numbers and
     `fuse()` folds honest statistics into the deployed conv bias.
 
-    With QAT the activation ranges are statistics of the weights in the same
-    way, so they follow: BatchNorm is recomputed with the ranges frozen, then
-    the ranges are recomputed with BatchNorm in eval mode (`recalibrate_ranges`),
-    which is exactly how evaluation and export will run. Without QAT the
-    second pass does not happen.
+    With QAT the int8 activation ranges are left as trained: the EMA copies
+    them from the live model every step, and they are the ranges the network
+    learned to work within. BatchNorm is recomputed with them frozen.
+    Recomputing them here as well, from the min / max of unaugmented images,
+    is wrong: a few images drive one deep channel far past anything a mosaic
+    batch produces (one P5 channel reached 4135 against a median of 14), the
+    per-tensor range follows that channel, and every other channel of the
+    tensor is left with a level or two. On a COCO nano checkpoint that
+    cost 4.8 AP (27.0 against 31.8 in float, AP-L 34.1 against 41.4) and made
+    the scored AP swing by up to 8 points between epochs; the trained ranges
+    score 31.6.
     """
     if n <= 0:
         return
@@ -312,7 +336,6 @@ def recalibrate(model, train_ds, n, batch=16, device="cpu", workers=4):
                         num_workers=workers, pin_memory=device.startswith("cuda"))
     with ranges_frozen(model):
         update_bn((batch_to(imgs, device) for imgs in loader), model)
-    recalibrate_ranges(model, (batch_to(imgs, device) for imgs in loader))
 
 
 def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
@@ -509,14 +532,19 @@ def train(model, train_ds, val_ds, r=BASE, device="cpu", out=None,
         if val_ds is not None and ((epoch + 1) % eval_every == 0 or epoch == r.epochs - 1):
             rec.update(evaluate(ema.model, val_ds, device=device,
                                 batch=r.batch, workers=workers, d=r.decode))
+            if qat and r.int8_check_images > 0:
+                rec["int8_gap"] = int8_gap(ema.model, val_ds, r.int8_check_images, device=device,
+                                           batch=r.batch, workers=workers, d=r.decode)
             if rec["AP"] > best["AP"]:
                 best = {"epoch": epoch, **{k: rec[k] for k in STATS}}
                 if out:
                     save_checkpoint(ema.model, os.path.join(out, "best.pt"), sidecar)
                     with open(os.path.join(out, "best.json"), "w") as f:
                         json.dump(best, f, indent=2)
-            log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s"
-                % (epoch, rec["box"], rec["cls"], rec["dfl"], summary(rec)))
+            gap = rec.get("int8_gap")
+            log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s" % (epoch, rec["box"], rec["cls"], rec["dfl"], summary(rec))
+                + ("" if gap is None else "  int8 vs float %+.1f AP%s"
+                   % (-100 * gap, "  WARNING" if gap > INT8_GAP_WARN else "")))
         else:
             log("epoch %3d  box %.3f cls %.3f dfl %.3f  %s, %s left"
                 % (epoch, rec["box"], rec["cls"], rec["dfl"],

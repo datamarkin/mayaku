@@ -95,10 +95,10 @@ def ground_truth(ann_path):
         return COCO(ann_path)
 
 
-def coco_ap(ann_path, results, iou_type="bbox", k=0):
+def coco_ap(ann_path, results, iou_type="bbox", k=0, image_ids=None):
     """COCO metrics for a list of result records; `iou_type` is bbox, segm or
     keypoints (with `k` keypoints per instance). Keypoints report ten
-    numbers, not twelve."""
+    numbers, not twelve. `image_ids` scores those images only."""
     from pycocotools.cocoeval import COCOeval
 
     stats = KPT_STATS if iou_type == "keypoints" else STATS
@@ -107,6 +107,8 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
     gt = ground_truth(ann_path)
     with contextlib.redirect_stdout(io.StringIO()):
         e = COCOeval(gt, gt.loadRes(results), iou_type)
+        if image_ids is not None:
+            e.params.imgIds = sorted(image_ids)
         if iou_type == "keypoints":
             # pycocotools defaults its OKS sigmas to the 17 COCO person
             # keypoints; a model with a different K needs its own, the same
@@ -118,10 +120,11 @@ def coco_ap(ann_path, results, iou_type="bbox", k=0):
     return dict(zip(stats, [float(v) for v in e.stats], strict=True))
 
 
-def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
+def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None, image_ids=None):
     """COCO metrics for `(image_id, Detections)` pairs: box AP, plus mask AP
     under "segm_" and keypoint AP under "kpt_" when the model has those heads.
-    Keypoints are scored against `kpt_ann_path` when the file is separate."""
+    Keypoints are scored against `kpt_ann_path` when the file is separate.
+    `image_ids` scores those images only, not the whole file."""
     results, segm, kpts = [], [], []
     for image_id, det in detections:
         results += to_coco(det, image_id, cat_ids)
@@ -129,28 +132,32 @@ def score(ann_path, detections, cat_ids, seg=False, kpt=0, kpt_ann_path=None):
             segm += to_coco_segm(det, image_id, cat_ids)
         if kpt:
             kpts += to_coco_kpt(det, image_id, cat_ids)
-    out = coco_ap(ann_path, results)
+    out = coco_ap(ann_path, results, image_ids=image_ids)
     if seg:
-        out.update({"segm_" + k: v for k, v in coco_ap(ann_path, segm, "segm").items()})
+        out.update({"segm_" + k: v for k, v in coco_ap(ann_path, segm, "segm", image_ids=image_ids).items()})
     if kpt:
         out.update({"kpt_" + k: v for k, v in
-                    coco_ap(kpt_ann_path or ann_path, kpts, "keypoints", k=kpt).items()})
+                    coco_ap(kpt_ann_path or ann_path, kpts, "keypoints", k=kpt, image_ids=image_ids).items()})
     return out
 
 
 @torch.no_grad()
-def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
+def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY, limit=None):
     """Run a model over a dataset and return the COCO metrics.
 
     The class count and `reg_max` come from the model, because the model is
     what fixed the head's channel split. The dataset is asserted against it,
     so a head and an annotation file that disagree fail here instead of
-    decoding plausible nonsense.
+    decoding plausible nonsense. `limit` runs and scores the first `limit`
+    images only.
     """
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Subset
 
     assert model.nc == dataset.nc, (model.nc, dataset.nc)
-    loader = DataLoader(dataset, batch_size=batch, shuffle=False,
+    subset = limit is not None and limit < len(dataset)
+    images = Subset(dataset, range(limit)) if subset else dataset
+    image_ids = dataset.ids[:limit] if subset else None
+    loader = DataLoader(images, batch_size=batch, shuffle=False,
                         num_workers=workers, collate_fn=collate,
                         pin_memory=device.startswith("cuda"))
     was_training = model.training
@@ -167,7 +174,7 @@ def evaluate(model, dataset, device="cpu", batch=16, workers=0, d=DEPLOY):
 
     try:
         return score(dataset.ann_path, detections(), dataset.cat_ids, seg, kpt,
-                     dataset.kpt_ann_path)
+                     dataset.kpt_ann_path, image_ids=image_ids)
     finally:
         model.train(was_training)
 
