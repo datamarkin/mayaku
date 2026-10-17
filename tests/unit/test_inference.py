@@ -180,7 +180,7 @@ def test_export_rejects_a_graph_that_drifts(predictor, tmp_path, monkeypatch) ->
     """The parity check is what stands between a broken exporter and a user."""
     import mayaku.inference.export as ex
 
-    monkeypatch.setattr(ex, "parity", lambda m, path, sidecar: (1.0, 1.0))
+    monkeypatch.setattr(ex, "parity", lambda m, path, sidecar: 1.0)
     with pytest.raises(RuntimeError, match="differ"):
         export(predictor.model, predictor.sidecar, "onnx", tmp_path / "m.onnx")
 
