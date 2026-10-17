@@ -174,3 +174,14 @@ def test_every_tensor_has_one_int8_scale_in_the_export(tmp_path) -> None:
     producers = {o: n.op_type for n in g.node for o in n.output}
     adds = [n for n in g.node if n.op_type == "Add"]
     assert adds and all("DequantizeLinear" in {producers.get(i) for i in n.input} for n in adds)
+
+
+def test_observer_takes_fp16_activations() -> None:
+    """Under autocast the observed activation is fp16 and the running range
+    fp32; the update must not depend on them matching."""
+    q = ActFakeQuant()
+    q.train()
+    for i in range(3):
+        q(torch.full((4, 8), float(i + 1)).half())
+    assert q.mn.dtype == torch.float32
+    assert abs(float(q.mx) - (0.99 * (0.99 * 1 + 0.01 * 2) + 0.01 * 3)) < 1e-5

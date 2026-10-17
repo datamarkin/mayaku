@@ -97,7 +97,8 @@ class ActFakeQuant(nn.Module):
         # the tensor; the statistics are the same, so it updates once
         if self.training and self.observe and (self._seen is None or self._seen() is not x):
             self._seen = weakref.ref(x)
-            cmn, cmx = torch.aminmax(x.detach())
+            # the running range is fp32; an autocast activation is fp16
+            cmn, cmx = (t.float() for t in torch.aminmax(x.detach()))
             if not self._inited:
                 self.mn.copy_(cmn)
                 self.mx.copy_(cmx)
