@@ -35,6 +35,7 @@ from typing import Any
 
 import torch
 
+from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import SUFFIX_TO_TARGET, target_from_suffix
 from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
@@ -104,9 +105,11 @@ def export(model: Detector, sidecar: Mapping[str, Any], target: str, path: str |
 
 
 def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -> Any:
-    """The runtime session for an artifact: called with a (B, 3, H, W) float
-    batch in [0, 1], returns the raw maps in the sidecar's output order.
-    `batch` is the batch size it was traced at (None: any)."""
+    """The runtime session for an artifact: called with a (B, 3, H, W) uint8
+    RGB batch on the host (each runtime scales it to [0, 1] where it runs),
+    returns the raw maps as tensors in the sidecar's output order, on the
+    device it ran on, possibly its own buffers until its next call. `batch`
+    is the batch size it was traced at (None: any)."""
     t = TARGETS[target_from_suffix(path)]
     precision = sidecar["export"]["precision"]
     return t.module.Session(Path(path), list(sidecar["outputs"]), precision, device)
@@ -116,15 +119,16 @@ def open_session(path: Path, sidecar: Mapping[str, Any], device: str = "auto") -
 def parity(model: Detector, path: Path, sidecar: Mapping[str, Any], seed: int = 0) -> float:
     """RMS difference between an artifact's raw maps and the Torch deploy
     model's (its int8 simulation for an int8 artifact) on one random
-    canvas-sized input, relative to the maps' RMS, with the artifact run on
+    canvas-sized image, relative to the maps' RMS, with the artifact run on
     the compute it deploys on (`_PARITY_DEVICE`, else the CPU)."""
     target = sidecar["export"]["target"]
     session = open_session(path, sidecar, _PARITY_DEVICE.get(target, "cpu"))
-    x = torch.rand(1, 3, *sidecar["canvas_hw"], generator=torch.Generator().manual_seed(seed))
+    px = torch.randint(0, 256, (1, 3, *sidecar["canvas_hw"]), dtype=torch.uint8,
+                       generator=torch.Generator().manual_seed(seed))
     with deploy_mode(model, sidecar["export"]["precision"] == "int8"):
-        ref = model.eval()(x)
-    got = session(x.numpy())
-    err = sum(float(((r.double() - torch.from_numpy(g).double()) ** 2).sum())
+        ref = model.eval()(batch_to(px, "cpu"))
+    got = session(px)
+    err = sum(float(((r.double() - g.cpu().double()) ** 2).sum())
               for r, g in zip(ref, got, strict=True))
     norm = sum(float((r.double() ** 2).sum()) for r in ref)
     return (err / max(norm, 1e-12)) ** 0.5

@@ -12,9 +12,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import numpy.typing as npt
+import torch
 
+from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
 from mayaku.inference.export.onnx import onnx_graph
 from mayaku.model import Detector
@@ -51,6 +51,6 @@ class Session:
         self.input_hw = tuple(inp.get_shape())[-2:]
         self.batch = int(inp.get_shape()[0])
 
-    def __call__(self, x: npt.NDArray[np.float32]) -> list[npt.NDArray[np.float32]]:
-        res = self._compiled([x])
-        return [res[p] for p in self._ports]
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
+        res = self._compiled([batch_to(x, "cpu").numpy()])
+        return [torch.from_numpy(res[p]) for p in self._ports]

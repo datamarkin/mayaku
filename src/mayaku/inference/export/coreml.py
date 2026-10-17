@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
+from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
 from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
@@ -96,6 +96,6 @@ class Session:
         self.input_hw = tuple(int(v) for v in shape[-2:])
         self.outputs = outputs
 
-    def __call__(self, x: npt.NDArray[np.float32]) -> list[npt.NDArray[np.float32]]:
-        out = self._model.predict({"images": x})
-        return [np.asarray(out[n], np.float32) for n in self.outputs]
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
+        out = self._model.predict({"images": batch_to(x, "cpu").numpy()})
+        return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]

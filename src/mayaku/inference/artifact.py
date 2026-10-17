@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from mayaku.inference.export import open_session
@@ -34,9 +33,9 @@ class ArtifactPredictor(Runner):
                              f"sidecar canvas {self.canvas}")
 
     def _forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        a = x.numpy().astype(np.float32)
-        a /= 255
-        step = self._session.batch or len(a)
-        runs = [self._session(a[i:i + step]) for i in range(0, len(a), step)]
-        maps = runs[0] if len(runs) == 1 else [np.concatenate(m) for m in zip(*runs, strict=True)]
-        return [torch.from_numpy(np.ascontiguousarray(m)) for m in maps]
+        step = self._session.batch or len(x)
+        if step >= len(x):
+            return self._session(x)
+        # a session may hand back its own buffers, overwritten by the next run
+        runs = [[m.clone() for m in self._session(x[i:i + step])] for i in range(0, len(x), step)]
+        return [torch.cat(m) for m in zip(*runs, strict=True)]

@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
 from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_header
@@ -104,7 +103,8 @@ def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
 
 class Session:
     """The engine on the current CUDA device, with torch tensors as its I/O
-    buffers."""
+    buffers. The maps stay on the GPU, so the decode runs there too and only
+    the final detections come back."""
 
     batch = 1
 
@@ -120,6 +120,9 @@ class Session:
         self._input = torch.empty(tuple(self._engine.get_tensor_shape(name)),
                                   dtype=torch.float32, device=self._device)
         self._ctx.set_tensor_address(name, self._input.data_ptr())
+        # the pixels cross as bytes and are scaled on the GPU (a host uint8 ->
+        # device float copy would cast on the host and send floats)
+        self._pixels = torch.empty(self._input.shape, dtype=torch.uint8, device=self._device)
         self.input_hw = tuple(self._input.shape[-2:])
         self._out = {n: torch.empty(tuple(self._engine.get_tensor_shape(n)),
                                     dtype=torch.float32, device=self._device)
@@ -128,9 +131,9 @@ class Session:
             self._ctx.set_tensor_address(n, t.data_ptr())
         self.outputs = outputs
 
-    def __call__(self, x: npt.NDArray[np.float32]) -> list[npt.NDArray[np.float32]]:
-        self._input.copy_(torch.from_numpy(x))
-        stream = torch.cuda.current_stream(self._device)
-        self._ctx.execute_async_v3(stream.cuda_stream)
-        stream.synchronize()
-        return [self._out[n].cpu().numpy() for n in self.outputs]
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
+        # no sync: work on the maps is ordered after the engine on this stream
+        self._pixels.copy_(x)
+        torch.div(self._pixels, 255, out=self._input)
+        self._ctx.execute_async_v3(torch.cuda.current_stream(self._device).cuda_stream)
+        return [self._out[n] for n in self.outputs]

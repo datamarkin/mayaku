@@ -11,9 +11,9 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import numpy.typing as npt
+import torch
 
+from mayaku.data.batch import batch_to
 from mayaku.inference.export.metadata import embed_sidecar
 from mayaku.model import Detector
 from mayaku.model.contract import export_onnx
@@ -58,5 +58,6 @@ class Session:
         # traced at a fixed batch size (1 unless exported otherwise)
         self.batch = inp.shape[0] if isinstance(inp.shape[0], int) else None
 
-    def __call__(self, x: npt.NDArray[np.float32]) -> list[npt.NDArray[np.float32]]:
-        return list(self._sess.run(self.outputs, {self._input: x}))
+    def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
+        maps = self._sess.run(self.outputs, {self._input: batch_to(x, "cpu").numpy()})
+        return [torch.from_numpy(m) for m in maps]
