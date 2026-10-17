@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mayaku.model.blocks import STRIDES, Bottleneck, ConvBN, ConvBNReLU, DenseOut, per_level, up2x
+from mayaku.model.quant import ResidualQuant
 
 
 class FPGStage(nn.Module):
@@ -42,17 +43,24 @@ class FPGStage(nn.Module):
             ConvBN(c[i], c[i + 1], 1, 2) for i in range(nl - 1)) if down else None
         self.skip = nn.ModuleList(ConvBN(c[i], c[i], 1) for i in range(nl)) if skip else None
         self.proc = nn.ModuleList(Bottleneck(c[i], 2) for i in range(nl))
+        # Each level's sum is built as conv + quantized running sum, one conv
+        # at a time, so an int8 runtime fuses every add into a convolution
+        # (see `ResidualQuant`); the upsampled term is the first running sum.
+        self.rq_up = nn.ModuleList(ResidualQuant() for _ in range(nl - 1))
+        self.rq_down = nn.ModuleList(ResidualQuant() for _ in range(nl - 1)) if down else None
+        self.rq_skip = nn.ModuleList(ResidualQuant() for _ in range(nl)) if skip else None
 
     def forward(self, xs, prev=None):
-        out = [self.same[i](xs[i]) for i in range(self.nl)]
-        for i in range(self.nl - 1):
-            out[i] = out[i] + up2x(self.up[i](xs[i + 1]))
-            if self.down is not None:
-                out[i + 1] = out[i + 1] + self.down[i](xs[i])
-        if self.skip is not None and prev is not None:
-            for i in range(self.nl):
-                out[i] = out[i] + self.skip[i](prev[i])
-        out = [F.relu(o) for o in out]
+        out = []
+        for i in range(self.nl):
+            y = self.same[i](xs[i])
+            if i < self.nl - 1:
+                y = y + self.rq_up[i](up2x(self.up[i](xs[i + 1])))
+            if self.down is not None and i > 0:
+                y = self.down[i - 1](xs[i - 1]) + self.rq_down[i - 1](y)
+            if self.skip is not None and prev is not None:
+                y = self.skip[i](prev[i]) + self.rq_skip[i](y)
+            out.append(F.relu(y))
         return [p(o) for p, o in zip(self.proc, out, strict=True)]
 
 

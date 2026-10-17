@@ -4,6 +4,7 @@ host decode the evaluator uses."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 
 import pytest
@@ -17,6 +18,7 @@ from mayaku.inference.decode import decode_sidecar
 from mayaku.inference.export import TARGETS, export
 from mayaku.inference.export.metadata import embed_sidecar, read_sidecar, strip_tensorrt_header
 from mayaku.inference.preprocess import letterbox_batch
+from mayaku.model.quant import qdq_export
 from mayaku.utils.checkpoint import build_sidecar, check_sidecar, save_checkpoint
 
 from ._coco_fixture import fixture
@@ -152,7 +154,12 @@ def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precisi
     path = predictor.export(target, tmp_path / ("m" + TARGETS[target].suffix), precision)
     a = ArtifactPredictor(path, "cpu" if target != "tensorrt" else "cuda")
     assert a.sidecar["export"] == {"target": target, "precision": precision}
-    got, want = a.batch(run[2]), predictor.batch(run[2])
+    # an int8 artifact runs the int8 graph, so it is held to the Torch int8
+    # simulation, not to the float model (on this barely trained model many
+    # detections sit at the threshold, where int8 rounding moves the count)
+    with qdq_export(predictor.model) if precision == "int8" else contextlib.nullcontext():
+        want = predictor.batch(run[2])
+    got = a.batch(run[2])
     assert all(abs(len(g) - len(w)) <= max(3, len(w) // 10) for g, w in zip(got, want, strict=True))
 
 

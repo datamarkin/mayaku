@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mayaku.model.blocks import STRIDES, ConvBN, ConvBNReLU, up2x
+from mayaku.model.quant import ResidualQuant
 
 MASK_CH = 8          # channels of the mask feature
 COORD_CH = 2         # relative-coordinate channels the host prepends
@@ -67,6 +68,9 @@ class AuxBranch(nn.Module):
         self.p3 = ConvBN(c3, width, 3)
         self.p4 = ConvBN(c4, width, 1)
         self.p5 = ConvBN(c5, width, 1)
+        # p4 and p5 arrive upsampled, so neither add can fuse into them: both
+        # are quantized, then their sum, the residual of the p3 conv
+        self.rq_p4, self.rq_p5, self.rq_sum = ResidualQuant(), ResidualQuant(), ResidualQuant()
         # two 1x1s on the same trunk output (a runtime may merge them into
         # one conv, by the same block-separability SPPFAdd relies on)
         self.mask = self.mask4 = self.mask_up = self.mask_skip = None
@@ -77,6 +81,7 @@ class AuxBranch(nn.Module):
             self.mask_up = ConvBN(width, MASK4_CH, 1)
             self.mask_skip = ConvBN(stem, MASK4_CH, 1)
             self.mask4 = nn.Conv2d(MASK4_CH, MASK_CH, 3, padding=1)
+            self.rq_mask = ResidualQuant()
         self.heat = nn.Conv2d(width, kpt + 2, 1) if kpt else None
         self.tower = None
         if arm == "tower":
@@ -99,15 +104,15 @@ class AuxBranch(nn.Module):
         feats: neck outputs fine to coarse; boxes: per-level box-tower
         outputs (unused when `arm` is "tower"); stem: the backbone's stride-4
         output (read by stride-4 masks only)."""
-        f = F.relu(self.p3(feats[0]) + up2x(self.p4(feats[1]))
-                   + up2x(up2x(self.p5(feats[2]))))
+        r = self.rq_p4(up2x(self.p4(feats[1]))) + self.rq_p5(up2x(up2x(self.p5(feats[2]))))
+        f = F.relu(self.p3(feats[0]) + self.rq_sum(r))
         per = boxes if self.tower is None else [t(x) for t, x in zip(self.tower, feats, strict=True)]
         out = []
         if self.seg:
             if self.mask4 is None:
                 m = self.mask(f)
             else:
-                m = self.mask4(F.relu(up2x(self.mask_up(f)) + self.mask_skip(stem)))
+                m = self.mask4(F.relu(self.mask_skip(stem) + self.rq_mask(up2x(self.mask_up(f)))))
             out += [m] + [k(x) for k, x in zip(self.ker, per, strict=True)]
         if self.kpt:
             out += [self.heat(f)] + [k(x) for k, x in zip(self.kp, per, strict=True)]

@@ -26,6 +26,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.fusion import fuse_conv_bn_eval, fuse_conv_bn_weights
 
+from mayaku.model.quant import ResidualQuant
+
 # The stem takes stride 4 and each of the three stages takes another factor
 # of two, so these are structural, not configurable. Everything that needs to
 # know a stride imports this rather than repeating it.
@@ -211,9 +213,10 @@ class Bottleneck(nn.Module):
         self.spatial = RepConv3x3(mid, mid, 1, act=True)
         self.expand = ConvBN(mid, c, 1)
         nn.init.zeros_(self.expand.bn.weight)
+        self.rq = ResidualQuant()          # the skip operand (int8 add fusion)
 
     def forward(self, x):
-        return F.relu(x + self.expand(self.spatial(self.reduce(x))))
+        return F.relu(self.expand(self.spatial(self.reduce(x))) + self.rq(x))
 
 
 class Stem(nn.Module):
@@ -255,6 +258,7 @@ class SPPFAdd(nn.Module):
         self.pre = ConvBNReLU(c, mid, 1)
         self.pool = nn.MaxPool2d(3, 1, 1)
         self.proj = nn.ModuleList(ConvBN(mid, c, 1) for _ in range(4))
+        self.rq = nn.ModuleList(ResidualQuant() for _ in range(3))   # running sums
 
     def forward(self, x):
         t = self.pre(x)
@@ -262,8 +266,8 @@ class SPPFAdd(nn.Module):
         p4 = self.pool(self.pool(p2))
         p6 = self.pool(self.pool(p4))
         y = self.proj[0](t)
-        for proj, scale in zip(self.proj[1:], (p2, p4, p6), strict=True):
-            y = y + proj(scale)
+        for proj, scale, rq in zip(self.proj[1:], (p2, p4, p6), self.rq, strict=True):
+            y = proj(scale) + rq(y)
         return F.relu(y)
 
 
@@ -288,8 +292,9 @@ class DenseOut(nn.Module):
         self.p2 = ConvBN(h, c, 1)
         nn.init.zeros_(self.p1.bn.weight)
         nn.init.zeros_(self.p2.bn.weight)
+        self.rq_x, self.rq_p1 = ResidualQuant(), ResidualQuant()   # x, then P1(m1) + x
 
     def forward(self, x):
         m1 = self.s1(self.reduce(x))
         m2 = self.s2(m1)
-        return F.relu(x + self.p1(m1) + self.p2(m2))
+        return F.relu(self.p2(m2) + self.rq_p1(self.p1(m1) + self.rq_x(x)))

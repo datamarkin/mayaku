@@ -117,12 +117,60 @@ def test_no_qat_means_no_range_pass() -> None:
 def test_gradient_passes_inside_the_range_and_stops_outside() -> None:
     """Clipped straight-through: a value the int8 grid clips gets no gradient,
     so training cannot keep inflating an activation the forward never shows."""
-    q = ActFakeQuant()
-    q.mn.fill_(0.0)
-    q.mx.fill_(2.55)
+    q = ActFakeQuant(symmetric=False)
+    q.load_state_dict({"mn": torch.tensor(0.0), "mx": torch.tensor(2.55)})
     q.observe = False
     x = torch.tensor([-1.0, 0.5, 2.0, 2.55, 3.0, 40.0], requires_grad=True)
     y = q(x)
     y.sum().backward()
     assert torch.equal(x.grad, torch.tensor([0.0, 1.0, 1.0, 1.0, 0.0, 0.0]))
     assert torch.allclose(y.detach(), torch.tensor([0.0, 0.5, 2.0, 2.55, 2.55, 2.55]))
+
+
+def test_symmetric_grid_is_centred_on_zero() -> None:
+    """Symmetric (the default): zero point 0, scale max|range| / 127, so a
+    one-sided range uses the positive half of the grid; affine spends the
+    whole grid on [min, max]."""
+    sym, aff = ActFakeQuant(), ActFakeQuant(symmetric=False)
+    for q in (sym, aff):
+        q.mn.fill_(0.0)
+        q.mx.fill_(2.54)
+    s, z = sym.qparams()
+    assert float(z) == 0.0 and abs(float(s) - 0.02) < 1e-7
+    s, z = aff.qparams()
+    assert float(z) == -128.0 and abs(float(s) - 2.54 / 255) < 1e-7
+
+
+def test_default_model_quantizes_symmetric_and_records_it() -> None:
+    from mayaku.model.quant import activation_scheme
+    assert activation_scheme(_qat_model()) == "symmetric"
+    assert activation_scheme(enable_qat(Detector(TINY, 4), symmetric=False)) == "affine"
+    assert activation_scheme(Detector(TINY, 4)) is None
+
+
+def test_every_tensor_has_one_int8_scale_in_the_export(tmp_path) -> None:
+    """The int8 graph quantizes each tensor once: every QuantizeLinear reading
+    one tensor has the same scale, so a runtime folds it into the producer;
+    residual adds quantize their skip operand (so they fuse into a conv)."""
+    import numpy as np
+    import onnx
+    from onnx import numpy_helper
+
+    from mayaku.model.contract import export_onnx
+    m = _qat_model()
+    recalibrate_ranges(m, _batches())
+    path = tmp_path / "m.onnx"
+    export_onnx(m.for_deploy(), str(path), (64, 64), int8=True)
+    g = onnx.load(str(path)).graph
+    consts = {i.name: numpy_helper.to_array(i) for i in g.initializer}
+    consts.update({n.output[0]: numpy_helper.to_array(n.attribute[0].t)
+                   for n in g.node if n.op_type == "Constant"})
+    scales = {}
+    for n in g.node:
+        if (n.op_type == "QuantizeLinear" and n.input[0] != "images" and n.input[1] in consts
+                and consts[n.input[1]].size == 1):
+            scales.setdefault(n.input[0], set()).add(float(np.asarray(consts[n.input[1]]).ravel()[0]))
+    assert scales and all(len(v) == 1 for v in scales.values())
+    producers = {o: n.op_type for n in g.node for o in n.output}
+    adds = [n for n in g.node if n.op_type == "Add"]
+    assert adds and all("DequantizeLinear" in {producers.get(i) for i in n.input} for n in adds)
