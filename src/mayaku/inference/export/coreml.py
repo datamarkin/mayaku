@@ -7,6 +7,12 @@ It also runs on the Neural Engine, but on an M1 Max it is slower than fp16
 (3.9 against 3.4 ms for tier n at 640x640): chips before A17 Pro / M4 have
 no faster int8 path, so the quantize steps are pure cost there. The sidecar
 sits in ``user_defined_metadata``, written before saving.
+
+The input is an image (RGB, 8 bits per channel; the 1/255 scaling happens in
+the model), so a host hands Core ML the letterboxed pixels as they are and
+Core ML converts them where the model runs. A float tensor input made the host
+write three planar floats per pixel itself first: on an M4, 0.45 ms of a
+2.1 ms int8 pipeline for tier n at 640 (0.08 ms for an image input).
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ import numpy as np
 import torch
 
 from mayaku.data.batch import batch_to
+from mayaku.data.geometry import PREPROCESS
 from mayaku.inference.export.metadata import SIDECAR_KEY, sidecar_blob
 from mayaku.model import Detector
 from mayaku.model.quant import deploy_mode
@@ -48,7 +55,8 @@ def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
     if int8:
         _register_int8_converters()
     ml = ct.convert(
-        traced, inputs=[ct.TensorType(name="images", shape=tuple(x.shape))],
+        traced, inputs=[ct.ImageType(name="images", shape=tuple(x.shape), scale=PREPROCESS["scale"],
+                                     color_layout=ct.colorlayout.RGB)],
         outputs=[ct.TensorType(name=n) for n in model.out_names], convert_to="mlprogram",
         compute_precision=ct.precision.FLOAT32 if precision == "fp32" else ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.macOS14 if int8 else ct.target.macOS13)
@@ -92,10 +100,20 @@ class Session:
 
         units = ct.ComputeUnit.CPU_ONLY if device == "cpu" else ct.ComputeUnit.ALL
         self._model = ct.models.MLModel(str(path), compute_units=units)
-        shape = self._model.get_spec().description.input[0].type.multiArrayType.shape
-        self.input_hw = tuple(int(v) for v in shape[-2:])
+        t = self._model.get_spec().description.input[0].type
+        # an image input (current exports) or a float tensor (older ones)
+        self._image = t.WhichOneof("Type") == "imageType"
+        self.input_hw = ((int(t.imageType.height), int(t.imageType.width)) if self._image
+                         else tuple(int(v) for v in t.multiArrayType.shape[-2:]))
         self.outputs = outputs
 
     def __call__(self, x: torch.Tensor) -> list[torch.Tensor]:
-        out = self._model.predict({"images": batch_to(x, "cpu").numpy()})
+        """An image-input model takes the 8-bit pixels as they are."""
+        if self._image:
+            from PIL import Image
+
+            px = x[0].permute(1, 2, 0).contiguous().numpy()
+            out = self._model.predict({"images": Image.fromarray(px, "RGB")})
+        else:
+            out = self._model.predict({"images": batch_to(x, "cpu").numpy()})
         return [torch.from_numpy(np.asarray(out[n], np.float32)) for n in self.outputs]
