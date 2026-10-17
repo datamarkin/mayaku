@@ -45,4 +45,4 @@ def letterbox_batch(images: Sequence[ImageInput], canvas: tuple[int, int]
         img, r, pad = letterbox(bgr, canvas)
         out.append(to_tensor(img))
         metas.append({"ratio": r, "pad": pad, "shape": bgr.shape[:2]})
-    return torch.stack(out), metas
+    return (out[0][None] if len(out) == 1 else torch.stack(out)), metas

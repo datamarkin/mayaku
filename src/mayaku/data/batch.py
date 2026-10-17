@@ -37,12 +37,14 @@ def seed_worker(worker_id):
 def to_tensor(img):
     """HWC BGR uint8 -> CHW RGB uint8, contiguous.
 
-    The one copy in the sample path: a horizontal flip upstream leaves a
-    reversed view, which composes with the channel reversal here into one
-    copy. Deliberately still uint8 -- a quarter of the bytes through the
-    worker, pinned memory and PCIe; `batch_to` scales on the device.
+    The one copy in the sample path: the planar transpose, the channel
+    reversal and any horizontal-flip view from upstream compose into one
+    strided copy (a quarter of the time of reversing the channels in place
+    and transposing after). Deliberately still uint8 -- a quarter of the
+    bytes through the worker, pinned memory and PCIe; `batch_to` scales on
+    the device.
     """
-    return torch.from_numpy(np.ascontiguousarray(img[:, :, ::-1])).permute(2, 0, 1)
+    return torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1)[::-1]))
 
 
 def batch_to(imgs, device):
