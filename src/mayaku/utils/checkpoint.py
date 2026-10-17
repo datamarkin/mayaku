@@ -86,7 +86,7 @@ def build_sidecar(
         "keypoints": keypoints,
         "quant": {"qat": spec["qat"],
                   "weights": "int8 per-channel symmetric",
-                  "activations": "int8 per-tensor affine"},
+                  "activations": f"int8 per-tensor {spec['activations']}" if spec["qat"] else None},
         "provenance": {"mayaku_version": getattr(mayaku, "__version__", None), "git": git_hash(),
                        **(provenance or {})},
     }
@@ -139,11 +139,22 @@ def read_deploy_checkpoint(
     """``(sidecar, config, model_state)`` from a self-describing checkpoint, in
     one deserialize. Raises ``ValueError`` for a checkpoint without a v3
     sidecar (see `check_sidecar`)."""
-    from mayaku.config import MayakuConfig
-
     sidecar, state = load_checkpoint(checkpoint_path)
     sidecar = dict(check_sidecar(sidecar, str(checkpoint_path)))
-    return sidecar, MayakuConfig.model_validate(sidecar["config"]), state
+    return sidecar, sidecar_config(sidecar), state
+
+
+def sidecar_config(sidecar: Mapping[str, Any]) -> MayakuConfig:
+    """The `MayakuConfig` a sidecar records. One written before
+    `model.qat_activations` existed trained affine activation ranges, so it
+    reads back as affine, not as today's symmetric default."""
+    from mayaku.config import MayakuConfig
+
+    cfg = dict(sidecar["config"])
+    model = dict(cfg.get("model") or {})
+    if model.get("qat") and "qat_activations" not in model:
+        model["qat_activations"] = "affine"
+    return MayakuConfig.model_validate({**cfg, "model": model})
 
 
 def select_final_weights(train_dir: Path) -> Path:

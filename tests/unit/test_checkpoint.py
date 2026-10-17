@@ -108,3 +108,15 @@ def test_select_final_weights_prefers_best(tmp_path: Path) -> None:
     assert select_final_weights(tmp_path).name == "last.pt"
     torch.save({}, tmp_path / "best.pt")
     assert select_final_weights(tmp_path).name == "best.pt"
+
+
+def test_sidecars_before_the_activation_scheme_read_back_affine() -> None:
+    """Checkpoints written before `model.qat_activations` trained affine
+    ranges; reading one must not switch it to today's symmetric default."""
+    from mayaku.utils.checkpoint import sidecar_config
+    s = _sidecar(_cfg(tier="n"))
+    assert s["quant"]["activations"] == "int8 per-tensor symmetric"
+    assert sidecar_config(s).model.qat_activations == "symmetric"
+    old = dict(s, config=dict(s["config"], model={k: v for k, v in s["config"]["model"].items()
+                                                  if k != "qat_activations"}))
+    assert sidecar_config(old).model.qat_activations == "affine"

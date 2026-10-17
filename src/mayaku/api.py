@@ -57,6 +57,7 @@ from mayaku.utils.checkpoint import (
     git_hash,
     read_deploy_checkpoint,
     select_final_weights,
+    sidecar_config,
 )
 from mayaku.utils.download import resolve_weights
 
@@ -148,7 +149,7 @@ def train(
                              "size_budget, num_epochs and overrides unset")
         state = load_state(resume)
         resumed = state[SIDECAR_KEY]
-        cfg, stem = MayakuConfig.model_validate(resumed["config"]), "resume"
+        cfg, stem = sidecar_config(resumed), "resume"
         train_dir = Path(resume) if Path(resume).is_dir() else Path(resume).parent
         run_dir = train_dir.parent if output_dir is None else Path(output_dir)
         pretrained = None

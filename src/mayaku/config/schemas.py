@@ -71,6 +71,10 @@ class ModelConfig(_BaseModel):
     `num_classes` None means "take it from the training annotations".
     `qat` trains quantization-aware, on every tier by default, so each model
     deploys in int8 as well as float; False trains float only.
+    `qat_activations` is the int8 activation scheme it trains for: symmetric
+    (the default) runs on every int8 runtime, TensorRT included; affine uses
+    the whole int8 grid on one-sided ReLU outputs, but TensorRT cannot run it.
+    Checkpoints from before this setting existed are affine.
     """
 
     tier: TierName = "n"
@@ -80,6 +84,7 @@ class ModelConfig(_BaseModel):
     aux_arm: Literal["box_tower", "tower"] = "box_tower"
     mask_stride: Literal[4, 8] = 8
     qat: bool = True
+    qat_activations: Literal["symmetric", "affine"] = "symmetric"
 
     @field_validator("qat", mode="before")
     @classmethod
@@ -111,7 +116,7 @@ class ModelConfig(_BaseModel):
         if nc is None:
             raise ValueError("model.num_classes is unset; pass num_classes")
         model = Detector(self.to_tier(), nc, canvas)
-        return enable_qat(model) if self.qat else model
+        return enable_qat(model, self.qat_activations == "symmetric") if self.qat else model
 
 
 class InputConfig(_BaseModel):

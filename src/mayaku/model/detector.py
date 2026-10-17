@@ -78,13 +78,14 @@ class Detector(nn.Module):
         from mayaku.model.aux import KERNEL_LAYOUT, MASK_CH
         from mayaku.model.kpt import sigma_values
         from mayaku.model.mask import COORD_SCALE
-        from mayaku.model.quant import is_qat
+        from mayaku.model.quant import activation_scheme, is_qat
 
         return {
             "outputs": self.out_names,
             "strides": list(STRIDES),
             "reg_max": self.cfg.reg_max,
             "qat": is_qat(self),
+            "activations": activation_scheme(self),
             "mask": {"stride": self.cfg.mask_stride, "channels": MASK_CH, "coord_scale": COORD_SCALE,
                      "kernel_layout": [list(layer) for layer in KERNEL_LAYOUT]} if self.cfg.seg else None,
             "keypoints": {"num": self.cfg.kpt, "sigmas": list(sigma_values(self.cfg.kpt))}
