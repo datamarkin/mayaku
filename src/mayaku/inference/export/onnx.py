@@ -26,12 +26,12 @@ def runnable() -> bool:
 
 
 @contextlib.contextmanager
-def onnx_graph(model: Detector, canvas: tuple[int, int], int8: bool) -> Iterator[Path]:
+def onnx_graph(model: Detector, canvas: tuple[int, int], int8: bool, batch: int = 1) -> Iterator[Path]:
     """The model as a contract-checked ONNX file in a temporary directory,
     for the runtimes that build from ONNX."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "model.onnx"
-        export_onnx(model, str(path), canvas, int8=int8)
+        export_onnx(model, str(path), canvas, batch=batch, int8=int8)
         yield path
 
 

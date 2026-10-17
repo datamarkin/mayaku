@@ -44,7 +44,10 @@ coreml = ["onnx>=1.16", "coremltools>=8.0"]
 openvino = ["onnx>=1.16", "openvino>=2024.3"]
 # TensorRT is CUDA-only and has no macOS wheels; the marker keeps a single
 # `pip install mayaku[tensorrt]` harmless there.
-tensorrt = ["onnx>=1.16", "tensorrt>=10.0; sys_platform != 'darwin'"]
+# TensorRT 11 builds strongly typed: fp16 / int8 engines need the graph in
+# fp16 first, which NVIDIA ModelOpt converts (unused on TensorRT 10).
+tensorrt = ["onnx>=1.16", "tensorrt>=10.0; sys_platform != 'darwin'",
+            "nvidia-modelopt[onnx]>=0.44; sys_platform != 'darwin'"]
 
 # The lint/type toolchain is PINNED, not floored. ruff and mypy change their
 # diagnostics between releases, and typeshed stubs change whether a third-party

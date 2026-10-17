@@ -145,7 +145,8 @@ def _runtime(target: str) -> None:
 @pytest.mark.slow
 @pytest.mark.parametrize(("target", "precision"), [
     ("onnx", "int8"), ("coreml", "fp16"), ("coreml", "int8"), ("openvino", "fp32"),
-    ("openvino", "fp16"), ("openvino", "int8"), ("tensorrt", "fp16"), ("tensorrt", "fp32"),
+    ("openvino", "fp16"), ("openvino", "int8"), ("tensorrt", "fp16"), ("tensorrt", "int8"),
+    ("tensorrt", "fp32"),
 ])
 def test_every_target_exports_and_runs(run, predictor, tmp_path, target, precision) -> None:
     """Export checks the artifact's maps against the model itself; here the

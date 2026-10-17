@@ -1,12 +1,21 @@
 """TensorRT: a serialized engine for NVIDIA GPUs, built from the ONNX graph.
 
-fp16 (the default) and fp32. An engine is specific to the GPU model and the
-TensorRT version it was built with, so build it on the machine that serves
-it. The engine format has no metadata slot, so the sidecar is length-prefixed
-in front of the engine bytes (`metadata.strip_tensorrt_header` removes it).
+fp16 (the default), int8 and fp32. An engine is specific to the GPU model and
+the TensorRT version it was built with, so build it on the machine that
+serves it. The engine format has no metadata slot, so the sidecar is
+length-prefixed in front of the engine bytes (`metadata.strip_tensorrt_header`
+removes it).
 
-int8 is not offered yet: TensorRT quantizes activations symmetrically only,
-and the trained ranges are affine (a ReLU output's range is [0, max]).
+int8 is the explicit int8 graph (the trained ranges as Q/DQ pairs, with add
+operands quantized and one scale per tensor, see `mayaku.model.quant`), so
+TensorRT runs exactly what was trained; it needs symmetric activation ranges
+(TensorRT has no zero point), the default since `model.qat_activations`.
+
+TensorRT 10 builds reduced precision from builder flags. TensorRT 11 is
+strongly typed: the flags are gone and the graph itself has to carry fp16, so
+the ONNX is converted first with NVIDIA ModelOpt AutoCast (the
+`nvidia-modelopt[onnx]` package), on a flat gray image, which converts every
+node, as TensorRT 10's fp16 flag does.
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ from mayaku.inference.export.metadata import embed_sidecar, strip_tensorrt_heade
 from mayaku.inference.export.onnx import onnx_graph
 from mayaku.model import Detector
 
-PRECISIONS = ("fp16", "fp32")
+PRECISIONS = ("fp16", "int8", "fp32")
 
 
 _WORKSPACE = 1 << 30
@@ -34,30 +43,63 @@ def runnable() -> bool:
 
 
 def write(model: Detector, path: Path, canvas: tuple[int, int], precision: str,
-          sidecar: Mapping[str, Any]) -> None:
+          sidecar: Mapping[str, Any], batch: int = 1) -> None:
+    """The engine at a fixed batch (1 for `export`, which checks it against
+    the model; a larger fixed batch for throughput)."""
     import tensorrt as trt
+
+    from mayaku.model.quant import activation_scheme
 
     if not torch.cuda.is_available():
         raise RuntimeError("building a TensorRT engine needs a CUDA GPU")
+    int8 = precision == "int8"
+    if int8 and activation_scheme(model) != "symmetric":
+        raise ValueError("TensorRT runs int8 with symmetric activation ranges only; this model "
+                         "was trained affine (train with model.qat_activations=symmetric)")
+    strongly_typed = int(trt.__version__.split(".")[0]) >= 11
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
-    network = builder.create_network(0)            # explicit batch (TensorRT >= 10)
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) if strongly_typed else 0
+    network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
-    with onnx_graph(model, canvas, int8=False) as onnx:
+    with onnx_graph(model, canvas, int8=int8, batch=batch) as onnx:
+        if strongly_typed and precision != "fp32":
+            onnx = _fp16_graph(onnx, canvas, batch)
         if not parser.parse(onnx.read_bytes()):
             errors = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
             raise RuntimeError(f"TensorRT could not parse the ONNX graph:\n{errors}")
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, _WORKSPACE)
-    if precision == "fp16":
-        config.set_flag(trt.BuilderFlag.FP16)
-    else:
-        config.clear_flag(trt.BuilderFlag.TF32)       # fp32 means fp32
+    if not strongly_typed:
+        if precision == "fp32":
+            config.clear_flag(trt.BuilderFlag.TF32)   # fp32 means fp32
+        else:
+            config.set_flag(trt.BuilderFlag.FP16)
+            if int8:
+                config.set_flag(trt.BuilderFlag.INT8)
     engine = builder.build_serialized_network(network, config)
     if engine is None:
         raise RuntimeError("TensorRT failed to build the engine; see its log above")
     path.write_bytes(bytes(engine))
     embed_sidecar(path, "tensorrt", dict(sidecar))
+
+
+def _fp16_graph(src: Path, canvas: tuple[int, int], batch: int = 1) -> Path:
+    """The ONNX graph in fp16 with fp32 inputs and outputs, for a strongly
+    typed build (TensorRT 11): ModelOpt AutoCast, calibrated on a flat gray
+    image so that every node converts. Written next to `src`."""
+    try:
+        from modelopt.onnx import autocast
+    except ImportError as e:
+        raise ImportError("TensorRT 11 builds fp16 and int8 from an fp16 ONNX graph; "
+                          "install NVIDIA ModelOpt: pip install 'nvidia-modelopt[onnx]'") from e
+    import onnx
+
+    gray = np.full((batch, 3, *canvas), 114 / 255, np.float32)
+    out = src.with_suffix(".fp16.onnx")
+    onnx.save(autocast.convert_to_mixed_precision(str(src), low_precision_type="fp16", keep_io_types=True,
+                                                  calibration_data={"images": gray}), str(out))
+    return out
 
 
 class Session:
